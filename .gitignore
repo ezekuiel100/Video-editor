@@ -1,0 +1,43 @@
+# ---- Build artifacts ----
+*.exe
+*.pdb
+*.obj
+*.o
+*.lib
+*.exp
+*.ilk
+*.bin
+
+# ---- Backups ----
+*.bak
+*.old
+*.old_*.exe
+
+# ---- Saídas geradas pelo app (export/screenshot no save_dir padrão = pasta atual) ----
+# Comente se quiser versionar alguma mídia de exemplo.
+*.mp4
+*.mov
+*.mkv
+*.png
+*.jpg
+*.jpeg
+*.gif
+# áudio temporário / extraído (normalmente vai pro TEMP do sistema, aqui por garantia)
+*.wav
+*.ogg
+AUDIO_BASE_*
+*_full.wav
+
+# ---- Projetos salvos (descomente se NÃO quiser versionar .ovp) ----
+# *.ovp
+
+# ---- OS ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- Editores / IDEs ----
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
