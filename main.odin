@@ -19,8 +19,9 @@ import "core:unicode/utf8"
 import win "core:sys/windows"
 
 // ---------- vídeo / decode ----------
-DEFAULT_VIDEO :: "C:/Users/Adm/Videos/1-2.mp4"
-AUDIO_BASE    :: "C:/Users/Adm/AppData/Local/Temp/odin_editor_audio"
+// base dos arquivos temporários (áudio/onda/frames). Preenchida no startup por init_paths()
+// a partir do %TEMP% REAL da máquina — NÃO pode ser fixa: o editor roda em qualquer usuário.
+AUDIO_BASE: string
 DEC_W   :: 640
 DEC_H   :: 360
 DEC_FPS :: f32(30)
@@ -83,6 +84,25 @@ sdf_ok: bool          // SDF carregou? (senão desenha sem shader)
 // fontes disponíveis p/ os clipes de TEXTO (índice 0 = Segoe UI = ui_font)
 TextFont :: struct { font: rl.Font, name: cstring }
 text_fonts: [dynamic]TextFont
+// --- carga das fontes de texto em 2 ESTÁGIOS (CPU na thread, GL na main) ---
+// gerar o SDF de 560 glifos a 64px custa ~300ms POR FONTE (~2.7s pelas 9) e dominava o
+// startup (o app abria em ~3.3s). text_fonts_worker faz a parte de CPU (LoadFileData/
+// LoadFontData/GenImageFontAtlas — sem GL, thread-safe); ensure_text_fonts() (main,
+// 1x/frame) sobe a textura de cada slot pronto, em ordem. O seletor de fonte só aparece
+// com len(text_fonts)>1, então a UI se ajusta sozinha enquanto carregam (~2.5s).
+SDF_SZ    :: i32(64) // tamanho-base dos atlas SDF (UI e fontes de texto)
+FONT_CP_N :: 560     // codepoints 32..591 (acentos PT-BR)
+TFontCPU :: struct {
+	glyphs: [^]rl.GlyphInfo,
+	recs:   [^]rl.Rectangle,
+	atlas:  rl.Image,
+	name:   cstring,
+	ready:  bool, // atômico: worker terminou este slot (main pode subir a textura)
+}
+tf_cpu:  [9]TFontCPU
+tf_up:   int  // (main) próximo slot a subir p/ text_fonts
+tf_done: bool // atômico: worker acabou (slots não-ready a partir daqui nunca ficarão prontos)
+tf_thr:  ^thread.Thread
 // fragment shader SDF: usa a distância (canal alpha) + derivada da tela p/ um alpha
 // anti-serrilhado independente da escala → texto sempre nítido, sem borrar no downscale
 SDF_FS : cstring : `#version 330
@@ -1651,12 +1671,114 @@ load_sdf_font :: proc(path: cstring, cp: []rune, sz: i32) -> (rl.Font, bool) {
 	return f, true
 }
 
+// thread: estágio de CPU das fontes de texto (ver comentário em tf_cpu). Preenche os slots
+// em ordem compacta (fonte que falha é pulada) e marca ready um a um — a main sobe conforme.
+text_fonts_worker :: proc() {
+	cp: [FONT_CP_N]rune
+	for i in 0 ..< len(cp) do cp[i] = rune(32 + i)
+	NAMES := []cstring{ "Arial", "Arial Black", "Impact", "Times New Roman", "Georgia", "Verdana", "Comic Sans", "Consolas", "Trebuchet" }
+	PATHS := []cstring{
+		"C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/ariblk.ttf", "C:/Windows/Fonts/impact.ttf", "C:/Windows/Fonts/times.ttf",
+		"C:/Windows/Fonts/georgia.ttf", "C:/Windows/Fonts/verdana.ttf", "C:/Windows/Fonts/comic.ttf", "C:/Windows/Fonts/consola.ttf", "C:/Windows/Fonts/trebuc.ttf",
+	}
+	n := 0
+	for p, i in PATHS {
+		dsz: i32
+		fd := rl.LoadFileData(p, &dsz)
+		if fd == nil do continue
+		g := rl.LoadFontData(fd, dsz, SDF_SZ, raw_data(cp[:]), i32(len(cp)), .SDF)
+		if g == nil { rl.UnloadFileData(fd); continue }
+		recs: [^]rl.Rectangle
+		atlas := rl.GenImageFontAtlas(g, &recs, i32(len(cp)), SDF_SZ, 0, 1)
+		rl.UnloadFileData(fd)
+		tf_cpu[n].glyphs = g; tf_cpu[n].recs = recs; tf_cpu[n].atlas = atlas; tf_cpu[n].name = NAMES[i]
+		intrinsics.atomic_store(&tf_cpu[n].ready, true)
+		n += 1
+	}
+	intrinsics.atomic_store(&tf_done, true)
+}
+
+// (main, 1x/frame) sobe a textura (GL) das fontes de texto cujo estágio de CPU terminou.
+ensure_text_fonts :: proc() {
+	for tf_up < len(tf_cpu) && intrinsics.atomic_load(&tf_cpu[tf_up].ready) {
+		e := &tf_cpu[tf_up]
+		f: rl.Font
+		f.baseSize = SDF_SZ
+		f.glyphCount = FONT_CP_N
+		f.glyphs = e.glyphs
+		f.recs = e.recs
+		f.texture = rl.LoadTextureFromImage(e.atlas)
+		rl.UnloadImage(e.atlas)
+		if f.texture.id != 0 {
+			rl.SetTextureFilter(f.texture, .BILINEAR)
+			append(&text_fonts, TextFont{ f, e.name })
+		}
+		tf_up += 1
+	}
+}
+
+// true quando não vem mais fonte nova (worker acabou e tudo pronto já subiu) — só então é
+// seguro CLAMPAR índice de fonte salvo em projeto (antes disso a fonte pode só não ter chegado).
+text_fonts_settled :: proc() -> bool {
+	return intrinsics.atomic_load(&tf_done) && (tf_up >= len(tf_cpu) || !intrinsics.atomic_load(&tf_cpu[tf_up].ready))
+}
+
+// o editor é um app GUI (compilado com -subsystem:windows, sem console). Cada ffmpeg/ffprobe
+// é um app de CONSOLE e, sem um console do PAI para herdar, o Windows abre uma JANELA PRETA
+// nova por processo (enxurrada de terminais ao importar/tocar/exportar). Solução: alocar um
+// console e ESCONDÊ-LO já — os filhos se anexam a ele (invisível) em vez de criar janelas.
+// (Se o editor foi aberto DE um terminal — ex.: -bench —, AllocConsole falha e não escondemos
+// nada: a saída segue visível no terminal, comportamento desejado no dev.)
+hide_child_consoles :: proc() {
+	if !bool(win.AllocConsole()) do return // já tinha console (ex.: aberto de um terminal) — não mexe
+	hwnd := win.GetConsoleWindow()
+	if hwnd == nil do return
+	// ShowWindow é chamado via GetProcAddress (runtime) DE PROPÓSITO: linkar User32.lib estático
+	// colide com o CloseWindow/ShowCursor que o raylib.lib já define com os mesmos nomes (LNK2005).
+	ShowWindow_t :: proc "system" (hWnd: win.HWND, nCmdShow: i32) -> win.BOOL
+	if u := win.LoadLibraryW(win.utf8_to_wstring("user32.dll")); u != nil {
+		if p := win.GetProcAddress(u, "ShowWindow"); p != nil {
+			(cast(ShowWindow_t) p)(hwnd, i32(win.SW_HIDE))
+		}
+	}
+}
+
+// resolve caminhos que dependem da MÁQUINA (não podem ser fixos no fonte): a base de temp no
+// %TEMP% real do usuário e a pasta do próprio .exe, que é inserida no INÍCIO do PATH para que
+// os "ffmpeg"/"ffprobe" chamados pelo nome resolvam para os binários EMPACOTADOS ao lado do
+// editor (assim o app funciona sem o usuário instalar/configurar ffmpeg).
+init_paths :: proc() {
+	tmp := os.get_env("TEMP", context.allocator)
+	if tmp == "" do tmp = os.get_env("TMP", context.allocator)
+	if tmp == "" do tmp = "."
+	AUDIO_BASE = fmt.aprintf("%s\\odin_editor_audio", tmp)
+
+	if exe, err := os.get_executable_path(context.temp_allocator); err == nil {
+		if cut := strings.last_index_any(exe, "\\/"); cut > 0 {
+			dir  := exe[:cut]
+			old  := os.get_env("PATH", context.temp_allocator)
+			newp := fmt.tprintf("%s;%s", dir, old)
+			win.SetEnvironmentVariableW(win.utf8_to_wstring("PATH"), win.utf8_to_wstring(newp))
+		}
+	}
+}
+
 main :: proc() {
+	hide_child_consoles() // esconde as janelas de console dos ffmpeg — ANTES de qualquer spawn
+	init_paths() // resolve %TEMP% e acha o ffmpeg empacotado — ANTES de qualquer spawn/temp
 	job_init() // antes de qualquer spawn de ffmpeg
 	rl.SetConfigFlags({ .WINDOW_RESIZABLE, .WINDOW_UNDECORATED, .MSAA_4X_HINT, .VSYNC_HINT })
 	rl.InitWindow(1280, 760, "Odin Video Editor")
 	rl.SetExitKey(.KEY_NULL) // ESC não fecha; só o botão X da barra
 	rl.MaximizeWindow()      // abre já maximizado
+	// ícone da janela/barra de tarefas em runtime (o ícone do .exe vem do recurso icon.res
+	// embutido no link). PNG embutido no binário via #load — sem depender de arquivo externo.
+	{
+		png := #load("icon.png")
+		ico := rl.LoadImageFromMemory(".png", raw_data(png), i32(len(png)))
+		rl.SetWindowIcon(ico)
+		rl.UnloadImage(ico)
+	}
 	// buffer de música GRANDE (16384 frames ≈ 341ms): o decode de vídeo ao vivo é
 	// lido do pipe do ffmpeg NA MAIN THREAD (pipe ~64KB << frame 675KB, sem decode
 	// adiantado) — um frame ocasionalmente lento bloqueia a main por dezenas/centenas
@@ -1668,11 +1790,10 @@ main :: proc() {
 	rl.InitAudioDevice()
 	rl.SetTargetFPS(60)
 
-	cp: [560]rune
+	cp: [FONT_CP_N]rune
 	for i in 0 ..< len(cp) do cp[i] = rune(32 + i)
 	// fonte SDF (signed distance field): a UI desenha 11..18px (downscale). Atlas bitmap
 	// escalado borra; SDF + shader dá texto NÍTIDO em qualquer tamanho.
-	SDF_SZ :: i32(64)
 	sdf_shader = rl.LoadShaderFromMemory(nil, SDF_FS)
 	if f, ok := load_sdf_font("C:/Windows/Fonts/segoeui.ttf", cp[:], SDF_SZ); ok {
 		ui_font = f
@@ -1701,17 +1822,12 @@ main :: proc() {
 		fx_loc_temp        = rl.GetShaderLocation(bulge_shader, "temp")
 		fx_loc_rgb         = rl.GetShaderLocation(bulge_shader, "rgb")
 	}
-	// fontes dos clipes de texto: Segoe UI (=ui_font) + um conjunto do Windows.
+	// fontes dos clipes de texto: Segoe UI (=ui_font) + um conjunto do Windows carregado
+	// em THREAD (2 estágios, ver tf_cpu) — síncrono custava ~2.7s e dominava o startup.
 	// só carrega os extras no caminho SDF (sem o shader eles sairiam borrados).
 	append(&text_fonts, TextFont{ ui_font, "Segoe UI" })
-	if sdf_ok {
-		NAMES := []cstring{ "Arial", "Arial Black", "Impact", "Times New Roman", "Georgia", "Verdana", "Comic Sans", "Consolas", "Trebuchet" }
-		PATHS := []cstring{
-			"C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/ariblk.ttf", "C:/Windows/Fonts/impact.ttf", "C:/Windows/Fonts/times.ttf",
-			"C:/Windows/Fonts/georgia.ttf", "C:/Windows/Fonts/verdana.ttf", "C:/Windows/Fonts/comic.ttf", "C:/Windows/Fonts/consola.ttf", "C:/Windows/Fonts/trebuc.ttf",
-		}
-		for p, i in PATHS do if f, ok := load_sdf_font(p, cp[:], SDF_SZ); ok do append(&text_fonts, TextFont{ f, NAMES[i] })
-	}
+	if sdf_ok do tf_thr = thread.create_and_start(text_fonts_worker)
+	else      do intrinsics.atomic_store(&tf_done, true)
 
 	st = State{ active_tab = 0, zoom = 1 }
 
@@ -1732,6 +1848,7 @@ main :: proc() {
 		if wsc && !wsc_prev do request_close()
 		wsc_prev = wsc
 		bench_wt := time.tick_now() // (bench) começo do TRABALHO do frame
+		ensure_text_fonts() // sobe (GL) as fontes de texto que o worker aprontou
 		update() // continua rodando minimizado: imports, áudio e playback seguem vivos
 		check_invariants() // debug: valida o estado da timeline pós-update (no-op no release)
 		rl.BeginDrawing()
@@ -1755,6 +1872,7 @@ main :: proc() {
 		if clips[i].job != nil do TerminateJobObject(clips[i].job, 1)
 	}
 	// 2) junta os workers GLOBAIS (seus reads já destravaram; app_closing barra novo spawn)
+	if tf_thr != nil { thread.join(tf_thr); thread.destroy(tf_thr) } // CPU puro, termina em ~2.5s no pior caso
 	if scrub_thr != nil { thread.join(scrub_thr); thread.destroy(scrub_thr) }
 	delete(scrub_buf)
 	delete(dup_buf)
@@ -6507,14 +6625,17 @@ draw_text_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 		fbx := rl.Rectangle{ x, y, cw - 2*pad, 28 }
 		rl.DrawRectangleRounded(fbx, 0.2, 4, PANEL2)
 		rl.DrawRectangleRoundedLinesEx(fbx, 0.2, 4, 1, LINE)
-		if c.text_font < 0 || c.text_font >= len(text_fonts) do c.text_font = 0
+		// só CLAMPA o índice salvo quando a carga em thread terminou — antes disso a fonte
+		// do projeto pode só não ter chegado ainda (clampar cedo resetaria a escolha).
+		if text_fonts_settled() && (c.text_font < 0 || c.text_font >= len(text_fonts)) do c.text_font = 0
+		di := c.text_font; if di < 0 || di >= len(text_fonts) do di = 0 // exibição segura durante a carga
 		la := rl.Rectangle{ fbx.x, fbx.y, 28, 28 }; ra := rl.Rectangle{ fbx.x + fbx.width - 28, fbx.y, 28, 28 }
 		txt_c("<", la.x + 14, la.y + 6, 15, hovered(la) ? TEXT : MUTED)
 		txt_c(">", ra.x + 14, ra.y + 6, 15, hovered(ra) ? TEXT : MUTED)
-		txt_c(text_fonts[c.text_font].name, fbx.x + fbx.width/2, fbx.y + 6, 13, TEXT)
+		txt_c(text_fonts[di].name, fbx.x + fbx.width/2, fbx.y + 6, 13, TEXT)
 		n := len(text_fonts)
-		if clicked(la) { c.text_font = (c.text_font - 1 + n) % n; dirty = true }
-		if clicked(ra) || clicked({ fbx.x + 28, fbx.y, fbx.width - 56, 28 }) { c.text_font = (c.text_font + 1) % n; dirty = true }
+		if clicked(la) { c.text_font = (di - 1 + n) % n; dirty = true }
+		if clicked(ra) || clicked({ fbx.x + 28, fbx.y, fbx.width - 56, 28 }) { c.text_font = (di + 1) % n; dirty = true }
 		y += 36
 	}
 	// --- tamanho ---

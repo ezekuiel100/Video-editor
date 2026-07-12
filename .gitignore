@@ -1,5 +1,9 @@
+# ---- Empacotamento / instalador (ffmpeg embutido + Setup gerado — pesado, não versionar) ----
+/dist/
+
 # ---- Build artifacts ----
 *.exe
+*.res
 *.pdb
 *.obj
 *.o
@@ -19,6 +23,7 @@
 *.mov
 *.mkv
 *.png
+!icon.png
 *.jpg
 *.jpeg
 *.gif

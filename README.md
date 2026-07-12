@@ -28,7 +28,7 @@ Editor de vídeo não-linear, escrito em **[Odin](https://odin-lang.org/)** com 
 ## Requisitos
 
 - **[Odin](https://odin-lang.org/)** — build usado no desenvolvimento: `dev-2026-06-nightly`.
-- **ffmpeg** e **ffprobe** no `PATH` — dependência dura (todo decode/probe/export passa por eles).
+- **ffmpeg** e **ffprobe** — dependência dura (todo decode/probe/export passa por eles). Ao rodar **do código-fonte**, precisam estar no `PATH`. *(O **instalador** já empacota os dois ao lado do editor — o usuário final **não** precisa instalar ffmpeg; ver [Gerar o instalador](#gerar-o-instalador).)*
 - **Windows** — usa `core:sys/windows` (diálogo de arquivo `GetOpenFileNameW`, *Job Objects* pra não deixar ffmpeg órfão).
 - **GPU NVIDIA** *(opcional)* — acelera o decode; sem ela, roda por software.
 
@@ -70,6 +70,34 @@ odin test . -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
 ```
 
 Roteiro fixo (importar → tocar → *seeks* → cortes) que mede o trabalho da main thread por frame, picos de *hitch* e RAM de pico, imprime o relatório e fecha. Use o build **release** (o `-debug` suja a medição).
+
+---
+
+## Gerar o instalador
+
+Produz um `Setup.exe` único que instala o editor com o **ffmpeg embutido** — o usuário final não precisa instalar nada.
+
+**Pré-requisitos (uma vez):**
+
+- **[Inno Setup](https://jrsoftware.org/isdl.php) 6.3+** — `winget install JRSoftware.InnoSetup`
+- **`dist/ffmpeg.exe`** e **`dist/ffprobe.exe`** — um build **GPL win64** do ffmpeg (com `nvenc`/`nvdec`/`libx264`/`libvorbis`), copiados para a pasta `dist/`.
+- **rc.exe** (Windows SDK) — compila o recurso do ícone.
+
+**Gerar (um comando faz tudo):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build-installer.ps1
+```
+
+O script compila o ícone (`icon.rc` → `icon.res`), recompila o `editor.exe` em release (sem console, com ícone), acha o `ISCC.exe` e gera o instalador em:
+
+```
+dist\Output\OdinVideoEditor-Setup.exe
+```
+
+> A cada release, suba a versão em `setup.iss` (`#define MyAppVersion "1.0.1"`) para aparecer certo em "Adicionar ou remover programas".
+
+**Licença:** o ffmpeg empacotado é **GPLv3** (por causa do `libx264`). O editor o invoca como processo separado (não linka → o editor não vira GPL), mas a redistribuição do binário exige incluir a licença (o instalador já mostra e instala `LICENSE-ffmpeg.txt`).
 
 ---
 
@@ -121,12 +149,17 @@ Também dá pra arrastar arquivos de vídeo pra dentro da janela (vão pro bin).
 ## Estrutura do projeto
 
 ```
-main.odin          # o editor inteiro
-parse_test.odin    # testes de parsing (ffprobe, multi-seleção, waveform…)
-segs_test.odin     # testes da lógica de segmentos/timeline
-bench.odin         # modo -bench (perfil da main thread)
-editor.exe         # build release
-editor_debug.exe   # build debug (invariantes ligados)
+main.odin           # o editor inteiro
+parse_test.odin     # testes de parsing (ffprobe, multi-seleção, waveform…)
+segs_test.odin      # testes da lógica de segmentos/timeline
+bench.odin          # modo -bench (perfil da main thread)
+editor.exe          # build release
+editor_debug.exe    # build debug (invariantes ligados)
+build-installer.ps1 # recompila e gera o instalador (1 comando)
+setup.iss           # script do Inno Setup (empacota editor + ffmpeg)
+make_icon.py        # gera icon.ico/icon.png (Pillow)
+icon.rc / icon.ico  # recurso do ícone embutido no .exe
+dist/               # payload do instalador (ffmpeg + Setup.exe) — não versionado
 ```
 
 O formato de projeto `.ovp` guarda a proporção do canvas, os caminhos das mídias e os segmentos (com transform e áudio).

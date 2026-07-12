@@ -1,0 +1,4 @@
+// Recurso de ícone do editor. Compilado p/ icon.res com rc.exe (Windows SDK) e passado ao
+// linker via -extra-linker-flags no build. O ID 1 (menor) é o que o Explorer usa como ícone
+// do .exe.  Regenerar icon.ico com scripts do projeto (Pillow).
+1 ICON "icon.ico"
