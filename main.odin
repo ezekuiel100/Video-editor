@@ -13,6 +13,7 @@ import "core:math"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
 import "core:thread"
 import "core:time"
 import "core:unicode/utf8"
@@ -22,6 +23,7 @@ import win "core:sys/windows"
 // base dos arquivos temporários (áudio/onda/frames). Preenchida no startup por init_paths()
 // a partir do %TEMP% REAL da máquina — NÃO pode ser fixa: o editor roda em qualquer usuário.
 AUDIO_BASE: string
+EXE_DIR: string // pasta do .exe (heap, dono) — preenchida em init_paths; base do log de diagnóstico
 DEC_W   :: 640
 DEC_H   :: 360
 DEC_FPS :: f32(30)
@@ -41,11 +43,32 @@ STREAM_FBYTES_MAX :: int(STREAM_HI_W) * int(STREAM_HI_H) * 3
 stream_hi: bool // false = Baixa (360p); true = Alta (720p). Global (estilo NLE)
 stream_dw :: proc() -> i32 { return stream_hi ? STREAM_HI_W : i32(DEC_W) }
 stream_dh :: proc() -> i32 { return stream_hi ? STREAM_HI_H : i32(DEC_H) }
+// scrub (streaming): distância MÁX (s, no tempo da fonte) que o último frame decodificado
+// pode estar do cursor antes de cair pra miniatura 96×54 do filmstrip. Era 1.5 fixo — curto
+// demais: num arrasto lento fundo num vídeo de horas cada seek custa MAIS que 1.5s de
+// movimento do playhead, então o worker nunca chegava a <1.5s e o preview vivia preso na
+// miniatura borrada. 4s mantém o frame REAL (360/720p, levemente atrás do cursor) na tela
+// enquanto o worker persegue; saltos grandes (clique-seek, arrasto rápido) passam de 4s e
+// ainda mostram a miniatura na POSIÇÃO certa. Cache (clipes curtos) decodifica ao vivo — nunca cai aqui.
+SCRUB_SHARP_S :: f32(4.0)
+// scrub: acima desta latência (ms) de um decode de scrub por SOFTWARE, o clipe migra p/
+// NVDEC no scrub (c.scrub_hw). 700ms é conservador: mesmo o pior init de cuvid (~575ms) +
+// decode (~23ms) fica abaixo, então trocar SEMPRE melhora onde dispara (codec pesado).
+// Codec leve (SW rápido) nunca cruza o limiar e segue em SW — sem disputar sessão NVDEC à toa.
+SCRUB_HW_MS :: f64(700)
 
 MAX_CLIPS     :: 12
 DBG_PLAY      :: false // LOG de diagnóstico do playback a cada frame (stderr); ligue p/ depurar
 STREAM_OVER   :: 45  // clipes acima disso decodificam ao vivo (streaming), não em RAM
 CACHE_BUDGET  :: 180 // teto de segundos mantidos no cache em RAM (~20 MB/s)
+// orçamento GLOBAL de leituras bloqueantes do pipe de vídeo POR FRAME de UI (main
+// thread): os limites de catch-up eram POR CLIPE (3 no clip_frame, 2 no dup_frame),
+// então 3+ trilhas streaming empilhadas em catch-up simultâneo somavam 9+ decodes
+// bloqueantes num único frame (>100ms: UI trava e o buffer de áudio esvazia). O teto
+// compartilhado reparte: quem não coube alcança nos frames seguintes. 6 = 2 clipes
+// em catch-up pleno; regime normal (30fps de vídeo em 60fps de UI) usa ~0.5/clipe.
+READ_BUDGET  :: 6
+g_read_budget: int // restante neste frame; reset no topo do update (só main thread)
 HEAD_SECS     :: f32(60) // áudio em 2 estágios: head de N segundos toca já, resto vem depois
 CHUNK_SECS    :: f32(300) // áudio sob demanda: seek além do coberto extrai um trecho deste tamanho ali (~1-2s; ~58MB)
 // o áudio "completo" é extraído em PARTES deste tamanho (~317MB de WAV cada):
@@ -55,11 +78,16 @@ CHUNK_SECS    :: f32(300) // áudio sob demanda: seek além do coberto extrai um
 FULL_PART     :: f32(1800)
 WAVE_PPS      :: 100  // buckets de pico por segundo na forma de onda (10ms de resolução)
 WAVE_RATE     :: 8000 // taxa (Hz, mono) do PCM extraído só p/ a onda — deve casar com o "-ar" do ffmpeg
-THUMB_W       :: 96  // miniatura do filmstrip (trilha de vídeo)
-THUMB_H       :: 54
+// miniatura: alimenta o filmstrip da trilha (desenhado pequeno) E o fallback de scrub no
+// player (streaming: esticado a ~900px). 96×54 era ok na trilha mas virava um borrão de
+// upscale ~9x no player durante o arrasto rápido; 256×144 (16:9) dá ~4x mais nitidez lá e
+// mantém o mesmo layout do filmstrip (proporção idêntica). Custo de RAM: ~110KB/miniatura
+// (pior caso ~47MB com 12 clipes streaming longos) — aceitável.
+THUMB_W       :: 256
+THUMB_H       :: 144
 THUMB_FR      :: THUMB_W * THUMB_H * 3
-THUMB_SIZE    :: "96x54"
-THUMB_VF      :: "scale=96:54:force_original_aspect_ratio=decrease,pad=96:54:(ow-iw)/2:(oh-ih)/2" // letterbox (ver DEC_VF)
+THUMB_SIZE    :: "256x144"
+THUMB_VF      :: "scale=256:144:force_original_aspect_ratio=decrease,pad=256:144:(ow-iw)/2:(oh-ih)/2" // letterbox (ver DEC_VF)
 
 // ---------- paleta (tema escuro) ----------
 BG       :: rl.Color{ 24, 26, 32, 255 }
@@ -336,7 +364,9 @@ fxlib_drag:  int = -1 // índice em fx_lib sendo arrastado do painel p/ a timeli
 // --- undo/redo: snapshot do documento (só os segmentos — Seg é struct puro, cópia
 // barata). Detecção AUTOMÁTICA: qualquer mudança em segs vira uma entrada quando a
 // interação assenta (fora de arrasto/slider), sem instrumentar cada operação. ---
-Snapshot :: struct { segs: [MAX_SEGS]Seg, nsegs: int, fxsegs: [MAX_FX]FxSeg, nfx: int }
+// g_nv/g_na entram no snapshot: sem eles, desfazer podia devolver um segmento a uma
+// trilha removida (track_row negativo = desenhado sobre a régua e inalcançável)
+Snapshot :: struct { segs: [MAX_SEGS]Seg, nsegs: int, fxsegs: [MAX_FX]FxSeg, nfx: int, nv, na: int }
 MAX_UNDO :: 100
 undo_stack: [MAX_UNDO]Snapshot
 undo_top:   int
@@ -592,6 +622,11 @@ scrub_req_c:  int = -1      // atômico: clipe a decodificar (-1 = ocioso)
 scrub_req_t:  f32           // tempo alvo (leitura possivelmente "torn"; inofensivo)
 scrub_ready:  bool          // atômico: scrub_buf tem frame pronto p/ upload (main)
 scrub_done_c: int           // clipe do frame pronto em scrub_buf
+scrub_done_t: f32           // tempo (na fonte) pedido p/ esse frame — vira c.tex_t na adoção
+scrub_done_sf:int           // bytes/frame com que o worker decodificou — a main só sobe o
+                            // frame se bater com cframe() ATUAL (troca de qualidade Alta/Baixa
+                            // no meio do decode deixava um frame de dims velhas: imagem embaralhada)
+scrub_last_ms:f64           // duração do último decode de scrub (diagnóstico, HUD F3)
 scrub_run:    bool          // atômico: worker ativo
 scrub_thr:    ^thread.Thread
 
@@ -624,6 +659,8 @@ dup_rd_buf:  []u8       // frames do catch-up lidos pela MAIN (buffers separados
 dup_req_c:   int = -1   // atômico: clipe a spawnar (-1 = ocioso); main publica por último
 dup_req_t:   f32        // tempo alvo na fonte
 dup_req_si:  int = -1   // segmento que pediu (só a main lê/escreve)
+dup_req_start: f32      // identidade do seg no pedido: start/in_off (validados na adoção —
+dup_req_inoff: f32      // remover um seg compacta o array e o MESMO índice vira OUTRO seg)
 dup_ready:   bool       // atômico: spawn terminou (main adota processo+frame e libera)
 dup_sp_ps:   os.Process // staging do spawn: processo entregue pelo worker
 dup_sp_r:    ^os.File   // staging: ponta de leitura
@@ -651,7 +688,18 @@ Clip :: struct {
 	name:   string, // basename (heap, dono)
 	name_el: cstring, // nome truncado p/ o bin, cacheado (heap, dono) — elide re-mede a fonte glifo a glifo, caro p/ rodar todo frame
 	vcodec: string, // codec do vídeo via ffprobe (heap, dono) — escolhe o decoder NVDEC
-	no_hw:  bool,   // NVDEC recusou este clipe (perfil/sessões): decodifica por software
+	no_hw:  bool,   // NVDEC recusou este clipe (perfil/sessões): decodifica por software.
+	                // NÃO é permanente: recusa por PRESSÃO de sessões é transitória —
+	                // use_cuvid re-tenta o hardware após 30s (no_hw_tk) e o sucesso cura
+	no_hw_tk: time.Tick, // quando a recusa foi marcada (janela de 30s de software)
+	scrub_hw: bool, // (worker de scrub) usar NVDEC no decode de scrub deste clipe. O scrub
+	                // decodifica em SW por padrão (num codec leve o init do cuvid > o decode),
+	                // mas migra p/ HW quando um decode SW passa de SCRUB_HW_MS: em codec pesado
+	                // (AV1/HEVC/4K) o SW leva ~1-2s/keyframe e o HW, mesmo pagando o init, ~0.6s.
+	scrub_hw_bad: bool, // o NVDEC falhou no scrub deste clipe: NUNCA mais tenta HW no scrub (evita
+	                    // religar/oscilar). CRÍTICO: uma falha de scrub NÃO chama hw_reject (que
+	                    // marcaria no_hw e derrubaria o DECODER AO VIVO p/ software = playback travado);
+	                    // só desliga o HW do scrub. O decoder ao vivo tem seu próprio caminho hw/sw.
 	aid:    int,    // id único p/ nomear o áudio temporário
 	dur:    f32,    // duração total da fonte (s)
 	vw, vh: i32,    // dimensões de EXIBIÇÃO da fonte (já corrigidas por rotação); 0 = desconhecido. Autodetecta proj_ar
@@ -723,8 +771,13 @@ Clip :: struct {
 	live_ps:   os.Process,
 	live_r:    ^os.File,
 	live_on:   bool,
+	live_hw:   bool, // o decoder ao vivo ATUAL é NVDEC (hardware)? p/ distinguir um EOF
+	                 // REAL de uma recusa do NVDEC no meio do stream (fallback p/ software)
 	live_base: f32, // -ss atual (segundos)
 	live_frame:int, // frames lidos desde o respawn
+	tex_t:     f32, // tempo (s, na fonte) do frame ATUALMENTE em c.tex — o draw usa p/
+	                // saber se o frame mostrado está longe do alvo (scrub/seek em voo)
+	                // e cair pra miniatura do ponto certo em vez de congelar no velho
 	eof_at:    f32, // fim REAL do stream (s), visto ao ler 0 frames; 0 = desconhecido.
 	                // A duração do container (ffprobe) pode passar dos frames reais —
 	                // sem isto, o fim do clipe respawnava o ffmpeg em loop p/ sempre.
@@ -906,6 +959,55 @@ job_init :: proc() {
 	}
 }
 
+// ---------- log de diagnóstico (arquivo, ligado por F4) ----------
+// Grava eventos do decoder com timestamp (ms desde o start da captura) num arquivo ao lado
+// do .exe — p/ depurar problemas que só aparecem em USO REAL (travadinha no playback, scrub
+// preso na miniatura) e que as medições isoladas do ffmpeg não revelam. F4 liga (zera o
+// arquivo) / desliga. Thread-safe (workers de decode E a main gravam) via mutex.
+dbg_on:   bool // atômico: capturando
+dbg_f:    ^os.File
+dbg_mtx:  sync.Mutex
+dbg_t0:   time.Tick
+dbg_hb_t: time.Tick // último heartbeat de estado (STATE) durante o playback
+dbg_vframes: int // frames de vídeo streaming que subiram p/ a textura desde o último heartbeat (fps REAL do vídeo)
+dbg_thumb_frames: int // frames em que o draw mostrou a MINIATURA durante o playback (flash borrado) desde o HB
+dbg_path: string // caminho do log (heap, dono) — mostrado no toast
+
+dbg_toggle :: proc() {
+	if intrinsics.atomic_load(&dbg_on) {
+		intrinsics.atomic_store(&dbg_on, false)
+		sync.mutex_lock(&dbg_mtx)
+		if dbg_f != nil { os.flush(dbg_f); os.close(dbg_f); dbg_f = nil }
+		sync.mutex_unlock(&dbg_mtx)
+		set_toast("Diagnóstico PARADO (log salvo)")
+		return
+	}
+	dir := EXE_DIR != "" ? EXE_DIR : "."
+	if dbg_path == "" do dbg_path = fmt.aprintf("%s\\decoder_log.txt", dir)
+	f, e := os.open(dbg_path, os.O_WRONLY | os.O_CREATE | os.O_TRUNC)
+	if e != nil { set_toast("Falha ao abrir o log de diagnóstico"); return }
+	sync.mutex_lock(&dbg_mtx); dbg_f = f; sync.mutex_unlock(&dbg_mtx)
+	dbg_t0 = time.tick_now()
+	intrinsics.atomic_store(&dbg_on, true)
+	dbg("INICIO", "captura ligada")
+	set_toast("Diagnóstico GRAVANDO — reproduza o problema e aperte F4")
+}
+
+// grava uma linha no log se a captura estiver ligada. `kind` é uma etiqueta curta (RESPAWN,
+// SCRUB, HWREJECT, EOF, HITCH...). Formata em buffers de STACK (bprintf) — os workers de
+// decode são threads de vida longa sem free do temp allocator, então tprintf vazaria ali.
+dbg :: proc(kind: string, format: string, args: ..any) {
+	if !intrinsics.atomic_load(&dbg_on) do return
+	ms := time.duration_milliseconds(time.tick_diff(dbg_t0, time.tick_now()))
+	hb: [64]u8;  hdr  := fmt.bprintf(hb[:], "[%10.1f] %-8s ", ms, kind)
+	bb: [256]u8; body := fmt.bprintf(bb[:], format, ..args)
+	sync.mutex_lock(&dbg_mtx); defer sync.mutex_unlock(&dbg_mtx)
+	if dbg_f == nil do return
+	os.write_string(dbg_f, hdr)
+	os.write_string(dbg_f, body)
+	os.write_string(dbg_f, "\n")
+}
+
 // cria um Job Object com KILL_ON_JOB_CLOSE (mata os processos quando o último handle
 // fecha — no fim normal via clip_close, ou no crash pela morte do processo dono).
 make_kill_job :: proc() -> win.HANDLE {
@@ -925,6 +1027,42 @@ make_kill_job :: proc() -> win.HANDLE {
 tame_process :: proc(c: ^Clip, p: os.Process, bg: bool) {
 	if c.job != nil do AssignProcessToJobObject(c.job, win.HANDLE(p.handle))
 	if bg do SetPriorityClass(win.HANDLE(p.handle), win.BELOW_NORMAL_PRIORITY_CLASS)
+}
+
+// FECHAMENTO INSTANTÂNEO. O teardown "educado" (juntar todas as threads) era lento por 3
+// motivos: o worker de fontes SDF (`tf_thr`) é CPU puro e não checa `stop` -> o join podia
+// esperar ~2.5s; cada ffmpeg de fundo só morria no polling de 50ms do `audio_extract_wait`,
+// somando centenas de ms por vários clipes; e o `CloseAudioDevice`/`CloseWindow` do raylib
+// desmontava WASAPI+GL (~100-200ms). Nada disso é necessário: o SO recupera RAM/GL/threads/
+// áudio ao sair. Aqui só matamos todo ffmpeg de uma vez (libera os handles dos temporários),
+// soltamos os handles de áudio do raylib, apagamos os temporários e saímos.
+// NÃO liberamos (delete) nenhum buffer: um worker ainda pode estar escrevendo nele — como
+// não liberamos nada, não há use-after-free; o os.exit encerra as threads em bloco.
+close_now :: proc() {
+	intrinsics.atomic_store(&app_closing, true) // barra qualquer novo spawn de ffmpeg
+	intrinsics.atomic_store(&scrub_run, false)
+	// 1) mata TODO ffmpeg em voo -> solta os handles dos temporários que ele escreve
+	for i in 0 ..< nclips {
+		intrinsics.atomic_store(&clips[i].stop, true)
+		if clips[i].job != nil do TerminateJobObject(clips[i].job, 1)
+	}
+	if export_job != nil do TerminateJobObject(export_job, 1)
+	// 2) solta os handles de áudio do raylib -> libera o temporário que cada stream toca
+	for i in 0 ..< nclips do if clips[i].has_audio do rl.UnloadMusicStream(clips[i].music)
+	for i in 0 ..< MAX_SEGS do if spv[i].ok do rl.UnloadMusicStream(spv[i].music)
+	// 3) apaga os temporários deste processo (os mesmos que clip_close/spv_release removiam)
+	for i in 0 ..< nclips {
+		c := &clips[i]
+		if c.aud_path == "" do continue // slot vazio/tombstone (já limpo) ou imagem sem áudio
+		os.remove(c.aud_path)
+		os.remove(c.aud_head)
+		os.remove(c.aud_ck[0])
+		os.remove(c.aud_ck[1])
+		os.remove(part_path(c, 0)) // OGG completo
+	}
+	for i in 0 ..< MAX_SEGS do if spv[i].path != "" do os.remove(spv[i].path)
+	// 4) sai — sem joins, sem desmontar o raylib; Jobs KILL_ON_JOB_CLOSE varrem o que escapou
+	os.exit(0)
 }
 
 LANE_X :: 128 // largura do cabeçalho das trilhas
@@ -1756,6 +1894,7 @@ init_paths :: proc() {
 	if exe, err := os.get_executable_path(context.temp_allocator); err == nil {
 		if cut := strings.last_index_any(exe, "\\/"); cut > 0 {
 			dir  := exe[:cut]
+			EXE_DIR = strings.clone(dir) // dono; usado p/ achar o log de diagnóstico ao lado do .exe
 			old  := os.get_env("PATH", context.temp_allocator)
 			newp := fmt.tprintf("%s;%s", dir, old)
 			win.SetEnvironmentVariableW(win.utf8_to_wstring("PATH"), win.utf8_to_wstring(newp))
@@ -1763,9 +1902,52 @@ init_paths :: proc() {
 	}
 }
 
+// STARTUP: apaga temporários ÓRFÃOS — arquivos "odin_editor_audio_*" no %TEMP% cujo PID
+// (embutido no nome) pertence a um processo que NÃO existe mais. São lixo de fechamentos
+// por CRASH (o fechamento normal via close_now já limpa os do próprio PID). NÃO toca nos
+// de um PID vivo: pode ser OUTRA instância do editor rodando agora. Roda depois do
+// init_paths (precisa de AUDIO_BASE) e antes de qualquer spawn/temp. %TEMP% é por-usuário,
+// então todo arquivo aqui é nosso (mesmo usuário) — sem risco de acesso negado no OpenProcess.
+sweep_orphan_temps :: proc() {
+	if AUDIO_BASE == "" do return
+	slash := strings.last_index(AUDIO_BASE, "\\")
+	if slash < 0 do return
+	dir := AUDIO_BASE[:slash] // o %TEMP% (FindFirstFileW devolve só o NOME do arquivo, sem pasta)
+	fd: win.WIN32_FIND_DATAW
+	h := win.FindFirstFileW(win.utf8_to_wstring(fmt.tprintf("%s_*", AUDIO_BASE)), &fd)
+	if h == win.INVALID_HANDLE_VALUE do return
+	defer win.FindClose(h)
+	PREFIX :: "odin_editor_audio_" // nome = PREFIX + <pid> + "_..." (ver os aprintf de aud_path/spv/box/fx)
+	for {
+		if fd.dwFileAttributes & win.FILE_ATTRIBUTE_DIRECTORY == 0 { // ignora subpastas
+			name := win.wstring_to_utf8(win.wstring(raw_data(fd.cFileName[:])), -1) or_else ""
+			if strings.has_prefix(name, PREFIX) {
+				rest := name[len(PREFIX):]
+				e := 0
+				for e < len(rest) && rest[e] >= '0' && rest[e] <= '9' do e += 1 // dígitos do PID
+				if pid, ok := strconv.parse_int(rest[:e], 10); ok && pid > 0 && !pid_alive(u32(pid)) {
+					os.remove(fmt.tprintf("%s\\%s", dir, name))
+				}
+			}
+		}
+		if !win.FindNextFileW(h, &fd) do break
+	}
+}
+
+// existe um processo com esse PID? OpenProcess devolve nil se o PID não corresponde a
+// processo nenhum -> órfão seguro p/ apagar. Se corresponde (editor vivo, ou PID reciclado
+// p/ outro programa), MANTÉM o arquivo — conservador: nunca apaga o de uma instância viva.
+pid_alive :: proc(pid: u32) -> bool {
+	h := win.OpenProcess(win.PROCESS_QUERY_LIMITED_INFORMATION, win.FALSE, win.DWORD(pid))
+	if h == nil do return false
+	win.CloseHandle(h)
+	return true
+}
+
 main :: proc() {
 	hide_child_consoles() // esconde as janelas de console dos ffmpeg — ANTES de qualquer spawn
 	init_paths() // resolve %TEMP% e acha o ffmpeg empacotado — ANTES de qualquer spawn/temp
+	sweep_orphan_temps() // varre o %TEMP%: apaga temporários de PIDs mortos (lixo de crashes antigos)
 	job_init() // antes de qualquer spawn de ffmpeg
 	rl.SetConfigFlags({ .WINDOW_RESIZABLE, .WINDOW_UNDECORATED, .MSAA_4X_HINT, .VSYNC_HINT })
 	rl.InitWindow(1280, 760, "Odin Video Editor")
@@ -1849,42 +2031,46 @@ main :: proc() {
 		wsc_prev = wsc
 		bench_wt := time.tick_now() // (bench) começo do TRABALHO do frame
 		ensure_text_fonts() // sobe (GL) as fontes de texto que o worker aprontou
+		pu := prof_beg(.Update)
 		update() // continua rodando minimizado: imports, áudio e playback seguem vivos
+		prof_end(.Update, pu)
 		check_invariants() // debug: valida o estado da timeline pós-update (no-op no release)
 		rl.BeginDrawing()
 		if !rl.IsWindowMinimized() {
 			rl.ClearBackground(BG)
-			draw()
+			pd := prof_beg(.Draw); draw(); prof_end(.Draw, pd)
+			prof_hud() // HUD do profiler por cima de tudo (no-op se F3 desligado)
 		}
+		prof_tick()
 		// (bench) trabalho = update+draw, SEM o vsync do EndDrawing; no-op sem -bench
-		bench_frame(time.duration_milliseconds(time.tick_diff(bench_wt, time.tick_now())))
+		work_ms := time.duration_milliseconds(time.tick_diff(bench_wt, time.tick_now()))
+		bench_frame(work_ms)
+		// TEMPO REAL entre frames apresentados (inclui vsync/GPU/swap — o que work_ms NÃO pega).
+		// É ISTO que o olho vê como travadinha. 60fps liso = ~16ms; >33ms (abaixo de 30fps) = engasgo.
+		// Ignora >300ms (stall de sistema: modal de arrasto de janela, minimizado — não é o vídeo).
+		ft_ms := f64(rl.GetFrameTime()) * 1000
+		if st.playing && ft_ms > 33 && ft_ms < 300 do dbg("HITCH", "frame APRESENTADO em %.0fms (%.0ffps) — work=%.0fms (o resto foi vsync/GPU) ph=%.1fs", ft_ms, 1000/ft_ms, work_ms, st.playhead)
+		// heartbeat a cada 0.5s de playback: estado do decoder + FPS REAL do vídeo (quantos frames
+		// NOVOS subiram/s) e o present delta. Se vfps cai bem abaixo de 30, o VÍDEO trava (decode
+		// não acompanha), mesmo com a UI lisa. Captura o comportamento contínuo sem evento discreto.
+		if intrinsics.atomic_load(&dbg_on) && st.playing && time.duration_milliseconds(time.tick_diff(dbg_hb_t, time.tick_now())) > 500 {
+			dt := time.duration_seconds(time.tick_diff(dbg_hb_t, time.tick_now()))
+			vfps := dt > 0 ? f64(dbg_vframes) / dt : 0
+			thumbf := dbg_thumb_frames
+			dbg_hb_t = time.tick_now(); dbg_vframes = 0; dbg_thumb_frames = 0
+			if vs := view_seg(); vs >= 0 {
+				c := seg_src(vs); lt := seg_local(vs, st.playhead)
+				dbg("STATE", "ph=%.1fs clip='%s' live=%v hw=%v no_hw=%v vfps=%.0f(need~30) present=%.0fms atraso=%.2fs miniatura_flashes=%d work=%.0fms",
+					st.playhead, c.name, c.live_on, c.live_hw, c.no_hw, vfps, ft_ms, lt - c.tex_t, thumbf, work_ms)
+			}
+		}
 		rl.EndDrawing() // sempre: é aqui que o raylib faz o poll de eventos
 		free_all(context.temp_allocator)
 	}
 
-	// 1) sinaliza fechamento e MATA todo ffmpeg em voo (destrava os os.read bloqueantes dos
-	//    workers) ANTES de juntar qualquer thread. TerminateJobObject mata os membros mas
-	//    MANTÉM o handle válido (clip_close ainda fecha o job). app_closing impede re-spawn.
-	intrinsics.atomic_store(&app_closing, true)
-	intrinsics.atomic_store(&scrub_run, false)
-	for i in 0 ..< nclips {
-		intrinsics.atomic_store(&clips[i].stop, true)
-		if clips[i].job != nil do TerminateJobObject(clips[i].job, 1)
-	}
-	// 2) junta os workers GLOBAIS (seus reads já destravaram; app_closing barra novo spawn)
-	if tf_thr != nil { thread.join(tf_thr); thread.destroy(tf_thr) } // CPU puro, termina em ~2.5s no pior caso
-	if scrub_thr != nil { thread.join(scrub_thr); thread.destroy(scrub_thr) }
-	delete(scrub_buf)
-	delete(dup_buf)
-	delete(dup_rd_buf)
-	for i in 0 ..< MAX_SEGS do dup_release(i) // mata decoders das vistas dup e libera texturas
-	if spv_thr != nil { thread.join(spv_thr); thread.destroy(spv_thr) } // espera o render em voo
-	for i in 0 ..< MAX_SEGS do spv_release(i)
-	// 3) fecha cada clipe (junta as threads do clipe, fecha o job, libera recursos)
-	for i in 0 ..< nclips do clip_close(&clips[i])
-	if g_job != nil do win.CloseHandle(g_job) // KILL_ON_JOB_CLOSE varre o que sobrou
-	rl.CloseAudioDevice()
-	rl.CloseWindow()
+	// Fechamento instantâneo: mata todo ffmpeg, solta os handles de áudio, apaga os
+	// temporários e sai. Sem joins de thread nem teardown do raylib (o SO recupera tudo).
+	close_now()
 }
 
 // guarda uma CÓPIA própria da mensagem: rl.TextFormat cicla só 4 buffers
@@ -2018,9 +2204,18 @@ cuvid_of :: proc(codec: string) -> string {
 
 // decoder NVDEC a usar p/ o clipe ("" = software)
 use_cuvid :: proc(c: ^Clip) -> string {
-	if c.no_hw do return ""
+	if c.no_hw {
+		// recusa por PRESSÃO de sessões (muitos streams NVDEC ao mesmo tempo) é
+		// transitória: depois de 30s tenta o hardware de novo — o sticky antigo ia
+		// desligando a GPU clipe a clipe conforme o uso e a sessão degradava p/
+		// software sem volta. Codec realmente não-suportado só re-falha a cada 30s
+		// (1 spawn perdido, barato). O sucesso limpa no_hw (stream_seek/dup_open).
+		if time.duration_seconds(time.tick_diff(c.no_hw_tk, time.tick_now())) < 30 do return ""
+	}
 	return cuvid_of(c.vcodec)
 }
+// marca a recusa do NVDEC com carimbo de tempo (janela de 30s de software)
+hw_reject :: proc(c: ^Clip) { c.no_hw = true; c.no_hw_tk = time.tick_now(); dbg("HWREJECT", "clip='%s' codec=%s -> no_hw por 30s (decoder AO VIVO passa a decodificar por SOFTWARE)", c.name, c.vcodec) }
 
 // ---------- importação (assíncrona) ----------
 // soma de segundos em cache (só clipes já-decididos e não-streaming)
@@ -2377,7 +2572,7 @@ import_worker :: proc(c: ^Clip) {
 			_ = os.process_kill(c.dec_ps)
 			_, _ = os.process_wait(c.dec_ps)
 			os.close(c.dec_r)
-			c.no_hw = true
+			hw_reject(c)
 			if !cache_dec_start(c) { intrinsics.atomic_store(&c.failed, true); intrinsics.atomic_store(&c.probed, true); return }
 			ok0 = clip_read_into(c, 0)
 		}
@@ -2470,8 +2665,13 @@ wave_peak :: proc(c: ^Clip, t0, t1: f32) -> f32 {
 	i0 := clamp(int(t0 * WAVE_PPS), 0, n - 1)
 	i1 := clamp(int(t1 * WAVE_PPS), 0, n - 1)
 	if i1 < i0 do i1 = i0
+	// amostra no MÁX ~8 buckets no intervalo: numa coluna de 2px o pico de 8 amostras
+	// é visualmente idêntico ao de milhares. Sem o passo, zoom-out num clipe de HORAS
+	// varria centenas de milhares de buckets POR COLUNA → timeline a 50ms/frame com
+	// vários clipes longos (o desenho já era clampado ao visível, a VARREDURA não era).
+	step := max(1, (i1 - i0) / 8)
 	m: f32 = 0
-	for i in i0 ..= i1 do if c.wave[i] > m do m = c.wave[i]
+	for i := i0; i <= i1; i += step do if c.wave[i] > m do m = c.wave[i]
 	return m
 }
 
@@ -2523,7 +2723,7 @@ thumb_decode :: proc(c: ^Clip, t: f32, dst: []u8) -> bool {
 		_, _ = os.process_wait(p)
 		if total == THUMB_FR do return true
 		if hw == "" do return false
-		c.no_hw = true // NVDEC recusou: refaz por software
+		hw_reject(c) // NVDEC recusou: refaz por software
 	}
 }
 
@@ -2533,7 +2733,9 @@ thumb_decode :: proc(c: ^Clip, t: f32, dst: []u8) -> bool {
 decode_thumbs :: proc(c: ^Clip) {
 	if c.dur <= 0 do return
 	if intrinsics.atomic_load(&c.stop) do return // fechando: não gera miniaturas (spawn de ffmpeg)
-	nt := c.streaming ? clamp(int(c.dur / 5) + 1, 1, 24) : clamp(int(c.dur / 1.5) + 1, 1, 80)
+	// streaming: 1 miniatura/spawn de ffmpeg — teto 36 (era 24) adensa o fallback de scrub
+	// (num vídeo de 1h: 1 a cada ~100s em vez de ~156s) sem estourar o tempo de geração.
+	nt := c.streaming ? clamp(int(c.dur / 5) + 1, 1, 36) : clamp(int(c.dur / 1.5) + 1, 1, 80)
 	px := make([]u8, nt * THUMB_FR)
 	got := false
 	if !c.streaming {
@@ -2781,6 +2983,10 @@ audio_load_ready :: proc() {
 			pos := play_clip >= 0 && segs[play_clip].src == i ? rl.GetMusicTimePlayed(c.music) : -1
 			resume := st.playing && play_clip >= 0 && segs[play_clip].src == i
 			rl.UnloadMusicStream(c.music); c.has_audio = false
+			// fonte tocando como SECUNDÁRIO (mix): zera mix_on — o stream novo nasce pausado
+			// em 0, e com mix_on=true o audio_secondary dava Resume ANTES de reposicionar
+			// (blip do começo do arquivo). Com false, ele re-adquire na posição certa.
+			c.mix_on = false
 			if music_open(c, part_path(c, 0)) {
 				if pos >= 0 { rl.SeekMusicStream(c.music, pos); if resume do rl.ResumeMusicStream(c.music) }
 			}
@@ -2805,7 +3011,7 @@ ensure_tex :: proc(c: ^Clip) {
 	if c.tex_ok || !intrinsics.atomic_load(&c.probed) do return
 	if c.streaming {
 		if intrinsics.atomic_load(&c.rsp_busy) do return // worker é o dono de fbuf
-		if c.live_frame > 0 do upload_tex(c, rawptr(raw_data(c.fbuf)))
+		if c.live_frame > 0 { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = c.live_base + f32(c.live_frame) / DEC_FPS }
 	} else {
 		if intrinsics.atomic_load(&c.cached) > 0 do clip_show(c, 0)
 	}
@@ -2813,24 +3019,35 @@ ensure_tex :: proc(c: ^Clip) {
 
 // ----- scrub assíncrono -----
 // decodifica 1 frame (rgb24 640x360) do clipe no tempo `t` para `buf`.
-scrub_decode_frame :: proc(c: ^Clip, t: f32, buf: []u8) -> bool {
+// fast=true (arrasto do playhead): -noaccurate_seek — entrega o KEYFRAME mais próximo
+// em vez de decodificar do keyframe até o tempo exato (até centenas de ms a menos por
+// frame; num scrub o "quase lá" é invisível e ao soltar o seek preciso corrige).
+scrub_decode_frame :: proc(c: ^Clip, t: f32, buf: []u8, fast := false) -> bool {
 	for {
-		if intrinsics.atomic_load(&app_closing) do return false // fechando: não spawna/retenta
-		hw := use_cuvid(c)
+		// checa c.stop como o dup_open: remover a mídia no MEIO de um decode de scrub
+		// liberava c.path/c.vcodec enquanto o loop retentava com eles (use-after-free)
+		if intrinsics.atomic_load(&app_closing) || intrinsics.atomic_load(&c.stop) do return false
+		// fast (arrasto): por software POR PADRÃO — p/ decodificar 1 keyframe de um codec
+		// LEVE a 360p o init do cuvid custa mais que o próprio decode, e cada spawn disputa
+		// uma sessão NVDEC com os decoders ao vivo. MAS num codec PESADO (AV1/HEVC/4K) o SW
+		// leva ~1-2s/keyframe — aí c.scrub_hw (setado no worker quando um decode SW estoura
+		// SCRUB_HW_MS) libera o NVDEC, que mesmo pagando o init entrega ~4x mais rápido.
+		hw := (fast && !c.scrub_hw) ? "" : use_cuvid(c)
 		r, w, e := os.pipe()
 		if e != nil do return false
 		tb: [32]u8
 		ss := fmt.bprintf(tb[:], "%.3f", t)
+		acc := fast ? "-noaccurate_seek" : "-accurate_seek" // opção de INPUT (antes do -i)
 		vfb: [128]u8; vf := dec_vf_of(c, vfb[:]) // mesma resolução do caminho ao vivo (c.tex)
 		sf := cframe(c)
 		sw_cmd := []string{
 			"ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "1",
-			"-ss", ss, "-i", c.path,
+			acc, "-ss", ss, "-i", c.path,
 			"-frames:v", "1", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
 		}
 		hw_cmd := []string{ // sem -resize (esticaria): letterbox pela CPU preserva o aspecto
 			"ffmpeg", "-hide_banner", "-loglevel", "error",
-			"-ss", ss, "-c:v", hw, "-i", c.path,
+			acc, "-ss", ss, "-c:v", hw, "-i", c.path,
 			"-frames:v", "1", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
 		}
 		p, pe := os.process_start(os.Process_Desc{ command = hw != "" ? hw_cmd : sw_cmd, stdout = w })
@@ -2848,7 +3065,13 @@ scrub_decode_frame :: proc(c: ^Clip, t: f32, buf: []u8) -> bool {
 		if intrinsics.atomic_load(&app_closing) do return false // fechando: não retenta por software
 		if total == sf do return true
 		if hw == "" do return false
-		c.no_hw = true // NVDEC recusou: refaz por software
+		// NVDEC recusou. No scrub (fast) NÃO chama hw_reject: isso marcaria no_hw no clipe e
+		// derrubaria o decoder AO VIVO p/ software (playback travado). Só desliga o HW do scrub
+		// deste clipe (sticky, via scrub_hw_bad) e refaz por software no próximo giro do loop.
+		if fast {
+			c.scrub_hw = false; c.scrub_hw_bad = true
+			dbg("SCRUBHW", "clip='%s' NVDEC FALHOU no scrub -> volta p/ SW (decoder ao vivo INTOCADO)", c.name)
+		} else { hw_reject(c) }
 	}
 }
 
@@ -2860,10 +3083,25 @@ scrub_worker :: proc() {
 		// canal 1: scrub do playhead (prioridade — o usuário está arrastando)
 		if !intrinsics.atomic_load(&scrub_ready) {
 			if ci := intrinsics.atomic_load(&scrub_req_c); ci >= 0 && ci < nclips {
-				if scrub_decode_frame(&clips[ci], scrub_req_t, scrub_buf) {
+				sf0 := cframe(&clips[ci]) // dims no INÍCIO do decode (compara na adoção)
+				st0 := scrub_req_t        // alvo capturado 1x (o global muda durante o arrasto)
+				wt0 := time.tick_now()
+				if scrub_decode_frame(&clips[ci], st0, scrub_buf, true) { // fast: keyframe basta no arrasto
+					scrub_last_ms = time.duration_milliseconds(time.tick_diff(wt0, time.tick_now()))
+					// codec pesado: um decode SW lento migra este clipe p/ NVDEC no scrub (só
+					// sobe — nunca volta a SW sozinho, p/ não oscilar). scrub_hw_bad trava a
+					// migração se o NVDEC já falhou aqui (senão religaria e oscilaria).
+					if !clips[ci].scrub_hw && !clips[ci].scrub_hw_bad && scrub_last_ms > SCRUB_HW_MS {
+						clips[ci].scrub_hw = true
+						dbg("SCRUBHW", "clip='%s' migrado p/ NVDEC no scrub (decode SW levou %.0fms > %.0f)", clips[ci].name, scrub_last_ms, SCRUB_HW_MS)
+					}
+					dbg("SCRUB", "clip=%d t=%.1fs %s %.0fms", ci, st0, clips[ci].scrub_hw ? "HW" : "SW", scrub_last_ms)
 					scrub_done_c = ci
+					scrub_done_t = st0
+					scrub_done_sf = sf0
 					intrinsics.atomic_store(&scrub_ready, true)
 				} else {
+					dbg("SCRUB", "clip=%d t=%.1fs FALHOU (decode nao completou)", ci, st0)
 					time.sleep(4 * time.Millisecond)
 				}
 				continue
@@ -2900,8 +3138,11 @@ dup_open :: proc(c: ^Clip, t: f32) {
 		ss := fmt.bprintf(tb[:], "%.3f", t)
 		vfb: [128]u8; vf := dec_vf_of(c, vfb[:]) // mesma resolução do primário (dec_content_rect é compartilhado)
 		sf := cframe(c)
+		// -threads 2 no decode por SOFTWARE: 2 cores bastam p/ 30fps a 360p; sem o teto,
+		// vários clipes empilhados caindo p/ software (pressão NVDEC) disputavam TODOS
+		// os cores entre si e com os workers — a sessão inteira ia degradando
 		sw_cmd := []string{
-			"ffmpeg", "-hide_banner", "-loglevel", "error",
+			"ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "2",
 			"-ss", ss, "-i", c.path,
 			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", "30",
 			"-an", "-sn", "pipe:1",
@@ -2923,7 +3164,8 @@ dup_open :: proc(c: ^Clip, t: f32) {
 			if n == 0 || re != nil do break
 		}
 		if total == sf {
-			if force_sw do c.no_hw = true // o software entregou onde o NVDEC não: recusa real
+			if force_sw do hw_reject(c) // o software entregou onde o NVDEC não: recusa real
+			else if hw != "" do c.no_hw = false // hardware entregando de novo: cura a marca
 			dup_sp_ps = p; dup_sp_r = r; dup_sp_on = true
 			return
 		}
@@ -2990,6 +3232,7 @@ dup_request :: proc(si: int, l: f32) {
 	if intrinsics.atomic_load(&dup_req_c) >= 0 do return // spawn em voo
 	dup_req_si = si
 	dup_req_t = l
+	dup_req_start = segs[si].start; dup_req_inoff = segs[si].in_off // identidade p/ validar na adoção
 	intrinsics.atomic_store(&dup_req_c, segs[si].src) // publica por último (worker lê)
 }
 
@@ -3021,6 +3264,7 @@ dup_read :: proc(si: int) -> bool {
 // espelho do clip_frame (respawn assíncrono via worker, catch-up de até 2
 // frames por chamada na main).
 dup_frame :: proc(si: int, local: f32) {
+	pt := prof_beg(.Video); defer prof_end(.Video, pt) // re-entrante: não soma 2x dentro do show_playhead_frame
 	c := seg_src(si)
 	if c.is_text do return
 	d := &seg_dup[si]
@@ -3044,17 +3288,20 @@ dup_frame :: proc(si: int, local: f32) {
 		return
 	}
 	cur := d.lbase + f32(d.lframe) / DEC_FPS
-	if l < d.lbase - 0.05 || l > cur + 1.5 { // pulo p/ trás ou grande -> respawn
+	// mesma correção do clip_frame: alvo atrás da posição ATUAL (não do início do
+	// stream) é inalcançável — senão a zona já-passada virava zona morta sem respawn
+	if l < cur - 0.2 || l > cur + 1.5 {
 		dup_live_stop(d)
 		dup_request(si, l)
 		return
 	}
 	// alcança no máx 2 frames por chamada (a main já lê o pipe do clipe dono;
-	// ler demais aqui esvaziaria o buffer de áudio)
+	// ler demais aqui esvaziaria o buffer de áudio). Também debita do orçamento
+	// global — vista dup em catch-up soma ao custo das trilhas empilhadas.
 	guard := 0
-	for d.lbase + f32(d.lframe) / DEC_FPS < l && guard < 2 {
+	for d.lbase + f32(d.lframe) / DEC_FPS < l && guard < 2 && g_read_budget > 0 {
 		if !dup_read(si) do break
-		guard += 1
+		guard += 1; g_read_budget -= 1
 	}
 }
 
@@ -3063,8 +3310,11 @@ dup_frame :: proc(si: int, local: f32) {
 dup_poll :: proc() {
 	if intrinsics.atomic_load(&dup_ready) {
 		si := dup_req_si
-		// valida: o seg ainda existe e ainda aponta p/ a fonte pedida (índices deslocam)
-		ok := si >= 0 && si < nsegs && seg_ready(si) && segs[si].src == intrinsics.atomic_load(&dup_req_c)
+		// valida: o seg ainda existe, aponta p/ a fonte pedida E é o MESMO seg (start/in_off
+		// batem) — src sozinho não basta: uma fonte dividida em vários segs tem todos com o
+		// mesmo src, e a compactação após remover um seg faria adotar no seg errado
+		ok := si >= 0 && si < nsegs && seg_ready(si) && segs[si].src == intrinsics.atomic_load(&dup_req_c) &&
+		      abs(segs[si].start - dup_req_start) < 0.001 && abs(segs[si].in_off - dup_req_inoff) < 0.001
 		if dup_sp_on {
 			if ok {
 				d := &seg_dup[si]
@@ -3112,6 +3362,7 @@ stream_stop :: proc(c: ^Clip) {
 // upload=false (thread de fundo, sem GL); upload=true (main thread, sobe a textura)
 stream_seek :: proc(c: ^Clip, sec: f32, upload: bool) {
 	stream_stop(c)
+	dbg_t := time.tick_now()
 	force_sw := false // retry por software SEM marcar no_hw ainda (pode ser só EOF)
 	for {
 		if intrinsics.atomic_load(&app_closing) || intrinsics.atomic_load(&c.stop) do return // fechando: não spawna decoder
@@ -3120,8 +3371,11 @@ stream_seek :: proc(c: ^Clip, sec: f32, upload: bool) {
 		if e != nil do return
 		ss := fmt.tprintf("%.3f", sec)
 		vfb: [128]u8; vf := dec_vf_of(c, vfb[:]) // 360p (const) ou 720p conforme a qualidade
+		// -threads 2 no decode por SOFTWARE: 2 cores bastam p/ 30fps a 360p; sem o teto,
+		// vários clipes empilhados caindo p/ software (pressão NVDEC) disputavam TODOS
+		// os cores entre si e com os workers — a sessão inteira ia degradando
 		sw_cmd := []string{
-			"ffmpeg", "-hide_banner", "-loglevel", "error",
+			"ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "2",
 			"-ss", ss, "-i", c.path,
 			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", "30",
 			"-an", "-sn", "pipe:1",
@@ -3137,14 +3391,19 @@ stream_seek :: proc(c: ^Clip, sec: f32, upload: bool) {
 		if pe != nil { os.close(r); return }
 		tame_process(c, p, false) // alimenta o playback: prioridade normal, mas no job
 		c.live_ps = p; c.live_r = r; c.live_on = true
+		c.live_hw = hw != "" // rodando por hardware: um "EOF" no meio pode ser recusa do NVDEC
 		c.live_base = sec; c.live_frame = 0
 		if stream_read_raw(c, upload) { // upload=true <=> main thread: pode bombear o áudio
 			// o software entregou frame onde o NVDEC não: recusa de verdade (não
 			// era fim do vídeo) — só agora desliga a GPU p/ este clipe
-			if force_sw do c.no_hw = true
-			if upload do upload_tex(c, rawptr(raw_data(c.fbuf)))
+			if force_sw do hw_reject(c)
+			else if hw != "" do c.no_hw = false // hardware entregando de novo: cura a marca
+			if upload { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = c.live_base + f32(c.live_frame) / DEC_FPS }
+			dbg("RESPAWN", "clip='%s' base=%.1fs %s dur=%.0fms OK (%s)", c.name, sec, hw != "" ? "HW" : "SW",
+				time.duration_milliseconds(time.tick_diff(dbg_t, time.tick_now())), upload ? "main" : "worker")
 			return
 		}
+		dbg("RESPAWN", "clip='%s' base=%.1fs %s -> 0 frames (EOF real, ou recusa NVDEC no 1o frame)", c.name, sec, hw != "" ? "HW" : "SW")
 		// 0 frames: fim do vídeo (sw) OU o NVDEC recusou (hw) -> tenta por software
 		if hw == "" do return // nem o software entregou: fim real (eof_at registrado)
 		force_sw = true
@@ -3163,6 +3422,9 @@ rsp_worker :: proc(c: ^Clip) {
 // o check de janela do clip_frame re-pede se o alvo ainda estiver fora.
 stream_seek_async :: proc(c: ^Clip, t: f32) {
 	if intrinsics.atomic_load(&c.rsp_busy) do return
+	// diagnóstico: grava o alvo do respawn + o playhead no instante (HUD F3). Revela
+	// QUEM manda o decoder pra longe do playhead (o bug do decoder travado à frente).
+	dbg_rsp_n += 1; dbg_rsp_t = t; dbg_rsp_ph = st.playhead
 	if c.rsp_thr != nil { thread.join(c.rsp_thr); thread.destroy(c.rsp_thr); c.rsp_thr = nil }
 	c.rsp_t = t
 	c.rsp_t0 = rl.GetTime()
@@ -3179,9 +3441,22 @@ adopt_respawns :: proc() {
 		c := &clips[i]
 		if c.closed do continue
 		if !c.streaming do continue
-		if !intrinsics.atomic_load(&c.rsp_busy) || !intrinsics.atomic_load(&c.rsp_done) do continue
+		if !intrinsics.atomic_load(&c.rsp_busy) do continue
+		// WATCHDOG: respawn PRESO — o worker está bloqueado no read de um ffmpeg que
+		// não produz (ex.: NVDEC pendurado esperando sessão livre, com vários clipes).
+		// Matar o processo em voo desbloqueia o read; o worker segue (retry por
+		// software / termina) e o rsp_done chega. Sem isto, rsp_busy ficava SIM p/
+		// SEMPRE e o preview do clipe morria na miniatura borrada até reiniciar o app
+		// (a "qualidade caindo com o tempo": clipes iam travando um a um).
+		if !intrinsics.atomic_load(&c.rsp_done) {
+			if c.live_on && rl.GetTime() - c.rsp_t0 > 4 {
+				_ = os.process_kill(c.live_ps)
+				c.rsp_t0 = rl.GetTime() // rearma: se travar de novo no retry, mata de novo em 4s
+			}
+			continue
+		}
 		intrinsics.atomic_store(&c.rsp_busy, false)
-		if c.live_on do upload_tex(c, rawptr(raw_data(c.fbuf)))
+		if c.live_on { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = c.live_base + f32(c.live_frame) / DEC_FPS }
 	}
 }
 
@@ -3204,9 +3479,22 @@ stream_read_raw :: proc(c: ^Clip, pump := false) -> bool {
 		if n > 0 do total += n
 		if n == 0 || e != nil do break
 	}
-	if total < sf { // fim do vídeo: registra onde o stream REALMENTE acaba
+	if total < sf { // o stream acabou: fim REAL do vídeo, OU o NVDEC desistiu no meio
 		end := c.live_base + f32(c.live_frame) / DEC_FPS
+		// NVDEC pode abortar no MEIO de um vídeo pesado (perfil/sessões esgotadas)
+		// fechando o pipe — NÃO é fim de verdade. Se ainda falta muito p/ o fim do clipe
+		// e estávamos por hardware, desliga o NVDEC e NÃO grava eof: o clip_frame vê
+		// !live_on sem eof e respawna por SOFTWARE (recupera sozinho, ~300ms). Sem isto,
+		// gravava um eof falso e a imagem congelava de vez (áudio intacto) até um seek.
+		if c.live_hw && !c.no_hw && end < c.dur - 1.0 {
+			dbg("LIVEDROP", "clip='%s' NVDEC abortou no MEIO em %.1fs (frame %d, %d/%d bytes) -> vai respawnar por SW", c.name, end, c.live_frame, total, sf)
+			hw_reject(c)
+			stream_stop(c)
+			return false
+		}
+		// fim REAL (ou já era software): registra onde o stream acaba
 		if c.eof_at <= 0 || end < c.eof_at do c.eof_at = max(end, 0.001)
+		dbg("EOF", "clip='%s' fim do stream em %.1fs (%s)", c.name, end, c.live_hw ? "HW" : "SW")
 		stream_stop(c)
 		return false
 	}
@@ -3220,6 +3508,8 @@ stream_read_raw :: proc(c: ^Clip, pump := false) -> bool {
 stream_read :: proc(c: ^Clip) -> bool {
 	if !stream_read_raw(c, true) do return false
 	upload_tex(c, rawptr(raw_data(c.fbuf)))
+	c.tex_t = c.live_base + f32(c.live_frame) / DEC_FPS
+	dbg_vframes += 1 // diagnóstico: 1 frame de vídeo NOVO na tela (o heartbeat vira isto em fps real)
 	return true
 }
 
@@ -3250,7 +3540,7 @@ set_stream_quality :: proc(hi: bool) {
 		// novo tamanho) p/ prévia/bin atualizarem já; nunca-exibidos criam depois.
 		if c.tex_ok {
 			if tmp == nil do tmp = make([]u8, STREAM_FBYTES_MAX)
-			if scrub_decode_frame(c, c.live_base, tmp) do upload_tex(c, rawptr(raw_data(tmp)))
+			if scrub_decode_frame(c, c.live_base, tmp) { upload_tex(c, rawptr(raw_data(tmp))); c.tex_t = c.live_base }
 		}
 	}
 	if tmp != nil do delete(tmp)
@@ -3298,7 +3588,7 @@ clip_frame :: proc(c: ^Clip, local: f32) {
 	if intrinsics.atomic_load(&c.rsp_busy) {
 		if !intrinsics.atomic_load(&c.rsp_done) do return
 		intrinsics.atomic_store(&c.rsp_busy, false)
-		if c.live_on do upload_tex(c, rawptr(raw_data(c.fbuf))) // 1º frame do novo decoder
+		if c.live_on { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = c.live_base + f32(c.live_frame) / DEC_FPS } // 1º frame do novo decoder
 		// se o alvo andou muito durante o respawn, o check de janela abaixo re-pede
 	}
 	if !c.live_on {
@@ -3309,18 +3599,26 @@ clip_frame :: proc(c: ^Clip, local: f32) {
 		return
 	}
 	cur := c.live_base + f32(c.live_frame) / DEC_FPS
-	if l < c.live_base - 0.05 || l > cur + 1.5 { // pulo p/ trás ou grande -> respawn
+	// pulo p/ TRÁS compara com a posição ATUAL (cur), não com o início do stream
+	// (live_base): o pipe só anda pra frente, então QUALQUER alvo atrás de cur é
+	// inalcançável sem respawn. Comparar com live_base criava uma ZONA MORTA
+	// [live_base, cur] que CRESCIA com o tempo tocado — clique p/ trás dentro dela
+	// não fazia NADA (nem respawn, nem read) e o preview morria congelado/na
+	// miniatura ("a imagem vai ficando ruim com o tempo"). Margem de 0.2s: o decoder
+	// passa do alvo por até 1 frame (33ms) no catch-up, o que não deve respawnar.
+	if l < cur - 0.2 || l > cur + 1.5 {
 		stream_seek_async(c, l)
 		return
 	}
 	// alcança no máx 3 frames por chamada: cada stream_read bloqueia no pipe do
 	// ffmpeg; ler muitos de uma vez (após um respawn o vídeo fica ~0.3s atrás)
 	// segurava a main e esvaziava o áudio. Com 3, o vídeo alcança em poucos frames
-	// de UI sem travar — a 60fps sobra folga sobre os 30fps do vídeo.
+	// de UI sem travar — a 60fps sobra folga sobre os 30fps do vídeo. O orçamento
+	// GLOBAL (g_read_budget) reparte entre os clipes quando há vários empilhados.
 	guard := 0
-	for c.live_base + f32(c.live_frame) / DEC_FPS < l && guard < 3 {
+	for c.live_base + f32(c.live_frame) / DEC_FPS < l && guard < 3 && g_read_budget > 0 {
 		if !stream_read(c) do break
-		guard += 1
+		guard += 1; g_read_budget -= 1
 	}
 }
 
@@ -3392,15 +3690,19 @@ remove_media :: proc(i: int) {
 	for k < nsegs {
 		if segs[k].src == i {
 			if play_clip == k && clips[i].has_audio do rl.PauseMusicStream(clips[i].music) // solta o áudio tocando
-			for j := k; j < nsegs - 1; j += 1 do segs[j] = segs[j + 1]
+			// desloca seg_marked JUNTO (como remove_seg faz) — senão as marcas ficam
+			// nos índices antigos e o "grupo" vira outro conjunto de clipes
+			for j := k; j < nsegs - 1; j += 1 { segs[j] = segs[j + 1]; seg_marked[j] = seg_marked[j + 1] }
+			seg_marked[nsegs - 1] = false
 			nsegs -= 1
-			fixi(&play_clip, k); fixi(&selected, k); fixi(&drag_clip, k)
+			fixi(&play_clip, k); fixi(&selected, k); fixi(&drag_clip, k); fixi(&sel_trans, k)
 		} else {
 			k += 1
 		}
 	}
-	// 2) impede o worker de scrub de tocar num recurso que vai ser liberado
+	// 2) impede os workers de scrub E de vista dup de tocar num recurso que vai ser liberado
 	if intrinsics.atomic_load(&scrub_req_c) == i do intrinsics.atomic_store(&scrub_req_c, -1)
+	if intrinsics.atomic_load(&dup_req_c) == i do intrinsics.atomic_store(&dup_req_c, -1)
 	if bin_drag == i { bin_drag = -1; if st.drag == .Bin do st.drag = .None }
 	if bin_sel == i do bin_sel = -1
 	bin_marked[i] = false // não deixa marca presa num tombstone
@@ -3410,7 +3712,10 @@ remove_media :: proc(i: int) {
 	intrinsics.atomic_store(&clips[i].failed, true)
 	st.playing = false
 	seek_global(st.playhead)
-	history_baseline() // remover mídia não é desfazível (o snapshot referenciaria mídia morta)
+	// remover mídia não é desfazível: além do baseline, LIMPA as pilhas — um Ctrl+Z
+	// depois daqui restauraria segmentos apontando pra mídia morta (tombstone)
+	undo_top = 0; redo_top = 0
+	history_baseline()
 	set_toast(rl.TextFormat("%s removido do editor", nm))
 }
 
@@ -3430,6 +3735,16 @@ media_matches :: proc(i: int) -> bool {
 // ---------- timeline / navegação (opera sobre os segmentos colocados) ----------
 seg_src :: proc(si: int) -> ^Clip { return &clips[segs[si].src] } // fonte do segmento
 seg_ready :: proc(si: int) -> bool { return media_ready(segs[si].src) }
+
+// o segmento conta como OBSTÁCULO nas checagens de colisão? Mídia ainda IMPORTANDO
+// bloqueia (com seg_ready dava p/ soltar/mover/colar outro clipe em cima durante o
+// import assíncrono — a sobreposição só aparecia quando o probe terminava, violando
+// o invariante). Só mídia FALHA ou removida (tombstone) não bloqueia.
+seg_blocks :: proc(si: int) -> bool {
+	s := segs[si].src
+	if s < 0 || s >= nclips do return false
+	return !clips[s].closed && !intrinsics.atomic_load(&clips[s].failed)
+}
 
 // a mídia i tem pelo menos um segmento na timeline? (p/ o selo "na timeline" no bin)
 src_placed :: proc(i: int) -> bool {
@@ -3470,12 +3785,12 @@ fx_hit :: proc(tr, mv: int, start, dur: f32) -> bool {
 }
 // colisão/paredes/encaixe do PRÓPRIO efeito (≠ mv): contra segs de vídeo E outros efeitos da trilha.
 fx_busy :: proc(tr, mv: int, start, dur: f32) -> bool {
-	for i in 0 ..< nsegs do if seg_ready(i) && segs[i].track == tr && start < segs[i].start + segs[i].dur - 0.001 && start + dur > segs[i].start + 0.001 do return true
+	for i in 0 ..< nsegs do if seg_blocks(i) && segs[i].track == tr && start < segs[i].start + segs[i].dur - 0.001 && start + dur > segs[i].start + 0.001 do return true
 	return fx_hit(tr, mv, start, dur)
 }
 fx_wall_r :: proc(tr, mv: int, x: f32) -> f32 { // menor início > x (seg ou fx) — parede à direita
 	w: f32 = 1e30
-	for i in 0 ..< nsegs do if seg_ready(i) && segs[i].track == tr && segs[i].start >= x - 0.001 && segs[i].start < w do w = segs[i].start
+	for i in 0 ..< nsegs do if seg_blocks(i) && segs[i].track == tr && segs[i].start >= x - 0.001 && segs[i].start < w do w = segs[i].start
 	for k in 0 ..< nfx do if k != mv && fxsegs[k].track == tr && fxsegs[k].start >= x - 0.001 && fxsegs[k].start < w do w = fxsegs[k].start
 	return w
 }
@@ -3483,7 +3798,7 @@ fx_free_start :: proc(tr, mv: int, proposed, dur: f32) -> f32 { // empurra p/ a 
 	s := max(0, proposed)
 	for _ in 0 ..< nsegs + nfx + 1 {
 		hit := f32(-1)
-		for i in 0 ..< nsegs do if seg_ready(i) && segs[i].track == tr && s < segs[i].start+segs[i].dur-0.001 && s+dur > segs[i].start+0.001 { hit = segs[i].start+segs[i].dur; break }
+		for i in 0 ..< nsegs do if seg_blocks(i) && segs[i].track == tr && s < segs[i].start+segs[i].dur-0.001 && s+dur > segs[i].start+0.001 { hit = segs[i].start+segs[i].dur; break }
 		if hit < 0 do for k in 0 ..< nfx do if k != mv && fxsegs[k].track == tr && s < fxsegs[k].start+fxsegs[k].dur-0.001 && s+dur > fxsegs[k].start+0.001 { hit = fxsegs[k].start+fxsegs[k].dur; break }
 		if hit < 0 do break
 		s = hit
@@ -3495,7 +3810,7 @@ fx_free_start :: proc(tr, mv: int, proposed, dur: f32) -> f32 { // empurra p/ a 
 // [start, start+dur) invade outro segmento da trilha `tr`? (encostar não conta) — efeitos incluídos
 overlaps_any :: proc(tr, moving: int, start, dur: f32) -> bool {
 	for i in 0 ..< nsegs {
-		if i == moving || !seg_ready(i) || segs[i].track != tr do continue
+		if i == moving || !seg_blocks(i) || segs[i].track != tr do continue
 		if start < segs[i].start + segs[i].dur - 0.001 && start + dur > segs[i].start + 0.001 do return true
 	}
 	return fx_hit(tr, -1, start, dur) // vídeo não invade um efeito
@@ -3507,7 +3822,9 @@ seg_clear_marks :: proc() { for k in 0 ..< MAX_SEGS do seg_marked[k] = false }
 // [start,start+dur) na trilha tr invade algum segmento NÃO-marcado? (p/ mover o grupo)
 overlaps_nonmarked :: proc(tr: int, start, dur: f32) -> bool {
 	for i in 0 ..< nsegs {
-		if seg_marked[i] || !seg_ready(i) || segs[i].track != tr do continue
+		// um marcado em trilha TRAVADA não vai se mover — conta como obstáculo (senão
+		// o grupo aterrissava em cima dele: sobreposição real na mesma trilha)
+		if (seg_marked[i] && !track_locked[segs[i].track]) || !seg_blocks(i) || segs[i].track != tr do continue
 		if start < segs[i].start + segs[i].dur - 0.001 && start + dur > segs[i].start + 0.001 do return true
 	}
 	return fx_hit(tr, -1, start, dur)
@@ -3517,7 +3834,7 @@ overlaps_nonmarked :: proc(tr: int, start, dur: f32) -> bool {
 left_wall :: proc(tr, moving: int, x: f32) -> f32 {
 	w: f32 = 0
 	for i in 0 ..< nsegs {
-		if i == moving || !seg_ready(i) || segs[i].track != tr do continue
+		if i == moving || !seg_blocks(i) || segs[i].track != tr do continue
 		e := segs[i].start + segs[i].dur
 		if e <= x + 0.001 && e > w do w = e
 	}
@@ -3529,7 +3846,7 @@ left_wall :: proc(tr, moving: int, x: f32) -> f32 {
 right_wall :: proc(tr, moving: int, x: f32) -> f32 {
 	w: f32 = 1e30
 	for i in 0 ..< nsegs {
-		if i == moving || !seg_ready(i) || segs[i].track != tr do continue
+		if i == moving || !seg_blocks(i) || segs[i].track != tr do continue
 		if segs[i].start >= x - 0.001 && segs[i].start < w do w = segs[i].start
 	}
 	for k in 0 ..< nfx do if fxsegs[k].track == tr && fxsegs[k].start >= x - 0.001 && fxsegs[k].start < w do w = fxsegs[k].start
@@ -3543,7 +3860,7 @@ free_start :: proc(tr, moving: int, proposed, dur: f32) -> f32 {
 	for _ in 0 ..< nsegs + nfx + 1 {
 		hit := f32(-1)
 		for i in 0 ..< nsegs {
-			if i == moving || !seg_ready(i) || segs[i].track != tr do continue
+			if i == moving || !seg_blocks(i) || segs[i].track != tr do continue
 			if s < segs[i].start + segs[i].dur - 0.001 && s + dur > segs[i].start + 0.001 { hit = segs[i].start + segs[i].dur; break }
 		}
 		if hit < 0 do for k in 0 ..< nfx do if fxsegs[k].track == tr && s < fxsegs[k].start+fxsegs[k].dur-0.001 && s+dur > fxsegs[k].start+0.001 { hit = fxsegs[k].start + fxsegs[k].dur; break }
@@ -3722,9 +4039,11 @@ cut_segs :: proc() {
 	n := copy_segs()
 	if n == 0 do return
 	if seg_marks_count() > 1 {
-		for k := nsegs - 1; k >= 0; k -= 1 do if seg_marked[k] do remove_seg(k, false)
+		// só remove o que FOI copiado (seg_ready): um marcado com mídia ainda carregando
+		// não entra no clipboard — removê-lo seria perdê-lo (não voltaria no Ctrl+V)
+		for k := nsegs - 1; k >= 0; k -= 1 do if seg_marked[k] && seg_ready(k) do remove_seg(k, false)
 		seg_clear_marks(); selected = -1
-	} else if selected >= 0 {
+	} else if selected >= 0 && seg_ready(selected) {
 		remove_seg(selected, false)
 	}
 	if n == 1 do set_toast("Clipe recortado — Ctrl+V cola no playhead")
@@ -3802,6 +4121,9 @@ remove_seg :: proc(si: int, ripple := true) {
 	if ripple {
 		// fecha o buraco — tudo à direita do removido NA MESMA TRILHA desliza `rd` p/ a esquerda
 		for k in 0 ..< nsegs do if segs[k].track == rt && segs[k].start > rs + 0.001 do segs[k].start -= rd
+		// os clipes de EFEITO da trilha deslizam junto — senão um segmento escorregava
+		// p/ cima de um efeito (sobreposição que nenhum arrasto permite criar)
+		for k in 0 ..< nfx do if fxsegs[k].track == rt && fxsegs[k].start > rs + 0.001 do fxsegs[k].start -= rd
 		// leva o playhead junto p/ ele ficar sobre o mesmo conteúdo de antes
 		if st.playhead >= rs + rd do st.playhead -= rd
 		else if st.playhead > rs do st.playhead = rs
@@ -3839,6 +4161,17 @@ split_seg_at :: proc(a: int, t: f32) -> bool {
 			segs[ri].crop_x = cx; segs[ri].crop_y = cy; segs[ri].crop_w = cw; segs[ri].crop_h = ch // dir começa aqui
 		}
 		segs[ri].vfin = 0; segs[ri].vfout = segs[a].vfout // fade preto: entrada esq, saída dir
+		// SÓ-ÁUDIO herdado: sem isto, dividir um "áudio separado" criava um segmento de
+		// VÍDEO numa trilha de áudio (violava o invariante e cobria o preview inteiro)
+		segs[ri].aonly = segs[a].aonly
+		// efeitos por segmento herdados pelas 2 metades (cor, vinheta, bulge/wobble) —
+		// senão a metade direita perdia a correção de cor/distorção no corte
+		segs[ri].bulge = segs[a].bulge; segs[ri].bulge_x = segs[a].bulge_x
+		segs[ri].bulge_y = segs[a].bulge_y; segs[ri].bulge_r = segs[a].bulge_r
+		segs[ri].wobble = segs[a].wobble; segs[ri].wobble_speed = segs[a].wobble_speed
+		segs[ri].fx_bright = segs[a].fx_bright; segs[ri].fx_contrast = segs[a].fx_contrast
+		segs[ri].fx_satur = segs[a].fx_satur; segs[ri].fx_look = segs[a].fx_look
+		segs[ri].fx_vignette = segs[a].fx_vignette; segs[ri].fx_temp = segs[a].fx_temp
 	segs[a].dur = off
 	segs[a].fade_out = 0; segs[a].vfout = 0 // o fade preto de saída foi p/ a metade da direita
 	return true
@@ -3873,7 +4206,7 @@ snap_start :: proc(tr, moving: int, proposed: f32, dur: f32) -> f32 {
 	pts[n] = st.playhead; n += 1
 	// bordas de TODOS os clipes (qualquer trilha) — guia de alinhamento entre trilhas ao arrastar
 	for i in 0 ..< nsegs {
-		if i == moving || !seg_ready(i) do continue
+		if i == moving || !seg_blocks(i) do continue // importando também encaixa (é obstáculo)
 		pts[n] = segs[i].start; n += 1
 		pts[n] = segs[i].start + segs[i].dur; n += 1
 	}
@@ -3965,6 +4298,7 @@ trans_deny_toast :: proc(bi: int) {
 // atualiza a textura de CADA trilha de vídeo sob o playhead (compositing multi-trilha):
 // cada fonte decodifica seu frame; draw_preview desenha todas com seus transforms.
 show_playhead_frame :: proc() {
+	pt := prof_beg(.Video); defer prof_end(.Video, pt)
 	for t in 0 ..< g_nv {
 		if track_hidden[t] do continue // trilha oculta: não decodifica (não aparece)
 		// transição centrada no corte: decodifica AMBOS os clipes no seu tempo de fonte
@@ -3975,8 +4309,18 @@ show_playhead_frame :: proc() {
 		if tb >= 0 {
 			a := trans_prev(tb)
 			frz :: proc(c: ^Clip, sec: f32) { clip_frame(c, clamp(sec, 0, max(0, c.dur - 1.0/DEC_FPS))) }
-			if a >= 0 && !seg_src(a).streaming   do frz(seg_src(a),  segs[a].in_off  + (st.playhead - segs[a].start))
-			if !seg_src(tb).streaming            do frz(seg_src(tb), segs[tb].in_off + (st.playhead - segs[tb].start))
+			// STREAMING também decodifica (clip_frame lida com respawn/EOF): o que ENTRA
+			// respawna no início do overlap, quando a camada dele ainda é transparente —
+			// o hitch fica invisível e ele chega pronto no fim (antes congelava um frame
+			// velho durante o crossfade e ainda respawnava DEPOIS da transição).
+			// Guardas de textura (1 textura não serve 2 tempos — era o pisca):
+			//  - mesma fonte nos 2 lados (dissolve num corte interno): só o que ENTRA
+			//    decodifica; num corte contíguo os tempos são idênticos, sem perda.
+			//  - fonte de trilha mais BAIXA sob o playhead (seg_is_dup): o dono decide.
+			if a >= 0 && segs[a].src != segs[tb].src && !seg_is_dup(a) {
+				frz(seg_src(a), segs[a].in_off + (st.playhead - segs[a].start))
+			}
+			if !seg_is_dup(tb) do frz(seg_src(tb), segs[tb].in_off + (st.playhead - segs[tb].start))
 		} else {
 			i := seg_on_track_at(t, st.playhead)
 			if i >= 0 {
@@ -4128,8 +4472,13 @@ set_play_clip :: proc(si: int, local: f32) {
 				rl.ResumeMusicStream(c.music)
 			}
 		} else {
+			// Stop antes do Seek: o Seek do raylib não descarta os sub-buffers já
+			// enfileirados — sem o Stop tocava ~0.5s do áudio da posição ANTIGA (blip)
+			// ao adquirir dentro do head/chunk. Play + pré-enchimento como nos demais.
+			rl.StopMusicStream(c.music)
 			rl.SeekMusicStream(c.music, target)
-			rl.ResumeMusicStream(c.music)
+			rl.PlayMusicStream(c.music)
+			for _ in 0 ..< 4 do rl.UpdateMusicStream(c.music)
 		}
 		seek_pending = true
 		seek_pending_loc = clamp(local, 0, c.dur) // coords da FONTE (o playback compara nelas)
@@ -4143,7 +4492,15 @@ set_play_clip :: proc(si: int, local: f32) {
 // de cima é o relógio). O raylib soma os streams no device. Chamado todo frame — quando
 // pausado/fora do clipe, silencia. NÃO mexe no relógio (master). Fontes LONGAS (streaming,
 // áudio em janelas) podem não casar como secundário; o caso comum (clipes curtos) funciona.
+// arrasto que NÃO deve silenciar o playback (volume/fade/transição): igual ao bloco
+// do master — o usuário está ajustando áudio e precisa OUVIR a mudança ao vivo.
+// Antes o secundário/spv exigiam drag==None e mutavam justamente o que era ajustado.
+audio_edit_drag :: proc() -> bool {
+	return st.drag == .Vol || st.drag == .FadeIn || st.drag == .FadeOut || st.drag == .TransDur || st.drag == .FxCenter
+}
+
 audio_secondary :: proc() {
+	pt := prof_beg(.Audio); defer prof_end(.Audio, pt)
 	// passada 1: elege, POR FONTE, o segmento que a toca neste frame (1 rl.Music não
 	// toca 2 posições — mesma fonte 2x sob o playhead: o de trilha mais baixa vence,
 	// o outro fica mudo). Sem eleição, um seg fora do playhead pausava o stream que
@@ -4158,7 +4515,7 @@ audio_secondary :: proc() {
 		if !seg_src(i).has_audio do continue
 		sg := &segs[i]
 		inside := st.playhead >= sg.start && st.playhead < sg.start + sg.dur
-		if !(st.playing && st.drag == .None && inside && !sg.muted && !track_muted[sg.track]) do continue
+		if !(st.playing && (st.drag == .None || audio_edit_drag()) && inside && !sg.muted && !track_muted[sg.track]) do continue
 		if win[sg.src] < 0 || segs[i].track < segs[win[sg.src]].track do win[sg.src] = i
 	}
 	// passada 2: gerencia cada fonte secundária — toca o vencedor, pausa as demais
@@ -4362,6 +4719,7 @@ spv_poll :: proc() {
 // toca, em sincronia com o playhead, o áudio pré-renderizado dos segmentos com
 // speed != 1 sob o playhead. Chamado todo frame junto com audio_secondary.
 audio_speed_preview :: proc() {
+	pt := prof_beg(.Audio); defer prof_end(.Audio, pt)
 	for i := nsegs; i < MAX_SEGS; i += 1 do if spv[i].ok || spv[i].path != "" do spv_release(i) // limpa slots mortos
 	for i in 0 ..< nsegs {
 		e := &spv[i]
@@ -4374,7 +4732,7 @@ audio_speed_preview :: proc() {
 		}
 		sg := &segs[i]
 		inside := st.playhead >= sg.start && st.playhead < sg.start + sg.dur
-		want := st.playing && st.drag == .None && inside && !sg.muted && !track_muted[sg.track]
+		want := st.playing && (st.drag == .None || audio_edit_drag()) && inside && !sg.muted && !track_muted[sg.track]
 		k := spv_key(i)
 		// (re)gera o WAV quando necessário e a interação assentou (não arrastando o slider).
 		// Segmentos muito longos não são pré-renderizados (WAV enorme) -> preview mudo.
@@ -4390,7 +4748,13 @@ audio_speed_preview :: proc() {
 			} else {
 				if !rl.IsMusicStreamPlaying(e.music) do rl.ResumeMusicStream(e.music)
 				rl.UpdateMusicStream(e.music)
-				if abs(rl.GetMusicTimePlayed(e.music) - local) > 0.3 do rl.SeekMusicStream(e.music, local)
+				if abs(rl.GetMusicTimePlayed(e.music) - local) > 0.3 {
+					// re-ADQUIRE (Stop zera a fila): Seek puro deixava os sub-buffers
+					// antigos tocando — dessincronia permanente após um hitch, invisível
+					// ao próprio check (GetMusicTimePlayed já reportava o alvo)
+					rl.StopMusicStream(e.music); rl.SeekMusicStream(e.music, local); rl.PlayMusicStream(e.music)
+					for _ in 0 ..< 4 do rl.UpdateMusicStream(e.music)
+				}
 			}
 			rl.SetMusicVolume(e.music, seg_gain(i, st.playhead) * player_vol)
 		} else if e.on {
@@ -4401,10 +4765,10 @@ audio_speed_preview :: proc() {
 }
 
 // ---------- undo/redo ----------
-snap_now :: proc() -> Snapshot { s: Snapshot; s.segs = segs; s.nsegs = nsegs; s.fxsegs = fxsegs; s.nfx = nfx; return s }
-snap_apply :: proc(s: Snapshot) { segs = s.segs; nsegs = s.nsegs; fxsegs = s.fxsegs; nfx = s.nfx }
+snap_now :: proc() -> Snapshot { s: Snapshot; s.segs = segs; s.nsegs = nsegs; s.fxsegs = fxsegs; s.nfx = nfx; s.nv = g_nv; s.na = g_na; return s }
+snap_apply :: proc(s: Snapshot) { segs = s.segs; nsegs = s.nsegs; fxsegs = s.fxsegs; nfx = s.nfx; g_nv = s.nv; g_na = s.na }
 snap_eq :: proc(s: Snapshot) -> bool {
-	if s.nsegs != nsegs || s.nfx != nfx do return false
+	if s.nsegs != nsegs || s.nfx != nfx || s.nv != g_nv || s.na != g_na do return false
 	for i in 0 ..< nsegs do if segs[i] != s.segs[i] do return false // Seg é comparável (sem ponteiros)
 	for i in 0 ..< nfx   do if fxsegs[i] != s.fxsegs[i] do return false
 	return true
@@ -4745,6 +5109,14 @@ update :: proc() {
 	rl.SetTargetFPS(idle ? 30 : 60)
 
 	dt := rl.GetFrameTime()
+	// TETO no dt: uma travada longa (respawn do decoder de vídeo ~250ms, extração de
+	// chunk, loop modal do Windows ao redimensionar, GC) faz o GetFrameTime devolver o
+	// tempo INTEIRO da travada. Os ramos por relógio de parede (vão/mudo, velocidade!=1,
+	// underrun do áudio, sem-chunk) somam isso de uma vez ao playhead — e o cursor SALTA
+	// de lugar "do nada". Limita a ~2 frames: o relógio de áudio re-sincroniza no frame
+	// seguinte, então o único custo é uma micro-perda de sync que ele mesmo corrige.
+	if dt > 0.1 do dt = 0.1
+	g_read_budget = READ_BUDGET // renova o orçamento de decode bloqueante deste frame
 	m := rl.GetMousePosition()
 	released := rl.IsMouseButtonReleased(.LEFT)
 	was_ph := st.drag == .Playhead
@@ -4906,6 +5278,8 @@ update :: proc() {
 	// atalhos de transporte
 	//  espaço = play/pause | ←/→ = 1 frame (Shift = 1s) | Home/End = início/fim
 	//  S = dividir no playhead | B = ferramenta lâmina | F = ajustar à janela | Esc = sair da lâmina
+	if rl.IsKeyPressed(.F3) do prof_show = !prof_show // HUD do profiler (global, mede o custo da main thread)
+	if rl.IsKeyPressed(.F4) do dbg_toggle() // liga/desliga o log de diagnóstico do decoder (arquivo ao lado do .exe)
 	if rl.IsKeyPressed(.SPACE) && !txt_edit && !search_focus do toggle_play() // espaço: ciente do modo prévia
 	if rl.IsKeyPressed(.ESCAPE) {
 		if search_focus do search_focus = false // sai da busca primeiro
@@ -4953,8 +5327,14 @@ update :: proc() {
 			if !src.streaming {
 				clip_show(src, int(local * DEC_FPS)) // cache: preview ao vivo, direto da RAM
 			} else {
-				// streaming: delega o frame ao worker async (não trava a UI);
-				// atualiza a ~4-6fps durante o arrasto (spawn ffmpeg -ss por frame)
+				// streaming: delega o frame ao worker async (não trava a UI); keyframes
+				// chegam conforme o decode dá (num arquivo de HORAS cada spawn paga o
+				// parse do índice, ~centenas de ms) e a MINIATURA cobre o meio-tempo.
+				// NOTA: houve uma tentativa de "arrasto suave" (ler o pipe do decoder ao
+				// vivo sequencialmente + respawns de convergência) — REVERTIDA: a
+				// oscilação entre os modos degradava a sessão com o tempo (preview preso
+				// na miniatura, worker descartado, loop de respawns). Se voltar ao tema,
+				// o caminho certo é um decoder PERSISTENTE de scrub por clipe.
 				intrinsics.atomic_store(&scrub_req_c, segs[vc].src)
 				scrub_req_t = local
 			}
@@ -4968,7 +5348,8 @@ update :: proc() {
 			// RÍGIDO — o grupo move junto ou não move na vertical. Se ao aplicar o mesmo Δtrilha
 			// QUALQUER marcado sair da sua faixa de tipo (vídeo/áudio), cancela o vertical (dtr=0);
 			// nunca clampa um só (era o bug: um movia e o outro travava no limite). Bloqueadas fora.
-			in_range :: proc(k, t: int) -> bool { // t cabe na faixa do TIPO do seg k?
+			in_range :: proc(k, t: int) -> bool { // t cabe na faixa do TIPO do seg k? (e não é travada)
+				if t >= 0 && t < MAXTRACKS && track_locked[t] do return false // não solta em trilha travada
 				return is_audio_track(segs[k].track) ? (t >= MAXV && t < MAXV + g_na) : (t >= 0 && t < g_nv)
 			}
 			want := max(0, mt - grab_dt)
@@ -5001,6 +5382,7 @@ update :: proc() {
 			}
 		} else if drag_trim == 0 { // mover ÚNICO: pode trocar de trilha (Y do mouse) e de posição
 			ntr := track_for_seg(drag_clip, track_at_y(m.y)) // respeita vídeo/áudio (e só-áudio)
+			if track_locked[ntr] do ntr = sg.track // trilha travada não recebe: fica na atual
 			cand := snap_start(ntr, drag_clip, max(0, mt - grab_dt), sg.dur)
 			if !overlaps_any(ntr, drag_clip, cand, sg.dur) { sg.start = cand; sg.track = ntr }
 			else do snap_line = -1 // rejeitado: não mostra guia num lugar onde não foi
@@ -5183,7 +5565,16 @@ update :: proc() {
 	if st.drag != .Playhead do intrinsics.atomic_store(&scrub_req_c, -1)
 	if intrinsics.atomic_load(&scrub_ready) {
 		dc := scrub_done_c
-		if dc >= 0 && dc < nclips && !clips[dc].closed do upload_tex(&clips[dc], rawptr(raw_data(scrub_buf)))
+		// NÃO sobe o frame de scrub durante o PLAYBACK: um scrub tardio (o worker ainda estava
+		// decodificando o último ponto arrastado quando você soltou e deu play) plantaria um frame
+		// de OUTRO tempo por 1 frame por cima do vídeo = "imagem rápida aparecendo" (flash). Só
+		// adota quando NÃO está tocando (arrasto/pausa), onde o frame de scrub é o que deve aparecer.
+		if !st.playing && dc >= 0 && dc < nclips && !clips[dc].closed && scrub_done_sf == cframe(&clips[dc]) {
+			upload_tex(&clips[dc], rawptr(raw_data(scrub_buf)))
+			clips[dc].tex_t = scrub_done_t // frame do scrub: vale pelo tempo PEDIDO (keyframe ≈ perto)
+		} else if st.playing && dc >= 0 {
+			dbg("SCRUBDROP", "descartado frame de scrub tardio t=%.1fs durante o playback (evita FLASH)", scrub_done_t)
+		}
 		intrinsics.atomic_store(&scrub_ready, false)
 	}
 	dup_poll() // adota spawns das vistas duplicadas (mesma fonte em 2 trilhas) e limpa slots mortos
@@ -5199,6 +5590,17 @@ update :: proc() {
 		}
 	}
 
+	// pausado e sem arrasto: re-dirige o frame do clipe sob o playhead TODO frame. Um
+	// seek pausado num clipe STREAMING (ex.: clicar p/ voltar ao início) dispara um
+	// respawn ASSÍNCRONO do decoder; se ele foi descartado (outro respawn no ar) ou
+	// falhou, o clip_frame precisa ser chamado de novo p/ re-pedir — mas fora do
+	// playback nada o chamava, e a imagem congelava no frame velho até dar play/seekar.
+	// Barato: quando já está na posição, cache é no-op e o streaming não lê nada.
+	// (durante arrasto do playhead o frame vem do worker de scrub, não daqui)
+	if src_preview < 0 && modal == .None && st.drag == .None && !st.playing {
+		show_playhead_frame()
+	}
+
 	// prévia de origem (duplo-clique no bin): caminho próprio, ignora a timeline
 	if src_preview >= 0 {
 		update_src_preview(dt)
@@ -5209,7 +5611,7 @@ update :: proc() {
 	// o segmento pode recortar só um trecho da fonte, então o FIM é in_off+dur
 	// (não a duração da fonte). Espaços vazios / sem áudio avançam pelo relógio de parede.
 	// arrastos de volume/fade NÃO movem o playhead — deixa tocar p/ ouvir a mudança ao vivo
-	audio_edit := st.drag == .Vol || st.drag == .FadeIn || st.drag == .FadeOut || st.drag == .TransDur || st.drag == .FxCenter
+	audio_edit := audio_edit_drag()
 	if st.playing && (st.drag == .None || audio_edit) {
 		a := audio_seg_at(st.playhead) // RELÓGIO = topo com áudio não-mudo (pode não ser o vídeo)
 		when DBG_PLAY { // LOG TEMPORÁRIO de diagnóstico do congelamento
@@ -5278,6 +5680,21 @@ update :: proc() {
 				// cada -> picote). Durante playback contínuo o relógio nunca recua;
 				// seeks reais passam por set_play_clip, que zera aud_prev.
 				if !acquired && aud_prev >= 0 && local < aud_prev do local = aud_prev
+					// proteção contra salto p/ FRENTE (metade que faltava do relógio monotônico):
+					// num playback contínuo o relógio avança ~dt/frame. Um pulo > 3s num único
+					// frame que NÃO é seek = glitch da troca de janela de áudio (head->chunk->OGG
+					// recalcula music_base / GetMusicTimePlayed dessincroniza) — seguir cegamente
+					// jogava o playhead lá na frente e o vídeo enlouquecia atrás (imagem virava
+					// miniatura — "piora com o tempo" durante a extração do áudio). Segue no ritmo
+					// normal e re-sincroniza no frame seguinte. 3s separa o glitch (100s+) de
+					// qualquer hitch legítimo (< 1s de áudio por frame). Seeks reais têm aud_prev=-1.
+					if aud_prev >= 0 && local > aud_prev + 3.0 {
+						dbg_jmp_n += 1; dbg_jmp_from = aud_prev; dbg_jmp_to = local
+						dbg_jmp_gmtp = rl.GetMusicTimePlayed(c.music); dbg_jmp_base = c.music_base
+						dbg_jmp_loc0 = loc0; dbg_jmp_len = f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
+						dbg_jmp_acq = acquired; dbg_jmp_pend = seek_pending
+						local = aud_prev + dt // avança no ritmo normal em vez do salto
+					}
 				// e nunca deixa o jitter do relógio recuar o playhead pra antes do
 				// início do segmento (sairia dele e re-entraria em loop)
 				if local < sg.in_off do local = sg.in_off
@@ -5303,6 +5720,18 @@ update :: proc() {
 					play_clip = -1
 					st.playhead = sg.start + (out0 - sg.in_off) / seg_speed(a) // fim da cadeia, na timeline
 				} else {
+					// GRAVA um SALTO do playhead: o relógio de áudio mandou o playhead
+					// pular > 2s num único frame de playback contínuo (não é seek). É o
+					// bug "o cursor pula sozinho / imagem vai ficando ruim". Guarda o
+					// estado do relógio no instante p/ o HUD mostrar POR QUE saltou.
+					new_ph := sg.start + (local - sg.in_off) / seg_speed(a)
+					if new_ph - st.playhead > 2.0 {
+						dbg_jmp_n += 1; dbg_jmp_kind = 1
+						dbg_jmp_from = st.playhead; dbg_jmp_to = new_ph
+						dbg_jmp_gmtp = rl.GetMusicTimePlayed(c.music); dbg_jmp_base = c.music_base
+						dbg_jmp_loc0 = loc0; dbg_jmp_len = f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
+						dbg_jmp_acq = acquired; dbg_jmp_pend = seek_pending
+					}
 					aud_prev = local
 					// pré-busca: perto do fim da janela ativa e a próxima área ainda sem
 					// parte pronta -> encomenda o chunk seguinte JÁ (troca sem gap na borda)
@@ -5312,7 +5741,7 @@ update :: proc() {
 							chunk_request(c, cend - 1)
 						}
 					}
-					st.playhead = sg.start + (local - sg.in_off) / seg_speed(a)
+					st.playhead = new_ph
 					show_playhead_frame()
 				}
 			} else {
@@ -5529,6 +5958,120 @@ draw_modal :: proc(sw, sh: f32) {
 			start_export(fmt.tprintf("%s/%s.mp4", save_dir, name_str()), export_gpu); modal = .None
 		} else {
 			take_screenshot(fmt.tprintf("%s/%s%s", save_dir, name_str(), shot_ext == 0 ? ".png" : ".jpg")); modal = .None
+		}
+	}
+}
+
+// ---------- profiler de seções (HUD, tecla F3) ----------
+// Mede, por frame de UI, quanto tempo da MAIN THREAD vai em cada parte pesada:
+// decode de vídeo (show_playhead_frame/dup), áudio (mix/spv/master), compositing do
+// preview e desenho da timeline — além do total update/draw. É o que responde "o que
+// consome mais". Vídeo/Áudio são subconjuntos de Update; Preview/Timeline de Draw.
+// Re-entrante (nesting no MESMO bucket conta só o span externo — sem dupla contagem).
+// Custo desprezível (~QPC por zona); sempre coletando, só o HUD é ligado no F3.
+Prof :: enum { Update, Draw, Video, Audio, Preview, Timeline, Tl_Wave, Tl_Thumb }
+prof_acc:    [Prof]f64 // ms somados na janela atual
+prof_avg:    [Prof]f64 // média/frame da janela fechada (exibida no HUD)
+prof_depth:  [Prof]int // re-entrância por bucket
+prof_frames: int
+prof_show:   bool
+
+// GRAVADOR DE SALTOS do playhead (diagnóstico, HUD F3): captura o estado do relógio
+// de áudio no INSTANTE de um pulo > 2s num único frame de playback — o bug histórico
+// "dou play e o cursor pula do nada". Fica com o ÚLTIMO salto até o próximo.
+dbg_jmp_n:    int
+dbg_jmp_kind: int // 1=relógio(normal) 2=fim-da-cadeia
+dbg_jmp_from, dbg_jmp_to: f32
+dbg_jmp_gmtp, dbg_jmp_base, dbg_jmp_loc0, dbg_jmp_len: f32
+dbg_jmp_acq, dbg_jmp_pend: bool
+dbg_rsp_n:  int // respawns pedidos (stream_seek_async)
+dbg_rsp_t:  f32 // alvo do último respawn
+dbg_rsp_ph: f32 // playhead no instante do último respawn
+
+prof_beg :: proc(p: Prof) -> time.Tick { prof_depth[p] += 1; return time.tick_now() }
+prof_end :: proc(p: Prof, t0: time.Tick) {
+	prof_depth[p] -= 1
+	if prof_depth[p] == 0 do prof_acc[p] += time.duration_milliseconds(time.tick_diff(t0, time.tick_now()))
+}
+prof_tick :: proc() { // fecha a janela a cada 20 frames: guarda a média e zera
+	prof_frames += 1
+	if prof_frames >= 20 {
+		inv := 1.0 / f64(prof_frames)
+		for p in Prof { prof_avg[p] = prof_acc[p] * inv; prof_acc[p] = 0 }
+		prof_frames = 0
+	}
+}
+prof_hud :: proc() {
+	if !prof_show do return
+	// conta o que está sob o playhead agora (correlaciona custo × nº de mídias)
+	nvid, nstream := 0, 0
+	for t in 0 ..< g_nv {
+		if i := seg_on_track_at(t, st.playhead); i >= 0 && !seg_src(i).is_text {
+			nvid += 1
+			if seg_src(i).streaming do nstream += 1
+		}
+	}
+	// clipes com o NVDEC desligado (no_hw) NESTE momento: se este número CRESCE com o
+	// uso, a GPU está sendo recusada por pressão de sessões e o decode degrada p/ software
+	nhwoff := 0
+	for k in 0 ..< nclips do if !clips[k].closed && clips[k].streaming && clips[k].no_hw do nhwoff += 1
+	total := prof_avg[.Update] + prof_avg[.Draw]
+	x, y := f32(12), f32(44)
+	rl.DrawRectangleRec({ x - 6, y - 6, 268, 330 }, rl.Color{ 12, 14, 20, 232 })
+	rl.DrawRectangleLinesEx({ x - 6, y - 6, 268, 330 }, 1, rl.Color{ 70, 80, 100, 255 })
+	line :: proc(x, y: f32, label: cstring, ms: f64, warn: bool, indent := false) {
+		c := warn ? rl.Color{ 250, 170, 90, 255 } : rl.Color{ 210, 218, 230, 255 }
+		txt(label, x + (indent ? 12 : 0), y, 13, indent ? rl.Color{ 150, 165, 185, 255 } : c)
+		txt(rl.TextFormat("%.2f ms", ms), x + 150, y, 13, c)
+	}
+	txt(rl.TextFormat("PROFILER  F3   %d fps", rl.GetFPS()), x, y, 13, rl.Color{ 120, 200, 250, 255 }); y += 20
+	line(x, y, "update",    prof_avg[.Update],   prof_avg[.Update] > 8);  y += 17
+	line(x, y, "video",     prof_avg[.Video],    prof_avg[.Video]  > 6, true); y += 17
+	line(x, y, "audio",     prof_avg[.Audio],    prof_avg[.Audio]  > 3, true); y += 17
+	line(x, y, "draw",      prof_avg[.Draw],     prof_avg[.Draw]   > 8);  y += 17
+	line(x, y, "preview",   prof_avg[.Preview],  prof_avg[.Preview]> 5, true); y += 17
+	line(x, y, "timeline",  prof_avg[.Timeline], prof_avg[.Timeline] > 6, true); y += 17
+	line(x, y, "wave",      prof_avg[.Tl_Wave],  prof_avg[.Tl_Wave] > 4, true); y += 17
+	line(x, y, "thumbs",    prof_avg[.Tl_Thumb], prof_avg[.Tl_Thumb] > 4, true); y += 17
+	line(x, y, "TOTAL",     total,               total > 16.6);          y += 20
+	txt(rl.TextFormat("%d video sob playhead (%d streaming)  hw-off:%d", nvid, nstream, nhwoff), x, y, 12,
+		nhwoff > 0 ? rl.Color{ 250, 170, 90, 255 } : rl.Color{ 150, 165, 185, 255 }); y += 16
+	// latência do decode assíncrono de scrub (thread própria — NÃO entra no total da main)
+	if scrub_last_ms > 0 {
+		shw := false; if vs := view_seg(); vs >= 0 do shw = seg_src(vs).scrub_hw
+		txt(rl.TextFormat("scrub: %.0f ms/frame (%s) (ult. decode)", scrub_last_ms, shw ? cstring("HW") : cstring("SW")), x, y, 12,
+			shw ? rl.Color{ 130, 210, 140, 255 } : rl.Color{ 150, 165, 185, 255 })
+	}
+	y += 16
+	// --- estado do decoder do seg de vídeo sob o playhead (print isto p/ depurar) ---
+	if vs := view_seg(); vs >= 0 && seg_src(vs).streaming {
+		c := seg_src(vs)
+		lt := seg_local(vs, st.playhead)
+		gray := rl.Color{ 150, 165, 185, 255 }
+		rsp := intrinsics.atomic_load(&c.rsp_busy)
+		rt := rsp ? rl.GetTime() - c.rsp_t0 : 0
+		txt(rl.TextFormat("live:%s%s  rsp:%s  no_hw:%s  eof=%.0f",
+			c.live_on ? cstring("S") : cstring("N"), c.live_on ? (c.live_hw ? cstring("(hw)") : cstring("(sw)")) : cstring(""),
+			rsp ? rl.TextFormat("%.1fs", rt) : cstring("nao"),
+			c.no_hw ? cstring("SIM") : cstring("nao"), c.eof_at), x, y, 12,
+			(rsp && rt > 2) ? rl.Color{ 250, 170, 90, 255 } : gray); y += 16
+		thumbing := abs(lt - c.tex_t) > SCRUB_SHARP_S
+		txt(rl.TextFormat("gap=%.2fs  tex_dt=%.2fs  MINIATURA:%s",
+			lt - (c.live_base + f32(c.live_frame) / DEC_FPS), lt - c.tex_t,
+			thumbing ? cstring("SIM") : cstring("nao")), x, y, 12,
+			thumbing ? rl.Color{ 250, 170, 90, 255 } : gray); y += 15
+		// números CRUS: qual está insano — o playhead, o tempo-fonte, ou o decoder?
+		txt(rl.TextFormat("ph=%.1f lt=%.1f  lbase=%.1f lframe=%d", st.playhead, lt, c.live_base, c.live_frame), x, y, 12, gray); y += 15
+		txt(rl.TextFormat("tex_t=%.1f  gmtp=%.1f base=%.1f", c.tex_t, rl.GetMusicTimePlayed(c.music), c.music_base), x, y, 12, gray); y += 15
+		// último respawn: alvo pedido vs playhead no instante — quem manda o decoder longe?
+		bad := abs(dbg_rsp_t - dbg_rsp_ph) > 3.0
+		txt(rl.TextFormat("respawn #%d -> t=%.1f (ph era %.1f)", dbg_rsp_n, dbg_rsp_t, dbg_rsp_ph), x, y, 12,
+			bad ? rl.Color{ 250, 120, 120, 255 } : gray); y += 3
+		// SALTO do playhead capturado (bug "cursor pula sozinho"): quem mandou o pulo
+		if dbg_jmp_n > 0 {
+			txt(rl.TextFormat("SALTO #%d: %.1f -> %.1fs (+%.1fs)", dbg_jmp_n, dbg_jmp_from, dbg_jmp_to, dbg_jmp_to - dbg_jmp_from), x, y, 12, rl.Color{ 250, 120, 120, 255 }); y += 15
+			txt(rl.TextFormat("  gmtp=%.1f base=%.1f len=%.1f", dbg_jmp_gmtp, dbg_jmp_base, dbg_jmp_len), x, y, 12, rl.Color{ 250, 170, 90, 255 }); y += 15
+			txt(rl.TextFormat("  loc0=%.1f acq=%s pend=%s", dbg_jmp_loc0, dbg_jmp_acq ? cstring("S") : cstring("N"), dbg_jmp_pend ? cstring("S") : cstring("N")), x, y, 12, rl.Color{ 250, 170, 90, 255 })
 		}
 	}
 }
@@ -6904,8 +7447,24 @@ draw_seg_composited :: proc(i: int, opac_mul, fx, fy, fw, fh: f32, sel_box: bool
 	// vista duplicada (mesma fonte em trilha mais baixa): desenha a textura própria
 	// do seg; enquanto ela não tem frame, cai na textura da fonte (frame do outro seg)
 	tex := c.tex
+	tw_ := f32(cdw(c)); th_ := f32(cdh(c)) // dims da textura EM USO (src e UVs derivam daqui)
 	if seg_is_dup(i) && seg_dup[i].ok && seg_dup[i].src == sg.src do tex = seg_dup[i].tex
 	else if !c.tex_ok do return
+	else if c.streaming && c.thumbs_ready && c.nthumbs > 0 {
+		// o frame em c.tex está LONGE do alvo (arrastando o playhead, ou o respawn de
+		// um clique-seek ainda em voo): mostra a MINIATURA do filmstrip do ponto certo —
+		// borrada, mas feedback INSTANTÂNEO na posição do cursor (estilo NLE); o frame
+		// nítido substitui assim que o decode assíncrono chega (tex_t alcança o alvo).
+		// Só fora do playback contínuo: um catch-up tocando NÃO deve piscar miniatura.
+		lt := seg_local(i, st.playhead)
+		waiting := st.drag == .Playhead || !st.playing || intrinsics.atomic_load(&c.rsp_busy)
+		past_eof := c.eof_at > 0 && lt >= c.eof_at - 0.05 // além do fim real: congela (comportamento antigo)
+		if waiting && !past_eof && abs(lt - c.tex_t) > SCRUB_SHARP_S {
+			tex = c.thumbs[clamp(int(lt / c.thumb_dt), 0, c.nthumbs - 1)]
+			tw_ = f32(THUMB_W); th_ = f32(THUMB_H)
+			if st.playing do dbg_thumb_frames += 1 // diagnóstico: miniatura mostrada DURANTE o playback (flash borrado)
+		}
+	}
 	s := sg.scale <= 0 ? f32(1) : sg.scale
 	// RECORTE: fonte = sub-região; ajusta a REGIÃO recortada ao canvas preservando o aspecto dela.
 	// seg_crop_at anima a região no tempo quando zoom_anim (Pan & Zoom); senão = recorte estático.
@@ -6913,6 +7472,10 @@ draw_seg_composited :: proc(i: int, opac_mul, fx, fy, fw, fh: f32, sel_box: bool
 	// QUADRO da fonte = conteúdo real (sem o pillarbox do DEC): crop e fit passam a operar no
 	// aspecto verdadeiro, então 9:16 numa timeline 9:16 PREENCHE (antes o quadro 16:9 encolhia o vertical).
 	cr := dec_content_rect(c)
+	if tw_ != f32(cdw(c)) { // textura de miniatura: mesma geometria pillarbox, escala menor
+		k := tw_ / f32(cdw(c))
+		cr = { cr.x*k, cr.y*k, cr.width*k, cr.height*k }
+	}
 	src := rl.Rectangle{ cr.x + crx*cr.width, cr.y + cry*cr.height, crw*cr.width, crh*cr.height }
 	cwpx := crw*cr.width; chpx := crh*cr.height
 	tf := min(fw/cwpx, fh/chpx) // ajusta a região recortada ao canvas preservando aspecto
@@ -6942,8 +7505,8 @@ draw_seg_composited :: proc(i: int, opac_mul, fx, fy, fw, fh: f32, sel_box: bool
 	use_fx := bulge_ok && (fx_any(sg) || af >= 0)
 	if use_fx {
 		br := b_r
-		uv0 := [2]f32{ src.x/f32(cdw(c)), src.y/f32(cdh(c)) } // src no espaço cdw×cdh da textura
-		uv1 := [2]f32{ (src.x+src.width)/f32(cdw(c)), (src.y+src.height)/f32(cdh(c)) }
+		uv0 := [2]f32{ src.x/tw_, src.y/th_ } // src no espaço da textura EM USO (c.tex ou miniatura)
+		uv1 := [2]f32{ (src.x+src.width)/tw_, (src.y+src.height)/th_ }
 		ctr := [2]f32{ b_cx, b_cy }
 		asp := dh > 0 ? dw/dh : 1
 		st_ := b_str
@@ -7380,6 +7943,7 @@ draw_crop_modal :: proc(sw, sh: f32) {
 }
 
 draw_preview :: proc(r: rl.Rectangle) {
+	pt := prof_beg(.Preview); defer prof_end(.Preview, pt)
 	transport_h: f32 = 66 // barra de progresso (topo) + linha de botões
 	video := rl.Rectangle{ r.x, r.y, r.width, r.height - transport_h }
 	rl.DrawRectangleRec(video, rl.BLACK)
@@ -7743,6 +8307,7 @@ draw_fx_on_tracks :: proc(clip: rl.Rectangle) {
 
 // ---------- timeline ----------
 draw_timeline :: proc(r: rl.Rectangle) {
+	pt := prof_beg(.Timeline); defer prof_end(.Timeline, pt)
 	toolbar_h: f32 = 34
 	ruler_h: f32 = 22
 	rl.DrawRectangleRec(r, PANEL2)
@@ -7993,6 +8558,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		// tira de miniaturas (filmstrip) sob a barra do título, só o trecho visível
 		if !c.is_text do ensure_thumbs(c)
 		if w > 20 && !alike && !c.is_text {
+			pth := prof_beg(.Tl_Thumb); defer prof_end(.Tl_Thumb, pth)
 			sy := vr.y + 15
 			sh := vr.height - 15 - wave_h
 			if c.thumbs_ready && c.nthumbs > 0 {
@@ -8045,6 +8611,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 
 		// forma de onda no RODAPÉ do mesmo bloco (estilo NLE), só se houver áudio
 		if c.has_audio && w > 8 {
+			pw := prof_beg(.Tl_Wave); defer prof_end(.Tl_Wave, pw)
 			ar := rl.Rectangle{ vr.x, vr.y + vr.height - wave_h, vr.width, wave_h }
 			rl.DrawRectangleRec(ar, rl.Color{ 24, 46, 40, 200 }) // faixa escura de fundo da onda
 			// só o trecho visível: um clipe longo em zoom alto tem centenas de
