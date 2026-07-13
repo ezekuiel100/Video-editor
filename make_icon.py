@@ -17,37 +17,39 @@ for y in range(S):
 img = grad.resize((S, S)).convert("RGBA")
 d = ImageDraw.Draw(img)
 
-# --- tiras de filme nas laterais (faixa translúcida escura + furos) ---
-dark = (14, 62, 57, 255)
-strip_w = int(S * 0.14)
-d.rectangle([0, 0, strip_w, S], fill=dark)
-d.rectangle([S - strip_w, 0, S, S], fill=dark)
-hole_w = int(strip_w * 0.5)
-hole_h = int(S * 0.085)
-gap = (S - 5 * hole_h) / 6
-for i in range(5):
-    y0 = gap + i * (hole_h + gap)
-    for cx in (strip_w * 0.5, S - strip_w * 0.5):
+# NOTA: as antigas "tiras de filme" nas LATERAIS foram removidas — elas espremiam a área
+# colorida do meio num retângulo estreito e ALTO, dando a impressão de ícone esticado na
+# vertical. Agora o teal preenche o quadrado inteiro (leitura claramente quadrada, estilo
+# CapCut). Uma dica sutil de "filme" fica nos furos discretos em CIMA e EMBAIXO.
+
+# --- furos de filme discretos nas bordas de cima e de baixo (não estreitam a horizontal) ---
+hole_w = int(S * 0.052)
+hole_h = int(S * 0.028)
+n_holes = 7
+margin = S * 0.10                      # recuo das laterais p/ os furos não colarem no canto
+span = S - 2 * margin
+step = span / n_holes
+for i in range(n_holes):
+    cxh = margin + step * (i + 0.5)
+    for cyh in (S * 0.052, S - S * 0.052):
         d.rounded_rectangle(
-            [cx - hole_w / 2, y0, cx + hole_w / 2, y0 + hole_h],
-            radius=hole_w * 0.28, fill=(230, 245, 242, 255),
+            [cxh - hole_w / 2, cyh - hole_h / 2, cxh + hole_w / 2, cyh + hole_h / 2],
+            radius=hole_h * 0.45, fill=(255, 255, 255, 55),
         )
 
-# --- play branco no centro ---
-# triângulo LEVEMENTE mais largo que alto (largura 1.85r x altura 1.7r) p/ não "puxar" a
-# leitura do ícone pra vertical; cx deslocado p/ compensar o centroide (base à esquerda).
-cx, cy = S * 0.535, S * 0.5
-r = S * 0.20
-hh = r * 0.85  # meia-altura (< r deixa o triângulo mais largo que alto)
-tri = [(cx - r * 0.85, cy - hh), (cx - r * 0.85, cy + hh), (cx + r, cy)]
+# --- play branco no centro (LEVEMENTE mais largo que alto p/ não puxar pra vertical) ---
+cx, cy = S * 0.53, S * 0.5   # cx um tico à direita compensa o centroide (base à esquerda)
+tw = S * 0.34                # largura do triângulo
+th = S * 0.30                # altura  (< largura -> leitura horizontal, "play")
+tri = [(cx - tw / 2, cy - th / 2), (cx - tw / 2, cy + th / 2), (cx + tw / 2, cy)]
 # leve sombra p/ dar profundidade
 sh = [(x + S * 0.012, y + S * 0.012) for x, y in tri]
 d.polygon(sh, fill=(0, 40, 36, 90))
 d.polygon(tri, fill=(255, 255, 255, 255))
 
-# --- máscara de canto arredondado (o app usa cantos arredondados) ---
+# --- máscara de canto arredondado (squircle suave, estilo dos ícones do Windows 11) ---
 mask = Image.new("L", (S, S), 0)
-ImageDraw.Draw(mask).rounded_rectangle([0, 0, S - 1, S - 1], radius=int(S * 0.19), fill=255)
+ImageDraw.Draw(mask).rounded_rectangle([0, 0, S - 1, S - 1], radius=int(S * 0.22), fill=255)
 img.putalpha(mask)
 
 OUT = r"C:\Users\Adm\Desktop\video editor"

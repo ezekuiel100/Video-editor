@@ -153,8 +153,10 @@ cuvid_mapa_de_codecs :: proc(t: ^testing.T) {
 	testing.expect(t, cuvid_of("") == "", "codec vazio (probe falhou) = software")
 	t_reset()
 	clips[0].vcodec = "h264"
-	clips[0].no_hw = true
-	testing.expect(t, use_cuvid(&clips[0]) == "", "no_hw força software mesmo com codec suportado")
+	hw_reject(&clips[0]) // marca COM carimbo (como o código real faz): vale por 30s
+	testing.expect(t, use_cuvid(&clips[0]) == "", "no_hw recém-marcado força software mesmo com codec suportado")
+	clips[0].no_hw_tk = {} // simula a marca ENVELHECIDA (>30s desde o tick zero)
+	testing.expect(t, use_cuvid(&clips[0]) == "h264_cuvid", "no_hw expira: depois de 30s re-tenta o hardware")
 }
 
 @(test)
