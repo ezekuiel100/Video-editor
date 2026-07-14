@@ -527,6 +527,11 @@ export_r:     ^os.File   // ponta de leitura do -progress (stderr do ffmpeg)
 export_ps:    os.Process
 export_was_running: bool  // (main) p/ avisar quando terminar
 export_gpu:   bool = true // codificar com NVENC (GPU)
+// QUALIDADE da exportação: define o CQ (NVENC) / CRF (x264) — nº maior = arquivo menor.
+// Auto = qualidade alta com TETO de bitrate ≈ o da fonte (mantém o arquivo ~ tamanho do
+// original em vez de inchar). Padrão: Média (equilíbrio tamanho×qualidade).
+ExportQual :: enum { High, Medium, Low, Auto }
+export_qual: ExportQual = .Medium
 // prévia AO VIVO da exportação: um 2º ramo do filtro (split) manda frames rgb24
 // reduzidos pelo stdout; a thread os lê e a main sobe na textura do overlay.
 PREV_W :: i32(480)
@@ -1502,8 +1507,25 @@ start_export :: proc(out: string, gpu: bool) {
 
 	append(&args, "-filter_complex", strings.to_string(fb), "-map", "[vout]")
 	if ac > 0 do append(&args, "-map", "[aout]")
-	if gpu do append(&args, "-c:v", "h264_nvenc", "-preset", "p5", "-cq", "23", "-pix_fmt", "yuv420p", "-r", "30")
-	else    do append(&args, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-r", "30")
+	// QUALIDADE: CQ (NVENC) / CRF (x264). Auto = alta qualidade LIMITADA por um teto de
+	// bitrate ≈ o da fonte (constrained quality) p/ o arquivo não inchar além do original.
+	cq, crf: string
+	switch export_qual {
+	case .High:   cq, crf = "23", "20"
+	case .Medium: cq, crf = "28", "24"
+	case .Low:    cq, crf = "32", "28"
+	case .Auto:   cq, crf = "25", "22" // qualidade preservada; o -maxrate abaixo segura o tamanho
+	}
+	if gpu do append(&args, "-c:v", "h264_nvenc", "-preset", "p5", "-cq", cq, "-pix_fmt", "yuv420p", "-r", "30")
+	else    do append(&args, "-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p", "-r", "30")
+	if export_qual == .Auto {
+		// teto = MAIOR bitrate entre as fontes de vídeo na timeline (heurística p/ várias
+		// mídias: cada clipe tem o seu; usamos o maior p/ não degradar o mais pesado). Sem
+		// bitrate legível (ex.: fonte sem essa info), fica sem teto = comportamento antigo.
+		if src := timeline_max_src_bitrate(); src > 0 {
+			append(&args, "-maxrate", fmt.tprintf("%d", src), "-bufsize", fmt.tprintf("%d", src*2))
+		}
+	}
 	if ac > 0 do append(&args, "-c:a", "aac", "-b:a", "192k")
 	append(&args, export_out)
 	// 2ª saída: frames rgb24 da prévia pelo stdout (pipe:1)
@@ -2173,6 +2195,38 @@ multiselect_paths :: proc(buf: []u16) -> ([]string, bool) {
 // ---------- probe ----------
 // retorna duração, codec e dimensões de exibição do vídeo (codec aponta p/ memória temp;
 // clonar p/ guardar). Saída chaveada (`chave=valor`) p/ separar w/h/duração sem ambiguidade.
+// bitrate (bits/s) de um arquivo-fonte via ffprobe: pega o do stream de vídeo e o do
+// container (format), retornando o MAIOR legível. 0 = desconhecido (muitos .mkv/.webm não
+// expõem bit_rate do stream). Usado só no modo de export "Automático" p/ dimensionar o teto.
+source_bitrate :: proc(path: string) -> int {
+	_, out, _, e := os.process_exec(os.Process_Desc{
+		command = []string{ "ffprobe", "-v", "error", "-select_streams", "v:0",
+			"-show_entries", "stream=bit_rate:format=bit_rate", "-of", "default=nw=1:nokey=1", path },
+	}, context.temp_allocator)
+	if e != nil do return 0
+	best := 0
+	for ln in strings.split_lines(strings.trim_space(string(out)), context.temp_allocator) {
+		v := strings.trim_space(ln)
+		if v == "" || v == "N/A" do continue
+		if n, ok := strconv.parse_int(v, 10); ok && n > best do best = n
+	}
+	return best
+}
+
+// maior bitrate entre as mídias de VÍDEO presentes na timeline (ignora texto/imagem/áudio).
+// Base do teto de bitrate do export "Automático". Probe é síncrono, mas roda só no clique de
+// exportar e sobre poucos arquivos — custo desprezível perto do render.
+timeline_max_src_bitrate :: proc() -> int {
+	best := 0
+	for i in 0 ..< nsegs {
+		if !seg_ready(i) do continue
+		c := &clips[segs[i].src]
+		if c.is_text || c.is_img || c.is_audio || segs[i].aonly do continue
+		if b := source_bitrate(c.path); b > best do best = b
+	}
+	return best
+}
+
 video_probe :: proc(path: string) -> (dur: f32, codec: string, vw, vh: i32) {
 	_, out, _, e := os.process_exec(os.Process_Desc{
 		command = []string{
@@ -5907,7 +5961,7 @@ draw_modal :: proc(sw, sh: f32) {
 	if modal == .ProjSettings { draw_projset_modal(sw, sh); return } // proporção + resolução do projeto
 	rl.DrawRectangleRec({0,0,sw,sh}, rl.Color{0,0,0,150}) // backdrop escuro
 	cw: f32 = 540
-	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : 300))
+	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : 360))
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
 	rl.DrawRectangleRounded(card, 0.04, 8, rl.Color{ 32, 35, 42, 255 })
@@ -5977,6 +6031,25 @@ draw_modal :: proc(sw, sh: f32) {
 		rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, export_gpu ? ACCENT : MUTED)
 		if export_gpu do rl.DrawRectangleRec({ chk.x + 4, chk.y + 4, 10, 10 }, ACCENT)
 		txt("Codificar com GPU (NVENC) — mais rápido", lx + 26, fy + 2, 14, TEXT)
+		// seletor de QUALIDADE (CQ/CRF) — nº maior = arquivo menor; Auto limita ao bitrate da fonte
+		fy += 34
+		txt("Qualidade:", lx, fy + 2, 14, MUTED)
+		QLABELS := [ExportQual]cstring{ .High = "Alta", .Medium = "Média", .Low = "Baixa", .Auto = "Automático" }
+		bx := lx + 90
+		for q in ExportQual {
+			bw := q == .Auto ? f32(96) : f32(62)
+			if ui_btn({ bx, fy - 3, bw, 26 }, QLABELS[q], export_qual == q) do export_qual = q
+			bx += bw + 6
+		}
+		fy += 30
+		hint: cstring
+		switch export_qual {
+		case .High:   hint = "Alta: melhor qualidade, arquivos maiores."
+		case .Medium: hint = "Média: bom equilíbrio (recomendado)."
+		case .Low:    hint = "Baixa: arquivos bem menores, perda visível."
+		case .Auto:   hint = "Auto: mantém o arquivo perto do tamanho da fonte."
+		}
+		txt(hint, lx, fy, 12, MUTED)
 	} else {
 		txt("Formato:", lx, fy + 2, 14, MUTED)
 		if ui_btn({ lx + 90, fy - 3, 60, 26 }, "PNG", shot_ext == 0) do shot_ext = 0
