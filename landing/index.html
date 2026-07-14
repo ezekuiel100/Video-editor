@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VeloCut — Editor de vídeo leve e rápido para Windows</title>
+  <meta name="description" content="VeloCut é um editor de vídeo gratuito para Windows: abre na hora, corta sem travar e exporta com ffmpeg embutido.">
+  <style>
+    :root {
+      --bg: #0d0f14;
+      --bg-soft: #151823;
+      --card: #1a1e2b;
+      --border: #2a3042;
+      --text: #e8eaf0;
+      --muted: #9aa3b5;
+      --accent: #4f8cff;
+      --accent-hover: #6ba0ff;
+      --accent-soft: rgba(79, 140, 255, 0.12);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+    /* ---------- Nav ---------- */
+    nav {
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(13, 15, 20, 0.85);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 64px;
+    }
+    .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.15rem; text-decoration: none; color: var(--text); }
+    .logo-mark {
+      width: 30px; height: 30px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent), #8a5fff);
+      display: grid; place-items: center; font-size: 15px;
+    }
+    .nav-links { display: flex; gap: 28px; align-items: center; }
+    .nav-links a { color: var(--muted); text-decoration: none; font-size: 0.95rem; transition: color .15s; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-links .btn-small {
+      color: #fff; background: var(--accent); padding: 8px 18px; border-radius: 8px; font-weight: 600;
+    }
+    .nav-links .btn-small:hover { background: var(--accent-hover); }
+
+    /* ---------- Hero ---------- */
+    .hero { text-align: center; padding: 88px 0 64px; }
+    .hero h1 {
+      font-size: clamp(2.2rem, 5vw, 3.4rem);
+      line-height: 1.15; font-weight: 800; letter-spacing: -0.02em;
+      max-width: 720px; margin: 0 auto 20px;
+    }
+    .hero h1 .grad {
+      background: linear-gradient(90deg, var(--accent), #8a5fff);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .hero p.sub {
+      font-size: 1.2rem; color: var(--muted);
+      max-width: 560px; margin: 0 auto 36px;
+    }
+    .btn-download {
+      display: inline-flex; align-items: center; gap: 10px;
+      background: var(--accent); color: #fff; text-decoration: none;
+      font-size: 1.15rem; font-weight: 700;
+      padding: 16px 36px; border-radius: 12px;
+      transition: background .15s, transform .15s;
+      box-shadow: 0 8px 30px rgba(79, 140, 255, 0.35);
+    }
+    .btn-download:hover { background: var(--accent-hover); transform: translateY(-2px); }
+    .hero .meta { margin-top: 14px; color: var(--muted); font-size: 0.9rem; }
+    .hero-shot {
+      margin-top: 56px;
+      border-radius: 14px; overflow: hidden;
+      border: 1px solid var(--border);
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+    }
+    .hero-shot img { width: 100%; display: block; }
+
+    /* ---------- Seções ---------- */
+    section { padding: 80px 0; }
+    section.alt { background: var(--bg-soft); }
+    .section-title { text-align: center; font-size: 2rem; font-weight: 800; margin-bottom: 12px; letter-spacing: -0.01em; }
+    .section-sub { text-align: center; color: var(--muted); max-width: 520px; margin: 0 auto 52px; }
+
+    /* ---------- Features ---------- */
+    .features {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 20px;
+    }
+    .feature {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; padding: 28px 24px;
+      transition: transform .15s, border-color .15s;
+    }
+    .feature:hover { transform: translateY(-4px); border-color: var(--accent); }
+    .feature .icon {
+      width: 44px; height: 44px; border-radius: 10px;
+      background: var(--accent-soft); color: var(--accent);
+      display: grid; place-items: center; font-size: 22px; margin-bottom: 16px;
+    }
+    .feature h3 { font-size: 1.05rem; margin-bottom: 8px; }
+    .feature p { color: var(--muted); font-size: 0.92rem; }
+
+    /* ---------- Demo ---------- */
+    .demo-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center;
+    }
+    .demo-grid + .demo-grid { margin-top: 72px; }
+    .demo-grid img {
+      width: 100%; border-radius: 12px;
+      border: 1px solid var(--border);
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+    }
+    .demo-text h3 { font-size: 1.5rem; margin-bottom: 12px; letter-spacing: -0.01em; }
+    .demo-text p { color: var(--muted); }
+    @media (max-width: 760px) {
+      .demo-grid { grid-template-columns: 1fr; gap: 24px; }
+      .demo-grid.invert .demo-text { order: -1; }
+    }
+
+    /* ---------- Requisitos + SmartScreen ---------- */
+    .req-box {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 860px; margin: 0 auto;
+    }
+    @media (max-width: 700px) { .req-box { grid-template-columns: 1fr; } }
+    .req-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; padding: 28px;
+    }
+    .req-card h3 { margin-bottom: 14px; font-size: 1.05rem; }
+    .req-card ul { list-style: none; }
+    .req-card li { color: var(--muted); font-size: 0.93rem; padding: 5px 0 5px 26px; position: relative; }
+    .req-card li::before { content: "✓"; color: var(--accent); position: absolute; left: 0; font-weight: 700; }
+    .req-card.notice li::before { content: "→"; }
+
+    /* ---------- CTA final ---------- */
+    .cta-final { text-align: center; }
+    .cta-final h2 { font-size: 2rem; font-weight: 800; margin-bottom: 12px; }
+    .cta-final p { color: var(--muted); margin-bottom: 32px; }
+
+    /* ---------- Footer ---------- */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 36px 0; text-align: center; color: var(--muted); font-size: 0.88rem;
+    }
+    footer a { color: var(--muted); }
+    footer a:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <div class="container nav-inner">
+      <a class="logo" href="#">
+        <span class="logo-mark">▶</span>
+        VeloCut
+      </a>
+      <div class="nav-links">
+        <a href="#recursos">Recursos</a>
+        <a href="#demo">Como funciona</a>
+        <a href="#requisitos">Requisitos</a>
+        <a class="btn-small" href="/downloads/VeloCut-Setup.exe">Baixar grátis</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero container">
+    <h1>Edite vídeos <span class="grad">sem esperar</span> o editor abrir</h1>
+    <p class="sub">
+      VeloCut é um editor de vídeo gratuito para Windows.
+      Abre em segundos, corta sem travar e exporta direto — sem cadastro, sem marca d'água.
+    </p>
+    <a class="btn-download" href="/downloads/VeloCut-Setup.exe">
+      ⬇ Baixar para Windows
+    </a>
+    <div class="meta">Grátis · Windows 10/11 · ~80 MB · versão 1.0</div>
+
+    <!-- SUBSTITUIR: screenshot real do editor -->
+    <div class="hero-shot">
+      <img src="https://placehold.co/1200x680/12141c/4f8cff?text=Screenshot+do+VeloCut%0A(substituir+por+captura+real)" alt="Interface do VeloCut mostrando a timeline de edição">
+    </div>
+  </header>
+
+  <section id="recursos" class="alt">
+    <div class="container">
+      <h2 class="section-title">Feito para ser rápido</h2>
+      <p class="section-sub">Sem telas de carregamento intermináveis, sem interface pesada. Só o que você precisa para cortar e exportar.</p>
+      <div class="features">
+        <div class="feature">
+          <div class="icon">⚡</div>
+          <h3>Abre em segundos</h3>
+          <p>Nada de esperar meio minuto olhando para uma splash screen. Clicou, abriu, editou.</p>
+        </div>
+        <div class="feature">
+          <div class="icon">✂️</div>
+          <h3>Scrub fluido</h3>
+          <p>Navegue pela timeline com preview nítido mesmo em vídeos longos, com aceleração de hardware.</p>
+        </div>
+        <div class="feature">
+          <div class="icon">📦</div>
+          <h3>Tudo incluído</h3>
+          <p>ffmpeg já vem embutido no instalador. Nenhuma dependência para baixar ou configurar.</p>
+        </div>
+        <div class="feature">
+          <div class="icon">🆓</div>
+          <h3>Grátis de verdade</h3>
+          <p>Sem marca d'água, sem limite de exportação, sem cadastro e sem versão "pro" escondida.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="demo">
+    <div class="container">
+      <h2 class="section-title">Simples de usar</h2>
+      <p class="section-sub">Arraste o vídeo, corte o que não interessa, exporte. É isso.</p>
+
+      <div class="demo-grid">
+        <!-- SUBSTITUIR: GIF/screenshot do corte na timeline -->
+        <img src="https://placehold.co/720x420/1a1e2b/9aa3b5?text=GIF:+cortando+na+timeline" alt="Demonstração de corte na timeline">
+        <div class="demo-text">
+          <h3>Corte direto na timeline</h3>
+          <p>Marque o início e o fim, aperte uma tecla e pronto. O scrub responde na hora, mesmo em arquivos grandes, para você achar o frame exato sem tentativa e erro.</p>
+        </div>
+      </div>
+
+      <div class="demo-grid invert">
+        <div class="demo-text">
+          <h3>Exportação sem mistério</h3>
+          <p>Um clique para exportar com qualidade original. O ffmpeg embutido cuida da conversão — você não precisa entender de codec para ter um resultado bom.</p>
+        </div>
+        <!-- SUBSTITUIR: GIF/screenshot da exportação -->
+        <img src="https://placehold.co/720x420/1a1e2b/9aa3b5?text=GIF:+exportando+o+video" alt="Demonstração da exportação de vídeo">
+      </div>
+    </div>
+  </section>
+
+  <section id="requisitos" class="alt">
+    <div class="container">
+      <h2 class="section-title">Requisitos e instalação</h2>
+      <p class="section-sub">Leve o suficiente para rodar em qualquer PC razoável dos últimos anos.</p>
+      <div class="req-box">
+        <div class="req-card">
+          <h3>Requisitos mínimos</h3>
+          <ul>
+            <li>Windows 10 ou 11 (64 bits)</li>
+            <li>4 GB de RAM</li>
+            <li>Placa de vídeo com suporte a OpenGL 3.3</li>
+            <li>~200 MB de espaço em disco</li>
+          </ul>
+        </div>
+        <div class="req-card notice">
+          <h3>Aviso do Windows na instalação</h3>
+          <ul>
+            <li>O Windows SmartScreen pode mostrar "aplicativo não reconhecido" — é normal em apps novos e gratuitos.</li>
+            <li>Clique em <strong>Mais informações</strong> e depois em <strong>Executar assim mesmo</strong>.</li>
+            <li>O instalador é sempre baixado deste site, por conexão segura (HTTPS).</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta-final">
+    <div class="container">
+      <h2>Pronto para editar mais rápido?</h2>
+      <p>Baixe agora. Se não gostar, desinstalar leva 10 segundos.</p>
+      <a class="btn-download" href="/downloads/VeloCut-Setup.exe">
+        ⬇ Baixar VeloCut grátis
+      </a>
+      <div class="hero .meta" style="margin-top:14px;color:var(--muted);font-size:0.9rem;">Windows 10/11 · ~80 MB</div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <p>© 2026 VeloCut · <a href="mailto:contato@seudominio.com">contato@seudominio.com</a></p>
+    </div>
+  </footer>
+
+</body>
+</html>
