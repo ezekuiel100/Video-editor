@@ -36,6 +36,10 @@ AUDIO_BASE_*
 # ---- Projetos salvos (descomente se NÃO quiser versionar .ovp) ----
 # *.ovp
 
+# ---- Logs de diagnóstico gerados pelo app ----
+decoder_log.txt
+*.log
+
 # ---- OS ----
 Thumbs.db
 Desktop.ini
