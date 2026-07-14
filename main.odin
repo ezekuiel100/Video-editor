@@ -1729,16 +1729,32 @@ text_fonts_settled :: proc() -> bool {
 // console e ESCONDÊ-LO já — os filhos se anexam a ele (invisível) em vez de criar janelas.
 // (Se o editor foi aberto DE um terminal — ex.: -bench —, AllocConsole falha e não escondemos
 // nada: a saída segue visível no terminal, comportamento desejado no dev.)
-// aviso sonoro do sistema (ex.: fim da exportação). MessageBeep é ASSÍNCRONO — só dispara
-// o som e retorna, sem travar a UI. Carregado via GetProcAddress pelo MESMO motivo do
-// ShowWindow abaixo: linkar User32.lib estático colide com raylib.lib (LNK2005).
-notify_beep :: proc(kind: u32) {
-	MessageBeep_t :: proc "system" (uType: win.UINT) -> win.BOOL
-	if u := win.LoadLibraryW(win.utf8_to_wstring("user32.dll")); u != nil {
-		if p := win.GetProcAddress(u, "MessageBeep"); p != nil {
-			(cast(MessageBeep_t) p)(win.UINT(kind))
-		}
+// aviso sonoro de "exportação concluída". Um som curto de 2 notas gerado NO PRÓPRIO motor
+// de áudio do raylib (que já toca o áudio dos vídeos) — assim independe do esquema de sons
+// do Windows: o MessageBeep ficava MUDO se o usuário tivesse "Sem sons" atribuído ao evento.
+// Construído 1x após InitAudioDevice; reproduzido com rl.PlaySound (não trava a UI).
+g_done_snd:    rl.Sound
+g_done_snd_ok: bool
+build_done_sound :: proc() {
+	if !rl.IsAudioDeviceReady() do return
+	SR  :: 44100
+	n   := int(f32(SR) * 0.26)              // ~0,26 s no total
+	buf := make([]i16, n); defer delete(buf)
+	f1  := f32(880.0)                       // 1ª nota (A5)
+	f2  := f32(1318.51)                     // 2ª nota (E6) — sobe = "ta-dá"
+	half := n / 2
+	for i in 0 ..< n {
+		t    := f32(i) / f32(SR)
+		freq := i < half ? f1 : f2
+		// envelope 0→1→0 DENTRO de cada nota (senoide): ataque+decaimento sem cliques
+		loc  := i < half ? f32(i)/f32(half) : f32(i-half)/f32(n-half)
+		env  := math.sin(loc * math.PI)
+		s    := math.sin(2*math.PI*freq*t) * env * 0.35
+		buf[i] = i16(clamp(s, -1, 1) * 32767)
 	}
+	w := rl.Wave{ frameCount = u32(n), sampleRate = u32(SR), sampleSize = 16, channels = 1, data = raw_data(buf) }
+	g_done_snd = rl.LoadSoundFromWave(w)  // o raylib COPIA os dados; buf pode ser liberado
+	g_done_snd_ok = rl.IsSoundValid(g_done_snd)
 }
 
 hide_child_consoles :: proc() {
@@ -1800,6 +1816,7 @@ main :: proc() {
 	// seek é coberto pelo pré-enchimento em set_play_clip. Antes de LoadMusicStream.
 	rl.SetAudioStreamBufferSizeDefault(16384)
 	rl.InitAudioDevice()
+	build_done_sound() // gera o "ding" de fim de exportação (precisa do audio device pronto)
 	rl.SetTargetFPS(60)
 
 	cp: [FONT_CP_N]rune
@@ -1895,6 +1912,7 @@ main :: proc() {
 	// 3) fecha cada clipe (junta as threads do clipe, fecha o job, libera recursos)
 	for i in 0 ..< nclips do clip_close(&clips[i])
 	if g_job != nil do win.CloseHandle(g_job) // KILL_ON_JOB_CLOSE varre o que sobrou
+	if g_done_snd_ok do rl.UnloadSound(g_done_snd)
 	rl.CloseAudioDevice()
 	rl.CloseWindow()
 }
@@ -5366,10 +5384,9 @@ update :: proc() {
 			if done_path != "" do delete(done_path)
 			done_path = strings.clone(export_out)
 			modal = .Done
-			notify_beep(win.MB_ICONASTERISK) // aviso sonoro: exportação concluída (assíncrono, não trava a UI)
+			if g_done_snd_ok do rl.PlaySound(g_done_snd) // aviso sonoro: exportação concluída
 		} else {
 			set_toast("Falha na exportação")
-			notify_beep(win.MB_ICONHAND) // aviso sonoro: falha na exportação
 		}
 		export_cancel = false; export_paused = false
 		for f in export_tmp_files { os.remove(f); delete(f) } // remove os PNGs de texto
