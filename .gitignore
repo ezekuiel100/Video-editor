@@ -17,6 +17,9 @@
 *.old
 *.old_*.exe
 
+# ---- Log de diagnóstico do decoder (gerado por F4; específico da máquina) ----
+decoder_log.txt
+
 # ---- Saídas geradas pelo app (export/screenshot no save_dir padrão = pasta atual) ----
 # Comente se quiser versionar alguma mídia de exemplo.
 *.mp4
@@ -36,8 +39,7 @@ AUDIO_BASE_*
 # ---- Projetos salvos (descomente se NÃO quiser versionar .ovp) ----
 # *.ovp
 
-# ---- Logs de diagnóstico gerados pelo app ----
-decoder_log.txt
+# ---- Outros logs gerados pelo app (o decoder_log.txt já está acima) ----
 *.log
 
 # ---- OS ----
