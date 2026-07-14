@@ -532,6 +532,19 @@ export_gpu:   bool = true // codificar com NVENC (GPU)
 // original em vez de inchar). Padrão: Média (equilíbrio tamanho×qualidade).
 ExportQual :: enum { High, Medium, Low, Auto }
 export_qual: ExportQual = .Medium
+// FORMATO/codec de saída (barra lateral do modal de exportar):
+//   MP4 = H.264 (máx. compatibilidade), HEVC = H.265 (menor, menos compatível),
+//   WEBM = VP9 (web; sempre CPU, mais lento), MP3 = só a trilha de áudio.
+ExportFmt :: enum { MP4, HEVC, WEBM, MP3 }
+export_fmt: ExportFmt = .MP4
+export_fmt_ext :: proc(f: ExportFmt) -> string {
+	switch f {
+	case .WEBM: return ".webm"
+	case .MP3:  return ".mp3"
+	case .MP4, .HEVC: return ".mp4"
+	}
+	return ".mp4"
+}
 // prévia AO VIVO da exportação: um 2º ramo do filtro (split) manda frames rgb24
 // reduzidos pelo stdout; a thread os lê e a main sobe na textura do overlay.
 PREV_W :: i32(480)
@@ -1213,6 +1226,7 @@ start_export :: proc(out: string, gpu: bool) {
 	total := timeline_dur()
 	if total <= 0 { set_toast("Nada na timeline para exportar"); return }
 	W, H := export_dims()
+	want_video := export_fmt != .MP3 // MP3 = só áudio: pula todo o ramo de vídeo do filtro
 
 	if export_out != "" do delete(export_out)
 	export_out = strings.clone(out)
@@ -1226,6 +1240,7 @@ start_export :: proc(out: string, gpu: bool) {
 	clear(&export_tmp_files)
 	text_png: [MAX_SEGS]string
 	for i in 0 ..< nsegs {
+		if !want_video do break // MP3: sem overlay de texto
 		if !seg_ready(i) do continue
 		c := &clips[segs[i].src]
 		if !c.is_text do continue
@@ -1258,6 +1273,7 @@ start_export :: proc(out: string, gpu: bool) {
 	for i in 0 ..< nsegs {
 		if !seg_ready(i) do continue
 		c := &clips[segs[i].src]
+		if !want_video && !c.has_audio do continue // MP3: só fontes com áudio viram input
 		if c.is_text { // overlay de texto = PNG estático (como imagem); pula se o render falhou
 			if text_png[i] == "" do continue
 			append(&args, "-loop", "1", "-framerate", "30", "-t", fmt.tprintf("%.3f", segs[i].dur + thead[i] + ttail[i]))
@@ -1273,7 +1289,7 @@ start_export :: proc(out: string, gpu: bool) {
 		// EFEITO Distorção: mapas xmap/ymap viram inputs p/ o remap (tamanho segW×segH).
 		// Estático = 1 par (remap repete o frame). Wobble = 1 PERÍODO de mapas em sequência,
 		// consumidos em loop (stream_loop) sincronizados ao vídeo em fps=30.
-		if !c.is_audio && !segs[i].aonly && bulge_active(segs[i]) {
+		if want_video && !c.is_audio && !segs[i].aonly && bulge_active(segs[i]) {
 			sg := segs[i]
 			segW, segH := seg_export_dims(i, W, H)
 			cx := clamp(0.5 + sg.bulge_x, 0, 1); cy := clamp(0.5 + sg.bulge_y, 0, 1)
@@ -1314,6 +1330,7 @@ start_export :: proc(out: string, gpu: bool) {
 	// mapas de remap dos clipes de efeito de DISTORÇÃO (tamanho do QUADRO W×H; write_bulge_maps
 	// reproduz o BULGE_FS -> export == preview). Estático (wobble no export = intensidade base).
 	for k in 0 ..< nfx {
+		if !want_video do break // MP3: sem efeitos de vídeo
 		e := fxsegs[k]
 		if e.kind != FX_DISTORT do continue
 		cx := clamp(0.5+e.cx, 0, 1); cy := clamp(0.5+e.cy, 0, 1)
@@ -1330,6 +1347,7 @@ start_export :: proc(out: string, gpu: bool) {
 	if inp == 0 { set_toast("Nada para exportar"); return }
 
 	fb := strings.builder_make(context.temp_allocator)
+	if want_video {
 	fmt.sbprintf(&fb, "color=c=black:s=%dx%d:r=30:d=%.3f[b0];", W, H, total)
 	vlabel := "b0"
 	vc := 0
@@ -1474,6 +1492,7 @@ start_export :: proc(out: string, gpu: bool) {
 	// p/ a prévia ao vivo pelo stdout (a UI mostra enquanto exporta).
 	fmt.sbprintf(&fb, "[%s]split=2[vmain][vprv];[vmain]format=yuv420p[vout];[vprv]fps=8,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,format=rgb24[vpout]",
 		vlabel, PREV_W, PREV_H, PREV_W, PREV_H)
+	}
 
 	// áudio: cada segmento com áudio não-mudo → trim/volume/fade/adelay → amix
 	ac := 0
@@ -1484,8 +1503,9 @@ start_export :: proc(out: string, gpu: bool) {
 		sg := segs[i]
 		vv := sg.vol <= 0 ? 1 : sg.vol
 		sp := sg.speed <= 0 ? 1 : sg.speed
-		fmt.sbprintf(&fb, ";[%d:a]atrim=%.3f:%.3f,asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,volume=%.3f",
-			seg_inp[i], sg.in_off, sg.in_off+sg.dur*sp, vv)
+		sep := strings.builder_len(fb) > 0 ? ";" : "" // MP3: sem grafo de vídeo, a 1ª cadeia não leva ";"
+		fmt.sbprintf(&fb, "%s[%d:a]atrim=%.3f:%.3f,asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,volume=%.3f",
+			sep, seg_inp[i], sg.in_off, sg.in_off+sg.dur*sp, vv)
 		// velocidade: atempo aceita 0.5..2 por estágio; encadeia p/ cobrir 0.25..4.
 		// Vem ANTES dos fades p/ que o stream já tenha duração `dur` (tempo de timeline).
 		if abs(sp-1) > 0.001 {
@@ -1505,10 +1525,14 @@ start_export :: proc(out: string, gpu: bool) {
 		fmt.sbprintf(&fb, "amix=inputs=%d:normalize=0:dropout_transition=0[aout]", ac)
 	}
 
-	append(&args, "-filter_complex", strings.to_string(fb), "-map", "[vout]")
-	if ac > 0 do append(&args, "-map", "[aout]")
-	// QUALIDADE: CQ (NVENC) / CRF (x264). Auto = alta qualidade LIMITADA por um teto de
-	// bitrate ≈ o da fonte (constrained quality) p/ o arquivo não inchar além do original.
+	if !want_video && ac == 0 { set_toast("Nada de áudio para exportar"); return } // MP3 sem áudio
+
+	append(&args, "-filter_complex", strings.to_string(fb))
+	if want_video do append(&args, "-map", "[vout]")
+	if ac > 0     do append(&args, "-map", "[aout]")
+
+	// QUALIDADE: CQ (NVENC) / CRF (x264/x265/VP9) — nº maior = arquivo menor. Auto = alta
+	// qualidade LIMITADA por teto de bitrate ≈ o da fonte (não incha além do original).
 	cq, crf: string
 	switch export_qual {
 	case .High:   cq, crf = "23", "20"
@@ -1516,9 +1540,20 @@ start_export :: proc(out: string, gpu: bool) {
 	case .Low:    cq, crf = "32", "28"
 	case .Auto:   cq, crf = "25", "22" // qualidade preservada; o -maxrate abaixo segura o tamanho
 	}
-	if gpu do append(&args, "-c:v", "h264_nvenc", "-preset", "p5", "-cq", cq, "-pix_fmt", "yuv420p", "-r", "30")
-	else    do append(&args, "-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p", "-r", "30")
-	if export_qual == .Auto {
+	// codec por FORMATO. NVENC (GPU) vale p/ H.264 e HEVC; VP9 é sempre por software.
+	switch export_fmt {
+	case .MP4:
+		if gpu do append(&args, "-c:v", "h264_nvenc", "-preset", "p5", "-cq", cq, "-pix_fmt", "yuv420p", "-r", "30")
+		else    do append(&args, "-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p", "-r", "30")
+	case .HEVC: // -tag:v hvc1 = players (QuickTime/Apple) reconhecem o HEVC no .mp4
+		if gpu do append(&args, "-c:v", "hevc_nvenc", "-preset", "p5", "-cq", cq, "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-r", "30")
+		else    do append(&args, "-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-r", "30")
+	case .WEBM: // VP9 não tem NVENC utilizável aqui; -b:v 0 = modo CRF puro; row-mt acelera
+		append(&args, "-c:v", "libvpx-vp9", "-crf", crf, "-b:v", "0", "-row-mt", "1", "-pix_fmt", "yuv420p", "-r", "30")
+	case .MP3: // só áudio: descarta o vídeo por completo
+		append(&args, "-vn")
+	}
+	if want_video && export_qual == .Auto {
 		// teto = MAIOR bitrate entre as fontes de vídeo na timeline (heurística p/ várias
 		// mídias: cada clipe tem o seu; usamos o maior p/ não degradar o mais pesado). Sem
 		// bitrate legível (ex.: fonte sem essa info), fica sem teto = comportamento antigo.
@@ -1526,10 +1561,17 @@ start_export :: proc(out: string, gpu: bool) {
 			append(&args, "-maxrate", fmt.tprintf("%d", src), "-bufsize", fmt.tprintf("%d", src*2))
 		}
 	}
-	if ac > 0 do append(&args, "-c:a", "aac", "-b:a", "192k")
+	// áudio: AAC no MP4/HEVC, Opus no WEBM (AAC não entra em .webm), MP3 = codec principal
+	if ac > 0 {
+		switch export_fmt {
+		case .WEBM: append(&args, "-c:a", "libopus", "-b:a", "192k")
+		case .MP3:  append(&args, "-c:a", "libmp3lame", "-b:a", export_qual == .High ? "320k" : (export_qual == .Low ? "128k" : "192k"))
+		case .MP4, .HEVC: append(&args, "-c:a", "aac", "-b:a", "192k")
+		}
+	}
 	append(&args, export_out)
-	// 2ª saída: frames rgb24 da prévia pelo stdout (pipe:1)
-	append(&args, "-map", "[vpout]", "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1")
+	// 2ª saída (só formatos de vídeo): frames rgb24 da prévia ao vivo pelo stdout (pipe:1)
+	if want_video do append(&args, "-map", "[vpout]", "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1")
 
 	pr, pw, e := os.pipe() // prévia (stdout)
 	if e != nil { set_toast("Falha ao criar pipe"); return }
@@ -1559,7 +1601,8 @@ start_export :: proc(out: string, gpu: bool) {
 	export_was_running = true // garante que o bloco de conclusão rode mesmo se o clique de cancelar der early-return
 	export_thr = thread.create_and_start(export_worker)
 	export_prev_thr = thread.create_and_start(export_preview_worker)
-	set_toast(rl.TextFormat("Exportando %dx%d...", i32(W), i32(H)))
+	if want_video do set_toast(rl.TextFormat("Exportando %dx%d...", i32(W), i32(H)))
+	else          do set_toast("Exportando áudio (MP3)...")
 }
 
 // pausa/retoma a exportação suspendendo o processo ffmpeg (as threads de leitura só
@@ -5953,6 +5996,31 @@ draw_projset_modal :: proc(sw, sh: f32) {
 	}
 }
 
+// linha "Rótulo: valor" do painel de infos do modal de exportar.
+mrow :: proc(x, y: f32, k, v: cstring) { txt(k, x, y, 13, MUTED); txt(v, x + 150, y, 13, TEXT) }
+
+// tamanho ESTIMADO do arquivo (MB) p/ o modal. Aproximação (CRF = bitrate variável, por isso
+// exibido com "~"): bitrate nominal por qualidade, escalado pela resolução; HEVC/VP9 ~40%
+// menores; MP3 usa só o bitrate de áudio. Não faz probe (roda todo frame do modal).
+export_est_size_mb :: proc(W, H: int, total: f32) -> f64 {
+	if total <= 0 do return 0
+	abr := 192.0e3 // áudio (AAC/Opus)
+	if export_fmt == .MP3 {
+		abr = export_qual == .High ? 320.0e3 : (export_qual == .Low ? 128.0e3 : 192.0e3)
+		return (abr * f64(total) / 8) / 1e6
+	}
+	vbr := 6.0e6
+	switch export_qual {
+	case .High:   vbr = 12.0e6
+	case .Medium: vbr = 6.0e6
+	case .Low:    vbr = 3.0e6
+	case .Auto:   vbr = 6.0e6 // estimativa; o real segue a fonte
+	}
+	vbr *= f64(W*H) / f64(1920*1080)                              // escala pela resolução
+	if export_fmt == .HEVC || export_fmt == .WEBM do vbr *= 0.6   // codecs mais eficientes
+	return ((vbr + abr) * f64(total) / 8) / 1e6
+}
+
 draw_modal :: proc(sw, sh: f32) {
 	if modal == .None do return
 	g_modal_draw = true
@@ -5960,8 +6028,8 @@ draw_modal :: proc(sw, sh: f32) {
 	if modal == .Crop { draw_crop_modal(sw, sh); return } // modal próprio (frame + retângulo)
 	if modal == .ProjSettings { draw_projset_modal(sw, sh); return } // proporção + resolução do projeto
 	rl.DrawRectangleRec({0,0,sw,sh}, rl.Color{0,0,0,150}) // backdrop escuro
-	cw: f32 = 540
-	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : 360))
+	cw: f32 = modal == .Export ? 700 : 540
+	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : 430))
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
 	rl.DrawRectangleRounded(card, 0.04, 8, rl.Color{ 32, 35, 42, 255 })
@@ -6000,6 +6068,93 @@ draw_modal :: proc(sw, sh: f32) {
 		return
 	}
 
+	// ---- modal EXPORTAR (barra de formatos à esquerda + painel de infos à direita) ----
+	if modal == .Export {
+		// barra lateral de FORMATOS à esquerda
+		sbx := cx + 24; sby := cy + 56; sbw := f32(150); rowh := f32(46)
+		FMT_LABELS := [ExportFmt]cstring{ .MP4 = "MP4", .HEVC = "HEVC", .WEBM = "WEBM", .MP3 = "MP3" }
+		FMT_DESC   := [ExportFmt]cstring{ .MP4 = "H.264 · compatível", .HEVC = "H.265 · menor", .WEBM = "VP9 · web", .MP3 = "só áudio" }
+		fi := 0
+		for f in ExportFmt {
+			rr := rl.Rectangle{ sbx, sby + f32(fi)*rowh, sbw, rowh - 6 }
+			sel := export_fmt == f
+			if sel        do rl.DrawRectangleRounded(rr, 0.18, 4, rl.Color{ 44, 48, 58, 255 })
+			else if hovered(rr) do rl.DrawRectangleRounded(rr, 0.18, 4, PANEL)
+			if sel do rl.DrawRectangleRec({ rr.x, rr.y + 6, 3, rr.height - 12 }, ACCENT)
+			txt(FMT_LABELS[f], rr.x + 14, rr.y + 6, 15, TEXT)
+			txt(FMT_DESC[f],   rr.x + 14, rr.y + 26, 10, MUTED)
+			if clicked(rr) do export_fmt = f
+			fi += 1
+		}
+		rl.DrawLineEx({ sbx + sbw + 14, cy + 52 }, { sbx + sbw + 14, cy + ch - 66 }, 1, LINE) // divisória
+
+		// painel à direita
+		px := sbx + sbw + 32; pw := cx + cw - 24 - px; py := cy + 58
+		txt("Exportar para arquivo e salvar no computador", px, py, 12, MUTED); py += 28
+		// Nome
+		txt("Nome:", px, py + 6, 14, TEXT)
+		nf := rl.Rectangle{ px + 84, py, pw - 84, 28 }
+		rl.DrawRectangleRounded(nf, 0.2, 4, PANEL2)
+		tf_field(&tf_name, nf, &name_focus, false)
+		rl.DrawRectangleRoundedLinesEx(nf, 0.2, 4, 1, ACCENT)
+		py += 40
+		// Salvar em
+		txt("Salvar em:", px, py + 6, 14, TEXT)
+		df := rl.Rectangle{ px + 84, py, pw - 84 - 36, 28 }
+		rl.DrawRectangleRounded(df, 0.2, 4, PANEL2)
+		dds := save_dir; if len(dds) > 40 do dds = fmt.tprintf("...%s", dds[len(dds)-37:])
+		txt(cs(dds), df.x + 8, df.y + 6, 12, MUTED)
+		if ui_btn({ df.x + df.width + 6, py, 30, 28 }, "...", false) {
+			if p, ok := save_dialog(name_str()); ok {
+				if d := dir_of(p); d != "" { if save_dir != "" do delete(save_dir); save_dir = strings.clone(d) }
+				b := p[len(dir_of(p)) + 1:]
+				if dot := strings.last_index_byte(b, '.'); dot > 0 do b = b[:dot]
+				set_name(b)
+			}
+		}
+		py += 42
+		// Predefinição (qualidade)
+		txt("Qualidade:", px, py + 3, 14, TEXT)
+		QLABELS := [ExportQual]cstring{ .High = "Alta", .Medium = "Média", .Low = "Baixa", .Auto = "Auto" }
+		qx := px + 84
+		for q in ExportQual {
+			if ui_btn({ qx, py - 2, 66, 26 }, QLABELS[q], export_qual == q) do export_qual = q
+			qx += 72
+		}
+		py += 40
+		// infos
+		W, H := export_dims()
+		total := timeline_dur()
+		ts := int(total + 0.5)
+		if export_fmt == .MP3 {
+			mrow(px, py, "Tipo:", "Áudio (MP3)"); py += 26
+		} else {
+			mrow(px, py, "Resolução:", rl.TextFormat("%dx%d", i32(W), i32(H))); py += 26
+			mrow(px, py, "Taxa de Frames:", "30 fps"); py += 26
+		}
+		mrow(px, py, "Duração:", rl.TextFormat("%02d:%02d:%02d", i32(ts/3600), i32((ts%3600)/60), i32(ts%60))); py += 26
+		est := export_est_size_mb(int(W), int(H), total)
+		szs: cstring = est >= 1024 ? rl.TextFormat("~ %.2f GB", est/1024) : rl.TextFormat("~ %.0f MB", est)
+		mrow(px, py, "Tamanho estimado:", szs); py += 32
+		// GPU só existe p/ H.264/HEVC (NVENC); VP9 é sempre CPU
+		if export_fmt == .MP4 || export_fmt == .HEVC {
+			chk := rl.Rectangle{ px, py, 18, 18 }
+			if clicked(chk) do export_gpu = !export_gpu
+			rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, export_gpu ? ACCENT : MUTED)
+			if export_gpu do rl.DrawRectangleRec({ chk.x + 4, chk.y + 4, 10, 10 }, ACCENT)
+			txt("Ativar codificação com GPU (NVENC)", px + 26, py + 2, 13, TEXT)
+		} else if export_fmt == .WEBM {
+			txt("VP9 codifica por CPU — export mais lento.", px, py + 2, 12, MUTED)
+		}
+		// botões
+		if ui_btn({ cx + cw - 244, cy + ch - 52, 100, 36 }, "Cancelar", false) do modal = .None
+		if ui_btn({ cx + cw - 134, cy + ch - 52, 110, 36 }, "Exportar", true) {
+			if tf_name.len == 0 do set_toast("Digite um nome")
+			else { start_export(fmt.tprintf("%s/%s%s", save_dir, name_str(), export_fmt_ext(export_fmt)), export_gpu); modal = .None }
+		}
+		return
+	}
+
 	// campo de NOME (cursor + seleção; foco automático enquanto o modal está aberto)
 	lx := cx + 24; fy := cy + 62
 	txt("Nome:", lx, fy + 6, 14, TEXT)
@@ -6022,47 +6177,14 @@ draw_modal :: proc(sw, sh: f32) {
 		}
 	}
 	fy += 46
-	if modal == .Export {
-		W, H := export_dims()
-		txt("Resolução:", lx, fy + 2, 14, MUTED); txt(rl.TextFormat("%dx%d @ 30fps", i32(W), i32(H)), lx + 90, fy + 2, 14, TEXT)
-		fy += 30
-		chk := rl.Rectangle{ lx, fy, 18, 18 }
-		if clicked(chk) do export_gpu = !export_gpu
-		rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, export_gpu ? ACCENT : MUTED)
-		if export_gpu do rl.DrawRectangleRec({ chk.x + 4, chk.y + 4, 10, 10 }, ACCENT)
-		txt("Codificar com GPU (NVENC) — mais rápido", lx + 26, fy + 2, 14, TEXT)
-		// seletor de QUALIDADE (CQ/CRF) — nº maior = arquivo menor; Auto limita ao bitrate da fonte
-		fy += 34
-		txt("Qualidade:", lx, fy + 2, 14, MUTED)
-		QLABELS := [ExportQual]cstring{ .High = "Alta", .Medium = "Média", .Low = "Baixa", .Auto = "Automático" }
-		bx := lx + 90
-		for q in ExportQual {
-			bw := q == .Auto ? f32(96) : f32(62)
-			if ui_btn({ bx, fy - 3, bw, 26 }, QLABELS[q], export_qual == q) do export_qual = q
-			bx += bw + 6
-		}
-		fy += 30
-		hint: cstring
-		switch export_qual {
-		case .High:   hint = "Alta: melhor qualidade, arquivos maiores."
-		case .Medium: hint = "Média: bom equilíbrio (recomendado)."
-		case .Low:    hint = "Baixa: arquivos bem menores, perda visível."
-		case .Auto:   hint = "Auto: mantém o arquivo perto do tamanho da fonte."
-		}
-		txt(hint, lx, fy, 12, MUTED)
-	} else {
-		txt("Formato:", lx, fy + 2, 14, MUTED)
-		if ui_btn({ lx + 90, fy - 3, 60, 26 }, "PNG", shot_ext == 0) do shot_ext = 0
-		if ui_btn({ lx + 156, fy - 3, 60, 26 }, "JPG", shot_ext == 1) do shot_ext = 1
-	}
+	// modal SCREENSHOT (o Export tem seu próprio bloco acima e retorna antes daqui)
+	txt("Formato:", lx, fy + 2, 14, MUTED)
+	if ui_btn({ lx + 90, fy - 3, 60, 26 }, "PNG", shot_ext == 0) do shot_ext = 0
+	if ui_btn({ lx + 156, fy - 3, 60, 26 }, "JPG", shot_ext == 1) do shot_ext = 1
 	if ui_btn({ cx + cw - 234, cy + ch - 52, 100, 36 }, "Cancelar", false) do modal = .None
-	if ui_btn({ cx + cw - 124, cy + ch - 52, 100, 36 }, modal == .Export ? "Exportar" : "Salvar", true) {
+	if ui_btn({ cx + cw - 124, cy + ch - 52, 100, 36 }, "Salvar", true) {
 		if tf_name.len == 0 { set_toast("Digite um nome") }
-		else if modal == .Export {
-			start_export(fmt.tprintf("%s/%s.mp4", save_dir, name_str()), export_gpu); modal = .None
-		} else {
-			take_screenshot(fmt.tprintf("%s/%s%s", save_dir, name_str(), shot_ext == 0 ? ".png" : ".jpg")); modal = .None
-		}
+		else { take_screenshot(fmt.tprintf("%s/%s%s", save_dir, name_str(), shot_ext == 0 ? ".png" : ".jpg")); modal = .None }
 	}
 }
 
