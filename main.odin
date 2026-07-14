@@ -1729,6 +1729,18 @@ text_fonts_settled :: proc() -> bool {
 // console e ESCONDÊ-LO já — os filhos se anexam a ele (invisível) em vez de criar janelas.
 // (Se o editor foi aberto DE um terminal — ex.: -bench —, AllocConsole falha e não escondemos
 // nada: a saída segue visível no terminal, comportamento desejado no dev.)
+// aviso sonoro do sistema (ex.: fim da exportação). MessageBeep é ASSÍNCRONO — só dispara
+// o som e retorna, sem travar a UI. Carregado via GetProcAddress pelo MESMO motivo do
+// ShowWindow abaixo: linkar User32.lib estático colide com raylib.lib (LNK2005).
+notify_beep :: proc(kind: u32) {
+	MessageBeep_t :: proc "system" (uType: win.UINT) -> win.BOOL
+	if u := win.LoadLibraryW(win.utf8_to_wstring("user32.dll")); u != nil {
+		if p := win.GetProcAddress(u, "MessageBeep"); p != nil {
+			(cast(MessageBeep_t) p)(win.UINT(kind))
+		}
+	}
+}
+
 hide_child_consoles :: proc() {
 	if !bool(win.AllocConsole()) do return // já tinha console (ex.: aberto de um terminal) — não mexe
 	hwnd := win.GetConsoleWindow()
@@ -5354,8 +5366,10 @@ update :: proc() {
 			if done_path != "" do delete(done_path)
 			done_path = strings.clone(export_out)
 			modal = .Done
+			notify_beep(win.MB_ICONASTERISK) // aviso sonoro: exportação concluída (assíncrono, não trava a UI)
 		} else {
 			set_toast("Falha na exportação")
+			notify_beep(win.MB_ICONHAND) // aviso sonoro: falha na exportação
 		}
 		export_cancel = false; export_paused = false
 		for f in export_tmp_files { os.remove(f); delete(f) } // remove os PNGs de texto
