@@ -42,6 +42,9 @@ AUDIO_BASE_*
 # ---- Outros logs gerados pelo app (o decoder_log.txt já está acima) ----
 *.log
 
+# ---- Landing page (fora do versionamento; fica só no disco) ----
+landing/
+
 # ---- OS ----
 Thumbs.db
 Desktop.ini
