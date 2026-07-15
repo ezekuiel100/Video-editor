@@ -1,4 +1,4 @@
-# Odin Video Editor
+# Editor de Vídeo
 
 Editor de vídeo não-linear, escrito em **[Odin](https://odin-lang.org/)** com **raylib**. Interface *immediate-mode* desenhada à mão, decodificação de vídeo/áudio via **ffmpeg** (sem bindings C) e o áudio como relógio-mestre de sincronia.
 
@@ -92,7 +92,7 @@ powershell -ExecutionPolicy Bypass -File build-installer.ps1
 O script compila o ícone (`icon.rc` → `icon.res`), recompila o `editor.exe` em release (sem console, com ícone), acha o `ISCC.exe` e gera o instalador em:
 
 ```
-dist\Output\OdinVideoEditor-Setup.exe
+dist\Output\EditorDeVideo-Setup.exe
 ```
 
 > A cada release, suba a versão em `setup.iss` (`#define MyAppVersion "1.0.1"`) para aparecer certo em "Adicionar ou remover programas".

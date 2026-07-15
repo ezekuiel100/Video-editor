@@ -2045,7 +2045,7 @@ main :: proc() {
 	sweep_orphan_temps() // varre o %TEMP%: apaga temporários de PIDs mortos (lixo de crashes antigos)
 	job_init() // antes de qualquer spawn de ffmpeg
 	rl.SetConfigFlags({ .WINDOW_RESIZABLE, .WINDOW_UNDECORATED, .MSAA_4X_HINT, .VSYNC_HINT })
-	rl.InitWindow(1280, 760, "Odin Video Editor")
+	rl.InitWindow(1280, 760, "Editor de Vídeo")
 	rl.SetExitKey(.KEY_NULL) // ESC não fecha; só o botão X da barra
 	rl.MaximizeWindow()      // abre já maximizado
 	// ícone da janela/barra de tarefas em runtime (o ícone do .exe vem do recurso icon.res
@@ -6602,7 +6602,7 @@ draw_topbar :: proc(sw, h: f32) {
 	rl.DrawRectangleRec({0, 0, sw, h}, TOPBAR)
 	rl.DrawRectangle(0, i32(h) - 1, i32(sw), 1, LINE)
 	rl.DrawRectangleRounded({10, h/2 - 8, 16, 16}, 0.3, 6, ACCENT)
-	txt("Odin Editor", 34, h/2 - 9, 15, TEXT)
+	txt("Editor de Vídeo", 34, h/2 - 9, 15, TEXT)
 
 	menus := []cstring{ "Arquivo", "Editar", "Ferramentas", "Visualização", "Exportar", "Ajuda" }
 	x: f32 = 150

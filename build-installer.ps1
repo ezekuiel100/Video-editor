@@ -1,6 +1,6 @@
 # build-installer.ps1 - recompila o editor em release e gera o instalador.
 # Uso:  powershell -ExecutionPolicy Bypass -File build-installer.ps1
-# Saida: dist\Output\OdinVideoEditor-Setup.exe
+# Saida: dist\Output\EditorDeVideo-Setup.exe
 # NOTA: manter este arquivo 100% ASCII! O PowerShell 5.1 le .ps1 sem BOM como ANSI e o
 # travessao U+2014 vira uma aspa curva (byte 0x94) que FECHA strings no meio (erro de parse).
 #
@@ -40,4 +40,4 @@ Write-Host "[4/4] Compilando o instalador..." -ForegroundColor Cyan
 & $iscc setup.iss
 if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar o instalador." }
 
-Write-Host "`nPronto: dist\Output\OdinVideoEditor-Setup.exe" -ForegroundColor Green
+Write-Host "`nPronto: dist\Output\EditorDeVideo-Setup.exe" -ForegroundColor Green

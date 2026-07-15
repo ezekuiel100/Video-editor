@@ -1,5 +1,5 @@
 ; ============================================================================
-;  Instalador do Odin Video Editor (Inno Setup 6.3+)
+;  Instalador do Editor de Vídeo (Inno Setup 6.3+)
 ;  Empacota: editor.exe + ffmpeg.exe + ffprobe.exe (ao lado do exe, achados via
 ;  PATH no startup por init_paths) + a licença GPL do ffmpeg.
 ;
@@ -8,10 +8,10 @@
 ;    2) Compile este arquivo:
 ;         "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 ;       (ou abra setup.iss no Inno Setup e clique em Build > Compile)
-;    3) O Setup sai em:  dist\Output\OdinVideoEditor-Setup.exe
+;    3) O Setup sai em:  dist\Output\EditorDeVideo-Setup.exe
 ; ============================================================================
 
-#define MyAppName "Odin Video Editor"
+#define MyAppName "Editor de Vídeo"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "ezekuiel100"
 #define MyAppExeName "editor.exe"
@@ -29,7 +29,7 @@ DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=dist\Output
-OutputBaseFilename=OdinVideoEditor-Setup
+OutputBaseFilename=EditorDeVideo-Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
