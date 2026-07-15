@@ -618,6 +618,8 @@ bin_drop_show:  bool
 bin_drop_tr:    int
 bin_drop_start: f32
 bin_drop_dur:   f32
+bin_drop_newtrack: bool         // drop cria uma trilha NOVA: footprint desenhado sobre a banda "+ trilha"
+bin_drop_zone: rl.Rectangle     // retângulo dessa banda (p/ posicionar o footprint da prévia)
 bin_empty_click_t: f64 = -1   // último clique em área vazia do bin (importar por clique/duplo-clique)
 blade_mode: bool    // ferramenta lâmina: clicar num segmento corta ali (estilo NLE)
 tl_scroll: f32      // deslocamento horizontal da timeline (px); 0 = início
@@ -5439,7 +5441,7 @@ update :: proc() {
 	}
 
 	snap_line = -1 // recalculado a cada frame durante o arrasto
-	bin_drop_show = false // prévia do footprint do bin (recalculada no ramo .Bin abaixo)
+	bin_drop_show = false; bin_drop_newtrack = false // prévia do footprint do bin (recalculada no ramo .Bin abaixo)
 
 	// arrasto: mover playhead (scrub), mover/aparar um segmento, ou soltar do bin
 	if st.drag == .Playhead {
@@ -5598,12 +5600,22 @@ update :: proc() {
 		// SEM encaixe no meio: a "zona morta" fazia o centro pular pro meio (parecia um ímã)
 		f.cx = clamp((m.x - (g_frame.x + g_frame.width/2)) / g_frame.width, -0.5, 0.5)
 		f.cy = clamp((m.y - (g_frame.y + g_frame.height/2)) / g_frame.height, -0.5, 0.5)
-	} else if st.drag == .Bin && bin_drag >= 0 && bin_drag < nclips && rl.CheckCollisionPointRec(m, g_vlane) {
-		tr := track_for_media(bin_drag, track_at_y(m.y))
-		s := snap_start(tr, -1, max(0, tl_t(m.x - DROP_LEAD)), clips[bin_drag].dur) // guia (adiantado)
-		// footprint real do drop (empurra p/ espaço livre, igual ao drop) — mostra onde vai ficar
-		bin_drop_tr = tr; bin_drop_start = free_start(tr, -1, s, clips[bin_drag].dur)
-		bin_drop_dur = clips[bin_drag].dur; bin_drop_show = true
+	} else if st.drag == .Bin && bin_drag >= 0 && bin_drag < nclips {
+		over_newv := !clips[bin_drag].is_audio && g_nv < MAXV && rl.CheckCollisionPointRec(m, g_newv_zone)
+		over_newa :=  clips[bin_drag].is_audio && g_na < MAXA && rl.CheckCollisionPointRec(m, g_newa_zone)
+		if over_newv || over_newa {
+			// sobre a banda "+ trilha": já mostra o footprint onde o clipe cairá na trilha NOVA
+			// (trilha vazia = sem empurrão; começa no cursor adiantado). O drop cria a trilha.
+			bin_drop_start = max(0, tl_t(m.x - DROP_LEAD)); bin_drop_dur = clips[bin_drag].dur
+			bin_drop_zone = over_newv ? g_newv_zone : g_newa_zone
+			bin_drop_newtrack = true; bin_drop_show = true
+		} else if rl.CheckCollisionPointRec(m, g_vlane) {
+			tr := track_for_media(bin_drag, track_at_y(m.y))
+			s := snap_start(tr, -1, max(0, tl_t(m.x - DROP_LEAD)), clips[bin_drag].dur) // guia (adiantado)
+			// footprint real do drop (empurra p/ espaço livre, igual ao drop) — mostra onde vai ficar
+			bin_drop_tr = tr; bin_drop_start = free_start(tr, -1, s, clips[bin_drag].dur)
+			bin_drop_dur = clips[bin_drag].dur; bin_drop_show = true
+		}
 	} else if st.drag == .FxClip && fx_sel >= 0 && fx_sel < nfx {
 		f := &fxsegs[fx_sel]
 		ty := track_at_y(m.y)                                        // trilha de vídeo sob o cursor
@@ -6334,10 +6346,19 @@ draw :: proc() {
 		nm := bin_marks_count()
 		// FOOTPRINT: retângulo verde onde a mídia vai cair (posição + duração na trilha alvo)
 		if bin_drop_show {
-			ok := !track_locked[bin_drop_tr] // trilha travada = não pode receber (vermelho)
-			fr := rl.Rectangle{ tl_x(bin_drop_start), track_y(bin_drop_tr) + 4, bin_drop_dur*pps(), g_track_h - 8 }
-			rl.DrawRectangleRec(fr, ok ? rl.Color{ 90, 200, 120, 60 } : rl.Color{ 200, 70, 70, 55 })
-			rl.DrawRectangleLinesEx(fr, 1.6, ok ? rl.Color{ 90, 200, 120, 235 } : rl.Color{ 200, 70, 70, 235 })
+			if bin_drop_newtrack { // trilha NOVA: fantasma (altura de clipe) centrado na área de drop
+				gh := min(bin_drop_zone.height - 8, g_track_h - 8)
+				fy := bin_drop_zone.y + (bin_drop_zone.height - gh)/2
+				fr := rl.Rectangle{ tl_x(bin_drop_start), fy, bin_drop_dur*pps(), gh }
+				rl.DrawRectangleRec(fr, rl.Color{ 90, 200, 120, 60 })
+				rl.DrawRectangleLinesEx(fr, 1.6, rl.Color{ 90, 200, 120, 235 })
+				txt(cs(c.name), fr.x + 6, fr.y + 4, 11, rl.WHITE)
+			} else {
+				ok := !track_locked[bin_drop_tr] // trilha travada = não pode receber (vermelho)
+				fr := rl.Rectangle{ tl_x(bin_drop_start), track_y(bin_drop_tr) + 4, bin_drop_dur*pps(), g_track_h - 8 }
+				rl.DrawRectangleRec(fr, ok ? rl.Color{ 90, 200, 120, 60 } : rl.Color{ 200, 70, 70, 55 })
+				rl.DrawRectangleLinesEx(fr, 1.6, ok ? rl.Color{ 90, 200, 120, 235 } : rl.Color{ 200, 70, 70, 235 })
+			}
 		}
 		gr := rl.Rectangle{ m.x - 60, m.y - 20, 120, 40 }
 		if c.tex_ok do rl.DrawTexturePro(c.tex, {0,0,f32(cdw(c)),f32(cdh(c))}, gr, {0,0}, 0, rl.Color{255,255,255,180})
@@ -6347,7 +6368,7 @@ draw :: proc() {
 			rl.DrawRectangleRounded(br, 0.5, 6, ACCENT)
 			txt_c(rl.TextFormat("%d", nm), br.x + br.width/2, br.y + 3, 12, rl.WHITE)
 		}
-		over := rl.CheckCollisionPointRec(m, g_vlane)
+		over := rl.CheckCollisionPointRec(m, g_vlane) // sobre uma trilha existente
 		lbl := over ? (nm > 1 ? rl.TextFormat("soltar %d aqui", nm) : cstring("soltar aqui")) : (nm > 1 ? rl.TextFormat("%d mídias", nm) : cs(c.name))
 		txt_c(lbl, gr.x + 60, gr.y + 44, 11, over ? ACCENT : MUTED)
 	}
@@ -8641,17 +8662,24 @@ draw_timeline :: proc(r: rl.Rectangle) {
 
 	// ----- geometria VERTICAL das trilhas (bandas pinadas + viewport rolável) -----
 	// as bandas "criar trilha" ficam PINADAS (topo=vídeo, base=áudio); só as trilhas rolam entre elas.
-	NEWZONE_H :: f32(16)
-	lanes_top := r.y + toolbar_h + ruler_h
-	newv_y := lanes_top
-	g_newv_zone = rl.Rectangle{ r.x + LANE_X, newv_y, r.width - LANE_X, NEWZONE_H }        // banda de vídeo (topo)
-	rows_top := newv_y + NEWZONE_H + g_track_gap                                            // topo da área rolável
-	botband_y := r.y + r.height - 10 - NEWZONE_H
-	g_newa_zone = rl.Rectangle{ r.x + LANE_X, botband_y, r.width - LANE_X, NEWZONE_H }      // banda de áudio (base)
-	rows_vh := max(f32(48), botband_y - g_track_gap - rows_top)                             // altura VISÍVEL das trilhas
+	// São áreas de drop PERMANENTES (sempre visíveis, escuras, sem botão/rótulo): soltar mídia aqui
+	// cria a trilha. Elas ABSORVEM o espaço vazio da timeline — com poucas trilhas ficam grandes;
+	// com muitas encolhem até um mínimo e as trilhas rolam. NÃO mudam de tamanho ao arrastar.
+	NEWZONE_MIN :: f32(28) // altura mínima da área de drop (quando as trilhas tomam o espaço)
+	g_track_h = 72         // altura FIXA da trilha (não expande nem encolhe; quando não cabem, ROLA)
 	nrows := g_nv + g_na
-	g_track_h = 72                                                                          // altura FIXA da trilha (não expande nem encolhe; quando não cabem, ROLA)
 	content_h := f32(nrows) * (g_track_h + g_track_gap)                                     // altura total das trilhas
+	lanes_top := r.y + toolbar_h + ruler_h
+	region_bot := r.y + r.height - 10
+	slack := max(0, (region_bot - lanes_top) - content_h - 2*NEWZONE_MIN - 2*g_track_gap)   // espaço vazio p/ dividir entre as 2 bandas
+	newv_h := NEWZONE_MIN + slack*0.5
+	newa_h := NEWZONE_MIN + slack*0.5
+	newv_y := lanes_top
+	g_newv_zone = rl.Rectangle{ r.x + LANE_X, newv_y, r.width - LANE_X, newv_h }            // banda de vídeo (topo)
+	rows_top := newv_y + newv_h + g_track_gap                                               // topo da área rolável
+	botband_y := region_bot - newa_h
+	g_newa_zone = rl.Rectangle{ r.x + LANE_X, botband_y, r.width - LANE_X, newa_h }         // banda de áudio (base)
+	rows_vh := max(f32(48), botband_y - g_track_gap - rows_top)                             // altura VISÍVEL das trilhas
 	max_vscroll := max(0, content_h - rows_vh)
 
 	// --- zoom (Ctrl+roda), scroll horizontal (Shift+roda) e VERTICAL (roda) ---
@@ -9211,34 +9239,32 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	}
 }
 
-// banda "criar trilha" (estilo NLE). aud=false -> vídeo (topo); aud=true -> áudio (base).
-// Faixa escura com borda tracejada + botão "+": clicar cria trilha vazia; ARRASTAR mídia
-// compatível pra cá cria a trilha e já solta o clipe (tratado no update, ao soltar).
+// área de drop "criar trilha" (estilo NLE). aud=false -> vídeo (topo); aud=true -> áudio (base).
+// É um ESPAÇO ESCURO VAZIO, permanente (sempre visível, sem rótulo): soltar mídia compatível
+// aqui cria a trilha (tratado no update). Um "+" discreto aparece só ao passar o mouse (fora de
+// arraste) p/ criar uma trilha vazia por clique. Realça em verde quando um arraste compatível passa.
 draw_new_track_zone :: proc(z: rl.Rectangle, aud: bool) {
 	if aud ? g_na >= MAXA : g_nv >= MAXV do return // capacidade cheia: some com a banda
 	m := rl.GetMousePosition()
-	// destaca quando um arraste COMPATÍVEL (mesmo tipo) está por cima
 	dragging := st.drag == .Bin || st.drag == .FxLib || (st.drag == .Clip && drag_clip >= 0 && drag_clip < nsegs && drag_trim == 0)
 	type_ok := true
 	if st.drag == .Bin  && bin_drag  >= 0 && bin_drag  < nclips do type_ok = clips[bin_drag].is_audio == aud
 	if st.drag == .Clip && drag_clip >= 0 && drag_clip < nsegs  do type_ok = seg_audio_like(drag_clip) == aud
 	if st.drag == .FxLib do type_ok = !aud // efeito só cria trilha de VÍDEO
-	hot := dragging && type_ok && rl.CheckCollisionPointRec(m, z)
-	rl.DrawRectangleRec(z, hot ? rl.Color{ 60, 120, 90, 90 } : rl.Color{ 18, 20, 24, 180 })
-	dcol := hot ? rl.Color{ 120, 220, 160, 255 } : rl.Color{ 66, 72, 82, 255 }
-	for dx := z.x + 6; dx < z.x + z.width - 6; dx += 12 { // borda tracejada no meio da banda
-		rl.DrawLineEx({dx, z.y + z.height/2}, {min(dx + 6, z.x + z.width - 6), z.y + z.height/2}, 1, dcol)
+	over := rl.CheckCollisionPointRec(m, z)
+	hot := dragging && type_ok && over
+	// fundo escuro vazio; leve tom verde + moldura quando um arraste compatível está por cima
+	rl.DrawRectangleRec(z, hot ? rl.Color{ 34, 48, 42, 170 } : rl.Color{ 20, 22, 27, 150 })
+	if hot do rl.DrawRectangleLinesEx(z, 1.4, rl.Color{ 90, 200, 120, 200 })
+	// "+" discreto p/ criar trilha vazia — só ao passar o mouse e FORA de arraste
+	if !dragging && over {
+		pb := rl.Rectangle{ z.x + 8, z.y + z.height/2 - 9, 18, 18 }
+		rl.DrawRectangleRounded(pb, 0.3, 4, hovered(pb) ? HOVER : rl.Color{ 40, 44, 52, 220 })
+		pcx := pb.x + pb.width/2; pcy := pb.y + pb.height/2
+		rl.DrawLineEx({pcx - 4, pcy}, {pcx + 4, pcy}, 2, TEXT)
+		rl.DrawLineEx({pcx, pcy - 4}, {pcx, pcy + 4}, 2, TEXT)
+		if clicked(pb) { if aud do add_audio_track(); else do add_video_track() }
 	}
-	// botão "+" à esquerda + rótulo
-	pb := rl.Rectangle{ z.x + 8, z.y + 2, z.height - 4, z.height - 4 }
-	rl.DrawRectangleRounded(pb, 0.3, 4, hovered(pb) ? HOVER : rl.Color{ 40, 44, 52, 255 })
-	pcx := pb.x + pb.width/2; pcy := pb.y + pb.height/2
-	rl.DrawLineEx({pcx - 4, pcy}, {pcx + 4, pcy}, 2, TEXT)
-	rl.DrawLineEx({pcx, pcy - 4}, {pcx, pcy + 4}, 2, TEXT)
-	if clicked(pb) { if aud do add_audio_track(); else do add_video_track() }
-	lbl: cstring = aud ? "+ trilha de áudio" : "+ trilha de vídeo"
-	if hot do lbl = aud ? "soltar: nova trilha de áudio" : "soltar: nova trilha de vídeo"
-	txt(lbl, pb.x + pb.width + 10, z.y + z.height/2 - 6, 11, hot ? rl.WHITE : MUTED)
 }
 
 draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
