@@ -24,25 +24,29 @@ import win "core:sys/windows"
 // a partir do %TEMP% REAL da máquina — NÃO pode ser fixa: o editor roda em qualquer usuário.
 AUDIO_BASE: string
 EXE_DIR: string // pasta do .exe (heap, dono) — preenchida em init_paths; base do log de diagnóstico
-DEC_W   :: 640
-DEC_H   :: 360
+DEC_W   :: 1280 // resolução do cache/preview (era 640×360 — borrava gravações de tela nítidas
+DEC_H   :: 720  // 1080p reduzidas; 720p mata a cintilação do upscale. Custo: 4× RAM/frame).
 DEC_FPS :: f32(30)
-FRAME   :: DEC_W * DEC_H * 3 // bytes por frame (rgb24)
-// letterbox: preserva o aspecto da fonte e completa com barras pretas até 640x360
+FRAME   :: DEC_W * DEC_H * 3 // bytes por frame (rgb24) — 720p = ~2.76 MB
+// letterbox: preserva o aspecto da fonte e completa com barras pretas até DEC_W×DEC_H
 // (mesmo tratamento que img_decode e a prévia do export já fazem). Sem isto, vídeo
 // vertical/anamórfico era ESTICADO p/ 16:9 na textura e ficava distorcido.
-DEC_VF  :: "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2"
+DEC_VF  :: "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2"
 // --- qualidade da PRÉVIA de clipes STREAMING (longos): o decode ao vivo roda em
 // 360p (Baixa, padrão — leve) ou 720p (Alta — mais nítido, ~4x os bytes/frame).
-// SÓ afeta streaming; clipes curtos (cache em RAM) seguem sempre em DEC_W×DEC_H.
+// SÓ afeta streaming; clipes curtos (cache em RAM) seguem sempre em DEC_W×DEC_H (720p).
+// STREAM_LO é a res do Baixa — DESACOPLADA de DEC_W (que agora é 720p): sem isto, subir
+// DEC_W jogava o Baixa do streaming pra 720p sem querer (dobrava o custo de decode).
 // Toggle na barra do player. fbuf/scrub_buf/dup_buf são alocados no tamanho MÁX
 // (720p) p/ a troca de qualidade nunca realocar buffer sob as threads de decode.
+STREAM_LO_W :: i32(640)
+STREAM_LO_H :: i32(360)
 STREAM_HI_W :: i32(1280)
 STREAM_HI_H :: i32(720)
 STREAM_FBYTES_MAX :: int(STREAM_HI_W) * int(STREAM_HI_H) * 3
 stream_hi: bool // false = Baixa (360p); true = Alta (720p). Global (estilo NLE)
-stream_dw :: proc() -> i32 { return stream_hi ? STREAM_HI_W : i32(DEC_W) }
-stream_dh :: proc() -> i32 { return stream_hi ? STREAM_HI_H : i32(DEC_H) }
+stream_dw :: proc() -> i32 { return stream_hi ? STREAM_HI_W : STREAM_LO_W }
+stream_dh :: proc() -> i32 { return stream_hi ? STREAM_HI_H : STREAM_LO_H }
 // scrub (streaming): distância MÁX (s, no tempo da fonte) que o último frame decodificado
 // pode estar do cursor antes de cair pra miniatura 96×54 do filmstrip. Era 1.5 fixo — curto
 // demais: num arrasto lento fundo num vídeo de horas cada seek custa MAIS que 1.5s de
@@ -60,7 +64,9 @@ SCRUB_HW_MS :: f64(700)
 MAX_CLIPS     :: 12
 DBG_PLAY      :: false // LOG de diagnóstico do playback a cada frame (stderr); ligue p/ depurar
 STREAM_OVER   :: 45  // clipes acima disso decodificam ao vivo (streaming), não em RAM
-CACHE_BUDGET  :: 180 // teto de segundos mantidos no cache em RAM (~20 MB/s)
+CACHE_BUDGET  :: 45  // teto de segundos (ponderado por fps) no cache RAM. Cortado de 180→45 ao
+                     // subir o cache p/ 720p (4× bytes/frame): ~45s×30fps×2.76MB ≈ 3.7GB de teto,
+                     // seguro nos 15.8GB da máquina. Clipes que não cabem viram streaming.
 // orçamento GLOBAL de leituras bloqueantes do pipe de vídeo POR FRAME de UI (main
 // thread): os limites de catch-up eram POR CLIPE (3 no clip_frame, 2 no dup_frame),
 // então 3+ trilhas streaming empilhadas em catch-up simultâneo somavam 9+ decodes
@@ -695,6 +701,46 @@ want_import: bool // pedido de abrir o diálogo de importar (tratado no update)
 // espúrio disparava respawn de vídeo à toa). Zerado (=-1) a cada seek/aquisição.
 aud_prev: f32 = -1
 
+// frame de vídeo EXIBIDO no playback, avançado por PASSO travado no vsync (não amostrado do
+// relógio). A 60fps num monitor de 60Hz o período do conteúdo == período do render: amostrar
+// int(src_t*fps) por frame gera "beat" (repete+pula) a cada leve jitter de fase. Avançar +1 por
+// frame de render dentro de uma zona-morta mata o beat (1:1 perfeito); fora dela persegue o
+// relógio de áudio (corrige drift / faz pulldown quando render != conteúdo, ex. 75Hz). -1 =
+// re-ancora no próximo frame (resetado junto de aud_prev em seek/aquisição).
+play_frame: int = -1
+
+// relógio de reprodução SUAVE (anti-judder). GetMusicTimePlayed avança em degraus de ~10-20ms
+// (granularidade do callback de áudio); amostrá-lo 1×/frame de render (16.7ms) faz o índice de
+// frame de vídeo `int(t*fps)` às vezes PULAR 2 e no frame seguinte REPETIR (step 0) — o par
+// pula+repete é o judder, visível a 60fps (onde cada frame de render tem de avançar exatamente
+// 1 frame de vídeo; a 30fps a folga de 2 frames de render absorve o jitter). Correção: avança
+// pelo dt de render (uniforme) e só reata no relógio de áudio quando o drift passa de SMOOTH_RESYNC
+// (seek, hitch, buffer esvaziado) — mantém A/V em sync com folga bem menor que os limiares de
+// underrun/fim (0.25s). `aud_prev` passa a guardar o valor SUAVE; o chamador zera aud_prev=-1 em
+// seek/aquisição p/ o 1º frame assentar no áudio. Monotônico: nunca recua (segura no underrun).
+// snap SECO só p/ drift enorme (seek perdido, troca de janela de áudio, underrun longo). Abaixo
+// disso a correção é PROPORCIONAL (PLL) — nunca congela nem pula, então o pulldown 4:5 (60fps em
+// 75Hz) fica uniforme. O snap seco (threshold pequeno) congelava o índice por 2-3 frames = os
+// "engasgos duplos" que sobravam de judder.
+SMOOTH_HARD  :: f32(0.25)  // drift catastrófico: reata seco (bate com os limiares de underrun/fim)
+SMOOTH_GAIN  :: f32(0.05)  // correção suave por frame: ~0.27s p/ absorver drift (A/V inaudível)
+smooth_clock :: proc(raw, dt: f32) -> f32 {
+	if aud_prev < 0 do return raw                  // 1º frame após seek/aquisição: assenta no áudio
+	sm := aud_prev + dt                            // avança liso pelo tempo de render (vsync)
+	drift := raw - sm
+	if abs(drift) > SMOOTH_HARD do return raw       // catastrófico: reata seco no áudio
+	sm += drift * SMOOTH_GAIN                        // PLL: puxa devagar p/ o áudio, sem congelar/pular
+	if sm < aud_prev do sm = aud_prev               // monotônico (nunca recua)
+	return sm
+}
+
+// taxa de atualização do monitor (Hz). O playback renderiza TRAVADO nela (não em 60 fixo):
+// num monitor de 74Hz, render a 60fps espreme 60 frames em 74 refreshes → alguns aparecem por
+// 1 refresh, outros por 2, IRREGULAR = judder (visível a 60fps; 30fps de câmera mascara). Render
+// = refresh trava a apresentação no vsync e o vídeo (índice por relógio suave) fica o mais liso
+// possível. Lido 1× no startup (fallback 60 se o driver devolver algo esquisito).
+g_refresh: i32 = 60
+
 // ---------- controle da janela (barra de título própria) ----------
 should_close: bool        // botão fechar da barra custom
 win_dragging: bool        // arrastando a janela pela barra
@@ -777,6 +823,7 @@ Clip :: struct {
 	thumbs_ready:   bool,           // (main) todas as texturas prontas
 	// --- modo cache (clipes curtos): todos os frames em RAM ---
 	streaming: bool,
+	cfps:   f32, // fps do cache: segue a fonte (teto 60). 0 = streaming/imagem (usa DEC_FPS)
 	total:  int,
 	cached: int, // atômico
 	shown:  int,
@@ -1009,7 +1056,7 @@ dbg_toggle :: proc() {
 	sync.mutex_lock(&dbg_mtx); dbg_f = f; sync.mutex_unlock(&dbg_mtx)
 	dbg_t0 = time.tick_now()
 	intrinsics.atomic_store(&dbg_on, true)
-	dbg("INICIO", "captura ligada")
+	dbg("INICIO", "captura ligada — g_refresh=%dHz monitor=%dHz vsync=hint", g_refresh, rl.GetMonitorRefreshRate(rl.GetCurrentMonitor()))
 	set_toast("Diagnóstico GRAVANDO — reproduza o problema e aperte F4")
 }
 
@@ -2066,7 +2113,9 @@ main :: proc() {
 	rl.SetAudioStreamBufferSizeDefault(16384)
 	rl.InitAudioDevice()
 	build_done_sound() // gera o "ding" de fim de exportação (precisa do audio device pronto)
-	rl.SetTargetFPS(60)
+	g_refresh = i32(rl.GetMonitorRefreshRate(rl.GetCurrentMonitor()))
+	if g_refresh < 30 || g_refresh > 360 do g_refresh = 60 // driver devolveu 0/valor absurdo: 60
+	rl.SetTargetFPS(g_refresh)
 
 	cp: [FONT_CP_N]rune
 	for i in 0 ..< len(cp) do cp[i] = rune(32 + i)
@@ -2272,11 +2321,11 @@ timeline_max_src_bitrate :: proc() -> int {
 	return best
 }
 
-video_probe :: proc(path: string) -> (dur: f32, codec: string, vw, vh: i32) {
+video_probe :: proc(path: string) -> (dur: f32, codec: string, vw, vh: i32, fps: f32) {
 	_, out, _, e := os.process_exec(os.Process_Desc{
 		command = []string{
 			"ffprobe", "-v", "error", "-select_streams", "v:0",
-			"-show_entries", "stream=codec_name,width,height:stream_side_data=rotation:stream_tags=rotate:format=duration",
+			"-show_entries", "stream=codec_name,width,height,avg_frame_rate,r_frame_rate:stream_side_data=rotation:stream_tags=rotate:format=duration",
 			"-of", "default=nw=1", path,
 		},
 	}, context.temp_allocator)
@@ -2284,11 +2333,24 @@ video_probe :: proc(path: string) -> (dur: f32, codec: string, vw, vh: i32) {
 	return probe_parse(string(out))
 }
 
+// fps a partir de "num/den" (avg_frame_rate/r_frame_rate do ffprobe) ou de um número solto.
+// "0/0" (VFR sem info) e denominador zero devolvem 0.
+parse_fps :: proc(s: string) -> f32 {
+	if i := strings.index_byte(s, '/'); i >= 0 {
+		n, nok := strconv.parse_f64(strings.trim_space(s[:i]))
+		d, dok := strconv.parse_f64(strings.trim_space(s[i+1:]))
+		if nok && dok && d > 0 do return f32(n / d)
+		return 0
+	}
+	if v, ok := strconv.parse_f64(strings.trim_space(s)); ok do return f32(v)
+	return 0
+}
+
 // parse da saída do ffprobe (formato `chave=valor`, uma por linha). Extrai duração, codec e
 // dimensões de EXIBIÇÃO: com rotação de ±90/±270 (celular gravado deitado guarda os pixels
 // 1920x1080 + rotation=-90) o ffmpeg auto-rotaciona no decode, então trocamos w/h p/ casar com
 // o que o DEC_VF produz. "N/A" e linhas sem `=` são ignoradas.
-probe_parse :: proc(out: string) -> (dur: f32, codec: string, vw, vh: i32) {
+probe_parse :: proc(out: string) -> (dur: f32, codec: string, vw, vh: i32, fps: f32) {
 	rot := 0
 	for ln in strings.split_lines(strings.trim_space(out), context.temp_allocator) {
 		l := strings.trim_space(ln)
@@ -2301,6 +2363,10 @@ probe_parse :: proc(out: string) -> (dur: f32, codec: string, vw, vh: i32) {
 		case key == "codec_name": codec = val
 		case key == "width":      if v, ok := strconv.parse_int(val, 10); ok do vw = i32(v)
 		case key == "height":     if v, ok := strconv.parse_int(val, 10); ok do vh = i32(v)
+		// avg_frame_rate vem primeiro (média real, ideal p/ VFR); r_frame_rate só cobre
+		// quando o avg falha ("0/0"). Ambos = fração "num/den".
+		case key == "avg_frame_rate": if v := parse_fps(val); v > 0 do fps = v
+		case key == "r_frame_rate":   if fps <= 0 { if v := parse_fps(val); v > 0 do fps = v }
 		case key == "rotation" || strings.has_suffix(key, "rotate"):
 			if v, ok := strconv.parse_int(val, 10); ok do rot = v
 		}
@@ -2348,10 +2414,14 @@ hw_reject :: proc(c: ^Clip) { c.no_hw = true; c.no_hw_tk = time.tick_now(); dbg(
 
 // ---------- importação (assíncrona) ----------
 // soma de segundos em cache (só clipes já-decididos e não-streaming)
+// fps do cache do clipe (segue a fonte, teto 60); DEC_FPS quando não definido
+cfps_of :: proc(c: ^Clip) -> f32 { return c.cfps > 0 ? c.cfps : DEC_FPS }
+
 cached_seconds :: proc() -> f32 {
 	s: f32 = 0
 	for i in 0 ..< nclips {
-		if intrinsics.atomic_load(&clips[i].probed) && !clips[i].streaming do s += clips[i].dur
+		// pesa por fps: um clipe 60fps ocupa 2×/seg na RAM, então conta como 2× no orçamento
+		if intrinsics.atomic_load(&clips[i].probed) && !clips[i].streaming do s += clips[i].dur * cfps_of(&clips[i]) / DEC_FPS
 	}
 	return s
 }
@@ -2561,23 +2631,25 @@ apply_split :: proc(kind: int) {
 	set_toast("Tela dividida aplicada (áudio: trilha base)")
 }
 
-// dispara o decoder do cache em RAM (NVDEC quando possível). true = processo subiu.
+// dispara o decoder do cache em RAM. SOFTWARE de propósito (NÃO cuvid/NVDEC): o NVDEC lida mal
+// com o timestamp de certos streams h264 e, com `-r`, produz CONTAGEM de frames ERRADA — ex.:
+// gravação OBS 60fps de 1218 frames vira 1221 no cuvid+`-r 60` (3 frames duplicados fora de
+// lugar), enquanto o software dá 1218 exatos. O cache indexa `int(t*fps)` assumindo dur*fps frames
+// UNIFORMES; frames extras desalinham do relógio de áudio = JUDDER (só nesse arquivo — re-encode e
+// VLC ficam lisos porque não passam por cuvid+`-r`). O cache decodifica 1× em background, então
+// trocar a velocidade do NVDEC pela correção do software compensa. `-threads 2`: não toma todos os
+// cores durante o playback. (streaming/scrub seguem usando NVDEC — lá o decode é por -ss, não índice.)
 cache_dec_start :: proc(c: ^Clip) -> bool {
 	r, w, e := os.pipe()
 	if e != nil do return false
-	hw := use_cuvid(c)
-	sw_cmd := []string{
-		"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", c.path,
-		"-vf", DEC_VF, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", "30",
+	rb: [16]u8
+	fps_s := fmt.bprintf(rb[:], "%.5f", cfps_of(c)) // fps do cache = fps da fonte (cap 60)
+	cmd := []string{
+		"ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "2", "-i", c.path,
+		"-vf", DEC_VF, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", fps_s,
 		"-an", "-sn", "pipe:1",
 	}
-	hw_cmd := []string{ // sem -resize (esticaria): letterbox pela CPU preserva o aspecto
-		"ffmpeg", "-hide_banner", "-loglevel", "error",
-		"-c:v", hw, "-i", c.path,
-		"-vf", DEC_VF, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", "30",
-		"-an", "-sn", "pipe:1",
-	}
-	p, pe := os.process_start(os.Process_Desc{ command = hw != "" ? hw_cmd : sw_cmd, stdout = w })
+	p, pe := os.process_start(os.Process_Desc{ command = cmd, stdout = w })
 	os.close(w)
 	if pe != nil { os.close(r); return false }
 	tame_process(c, p, false)
@@ -2615,13 +2687,13 @@ audio_probe_dur :: proc(path: string) -> f32 {
 	return 0
 }
 
-// decodifica UM frame da imagem (letterbox p/ 640x360) direto p/ c.cache[0]
+// decodifica UM frame da imagem (letterbox p/ DEC_W×DEC_H) direto p/ c.cache[0]
 image_decode :: proc(c: ^Clip) -> bool {
 	r, w, e := os.pipe()
 	if e != nil do return false
 	cmd := []string{
 		"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", c.path,
-		"-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2",
+		"-vf", DEC_VF, // mesma escala/letterbox do vídeo (DEC_W×DEC_H) — casa com o tamanho de FRAME
 		"-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
 	}
 	p, pe := os.process_start(os.Process_Desc{ command = cmd, stdout = w })
@@ -2649,7 +2721,7 @@ import_worker :: proc(c: ^Clip) {
 		c.total = 1
 		c.cache = make([]u8, FRAME)
 		if !image_decode(c) { intrinsics.atomic_store(&c.failed, true); intrinsics.atomic_store(&c.probed, true); return }
-		if _, _, iw, ih := video_probe(c.path); iw > 0 { c.vw = iw; c.vh = ih } // dims p/ autodetectar proj_ar
+		if _, _, iw, ih, _ := video_probe(c.path); iw > 0 { c.vw = iw; c.vh = ih } // dims p/ autodetectar proj_ar
 		intrinsics.atomic_store(&c.cached, 1)
 		intrinsics.atomic_store(&c.probed, true)
 		decode_thumbs(c) // tira a miniatura do próprio frame (caminho de cache)
@@ -2671,7 +2743,7 @@ import_worker :: proc(c: ^Clip) {
 		return
 	}
 
-	dur, codec, vw, vh := video_probe(c.path)
+	dur, codec, vw, vh, sfps := video_probe(c.path)
 	if dur <= 0 {
 		intrinsics.atomic_store(&c.failed, true)
 		intrinsics.atomic_store(&c.probed, true)
@@ -2680,7 +2752,12 @@ import_worker :: proc(c: ^Clip) {
 	c.dur = dur
 	c.vcodec = strings.clone(codec)
 	c.vw = vw; c.vh = vh // publicado antes do store de `probed`: a main thread lê p/ autodetectar proj_ar
-	c.streaming = dur > STREAM_OVER || cached_seconds() + dur > CACHE_BUDGET
+	// fps que o cache usaria: SEGUE a fonte, teto 60. Uma gravação 60fps tocava a 30
+	// (o cache forçava -r 30) e o movimento fino "tremia"/judder; agora toca nativo.
+	// 24/25/30 seguem como são (menos RAM). Probe falho -> DEC_FPS.
+	cf := sfps > 0 ? min(sfps, f32(60)) : DEC_FPS
+	// RAM ~ dur × fps: um clipe 60fps ocupa 2×/seg, então pesa 2× ao decidir streaming
+	c.streaming = dur > STREAM_OVER || cached_seconds() + dur * cf / DEC_FPS > CACHE_BUDGET
 
 	if c.streaming {
 		c.dw = stream_dw(); c.dh = stream_dh() // qualidade atual (Alta/Baixa); dims de decode do clipe
@@ -2692,19 +2769,13 @@ import_worker :: proc(c: ^Clip) {
 		if audio_extract(c, c.aud_head, true) do intrinsics.atomic_store(&c.head_ok, true)
 		intrinsics.atomic_store(&c.head_done, true)
 	} else {
-		c.total = int(dur * DEC_FPS) + 2
+		c.cfps = cf
+		c.total = int(dur * cf) + 2
 		c.cache = make([]u8, c.total * FRAME)
-		was_hw := use_cuvid(c) != ""
+		// cache_dec_start é software (ver lá): sem retry de fallback de NVDEC — o decode do cache
+		// já é software puro, então uma falha aqui é falha real.
 		if !cache_dec_start(c) { intrinsics.atomic_store(&c.failed, true); intrinsics.atomic_store(&c.probed, true); return }
 		ok0 := clip_read_into(c, 0)
-		if !ok0 && was_hw { // NVDEC não entregou nada: refaz por software
-			_ = os.process_kill(c.dec_ps)
-			_, _ = os.process_wait(c.dec_ps)
-			os.close(c.dec_r)
-			hw_reject(c)
-			if !cache_dec_start(c) { intrinsics.atomic_store(&c.failed, true); intrinsics.atomic_store(&c.probed, true); return }
-			ok0 = clip_read_into(c, 0)
-		}
 		if ok0 do intrinsics.atomic_store(&c.cached, 1)
 		intrinsics.atomic_store(&c.probed, true) // já aparece no bin
 		for {
@@ -2872,7 +2943,7 @@ decode_thumbs :: proc(c: ^Clip) {
 		if cached > 0 {
 			for i in 0 ..< nt {
 				t := (f32(i) + 0.5) * c.dur / f32(nt)
-				fi := clamp(int(t * DEC_FPS), 0, cached - 1)
+				fi := clamp(int(t * cfps_of(c)), 0, cached - 1)
 				thumb_from_cache(c.cache[fi * FRAME:], px[i * THUMB_FR:])
 			}
 			got = true
@@ -3403,7 +3474,7 @@ dup_frame :: proc(si: int, local: f32) {
 	if !c.streaming {
 		cached := intrinsics.atomic_load(&c.cached)
 		if cached == 0 do return
-		idx := clamp(int(l * DEC_FPS), 0, cached - 1)
+		idx := clamp(int(l * cfps_of(c)), 0, cached - 1)
 		if idx != d.shown || !d.ok {
 			dup_upload(si, rawptr(raw_data(c.cache[idx * FRAME:])))
 			d.shown = idx; d.has = l
@@ -3709,7 +3780,7 @@ clip_frame :: proc(c: ^Clip, local: f32) {
 	if c.is_text do return // texto não decodifica vídeo (desenhado no compositing)
 	l := clamp(local, 0, c.dur)
 	if !c.streaming {
-		clip_show(c, int(l * DEC_FPS))
+		clip_show(c, int(l * cfps_of(c)))
 		return
 	}
 	// respawn assíncrono no ar: o worker é o dono do live stream — congela o
@@ -4437,7 +4508,7 @@ show_playhead_frame :: proc() {
 		tb := trans_overlap(t, st.playhead)
 		if tb >= 0 {
 			a := trans_prev(tb)
-			frz :: proc(c: ^Clip, sec: f32) { clip_frame(c, clamp(sec, 0, max(0, c.dur - 1.0/DEC_FPS))) }
+			frz :: proc(c: ^Clip, sec: f32) { clip_frame(c, clamp(sec, 0, max(0, c.dur - 1.0/cfps_of(c)))) }
 			// STREAMING também decodifica (clip_frame lida com respawn/EOF): o que ENTRA
 			// respawna no início do overlap, quando a camada dele ainda é transparente —
 			// o hitch fica invisível e ele chega pronto no fim (antes congelava um frame
@@ -4584,7 +4655,7 @@ set_play_clip :: proc(si: int, local: f32) {
 		rl.PauseMusicStream(seg_src(play_clip).music)
 	}
 	play_clip = si
-	aud_prev = -1 // relógio monotônico recomeça após seek/aquisição
+	aud_prev = -1; play_frame = -1 // relógio monotônico e passo de frame recomeçam após seek/aquisição
 	c := seg_src(si)
 	// troca a janela p/ a parte da região ou o chunk no bolso, se prontos
 	if c.has_audio && !try_part_open(c, local) do _ = try_chunk_open(c, local)
@@ -4969,7 +5040,7 @@ seek_global :: proc(t: f32) {
 src_acquire :: proc() {
 	if src_preview < 0 do return
 	c := &clips[src_preview]
-	aud_prev = -1
+	aud_prev = -1; play_frame = -1
 	if !c.has_audio do return
 	if !try_part_open(c, src_t) do _ = try_chunk_open(c, src_t)
 	if audio_clock_ok(c, src_t) {
@@ -5116,11 +5187,11 @@ draw_fullscreen_video :: proc(sw, sh: f32) {
 		np := clamp((m.x - pbar.x) / pbar.width, 0, 1) * total
 		if src_preview >= 0 {
 			src_t = np
-			if !clips[src_preview].streaming do clip_show(&clips[src_preview], int(np * DEC_FPS))
+			if !clips[src_preview].streaming do clip_show(&clips[src_preview], int(np * cfps_of(&clips[src_preview])))
 		} else {
 			st.playhead = np
 			v := view_seg()
-			if v >= 0 && !seg_src(v).streaming do clip_show(seg_src(v), int(seg_local(v, np) * DEC_FPS))
+			if v >= 0 && !seg_src(v).streaming do clip_show(seg_src(v), int(seg_local(v, np) * cfps_of(seg_src(v))))
 		}
 	}
 
@@ -5187,8 +5258,7 @@ update_src_preview :: proc(dt: f32) {
 	if c.has_audio && audio_clock_ok(c, src_t) {
 		rl.SetMusicVolume(c.music, player_vol) // volume do player (monitor)
 		rl.UpdateMusicStream(c.music)
-		nt := rl.GetMusicTimePlayed(c.music) + c.music_base
-		if aud_prev >= 0 && nt < aud_prev do nt = aud_prev // relógio monotônico
+		nt := smooth_clock(rl.GetMusicTimePlayed(c.music) + c.music_base, dt) // relógio suave (anti-judder)
 		aud_prev = nt
 		src_t = nt
 		if !rl.IsMusicStreamPlaying(c.music) && src_t < c.dur - 0.25 do rl.ResumeMusicStream(c.music) // underrun
@@ -5202,7 +5272,21 @@ update_src_preview :: proc(dt: f32) {
 		st.playing = false
 		if c.has_audio do rl.PauseMusicStream(c.music)
 	}
-	clip_frame(c, src_t)
+	// DISPLAY: frame por PASSO travado no vsync (ver play_frame). Cache indexa a RAM direto;
+	// streaming decodifica por tempo (respawn/EOF) e mantém o caminho antigo.
+	if c.streaming {
+		clip_frame(c, src_t)
+	} else {
+		target := int(src_t * cfps_of(c))
+		if play_frame < 0 do play_frame = target
+		else {
+			d := target - play_frame
+			if d >= 2 do play_frame += 2         // atrasado 2+: acelera (raro; hitch/render mais lento)
+			else if d > -2 do play_frame += 1    // zona-morta -1..+1: sempre +1 (1:1, sem beat)
+			// d <= -2: segura (render mais rápido que o conteúdo, ex. 75Hz -> pulldown uniforme)
+		}
+		clip_show(c, play_frame)
+	}
 }
 
 toggle_play :: proc() {
@@ -5235,7 +5319,12 @@ update :: proc() {
 	// metade do custo de render; qualquer interação volta a 60 no frame seguinte.
 	// O avanço por relógio de parede usa dt, então funciona em qualquer fps.
 	idle := !st.playing && st.drag == .None && !win_dragging && !tl_hbar_drag && !zoom_bar_drag && !bin_marquee && !tl_marquee
-	rl.SetTargetFPS(idle ? 30 : 60)
+	// PLAYBACK: sem cap de CPU — deixa o VSYNC ditar o ritmo (trava no vblank do monitor,
+	// como o VLC). SetTargetFPS(60) por timer de CPU não sincroniza com o refresh e batia
+	// contra o vsync = judder/tearing. 0 = ilimitado, mas o VSYNC_HINT segura no refresh atual
+	// (casa com qualquer taxa, inclusive se o usuário trocar 75->60Hz com o app aberto).
+	// Parado: mantém o cap de 30 (economia; sem playback a suavidade não importa).
+	rl.SetTargetFPS(idle ? 30 : 0)
 
 	dt := rl.GetFrameTime()
 	// TETO no dt: uma travada longa (respawn do decoder de vídeo ~250ms, extração de
@@ -5423,7 +5512,8 @@ update :: proc() {
 		if rl.IsKeyPressed(.S) do split_at_playhead()
 		if rl.IsKeyPressed(.B) do blade_mode = !blade_mode
 		if rl.IsKeyPressed(.F) do tl_fit(g_view_w) // ajusta o zoom p/ o conteúdo caber na janela
-		step := (rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)) ? f32(1) : 1.0 / DEC_FPS
+		vs := view_seg() // passo de 1 frame segue o fps do clipe sob o playhead (60fps -> 1/60)
+		step := (rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)) ? f32(1) : (vs >= 0 ? 1.0 / cfps_of(seg_src(vs)) : 1.0 / DEC_FPS)
 		if rl.IsKeyPressed(.RIGHT) || rl.IsKeyPressedRepeat(.RIGHT) { st.playing = false; seek_global(st.playhead + step) }
 		if rl.IsKeyPressed(.LEFT)  || rl.IsKeyPressedRepeat(.LEFT)  { st.playing = false; seek_global(st.playhead - step) }
 		if rl.IsKeyPressed(.HOME) { st.playing = false; seek_global(0) }
@@ -5454,7 +5544,7 @@ update :: proc() {
 			src := seg_src(vc)
 			local := seg_local(vc, st.playhead)
 			if !src.streaming {
-				clip_show(src, int(local * DEC_FPS)) // cache: preview ao vivo, direto da RAM
+				clip_show(src, int(local * cfps_of(src))) // cache: preview ao vivo, direto da RAM
 			} else {
 				// streaming: delega o frame ao worker async (não trava a UI); keyframes
 				// chegam conforme o decode dá (num arquivo de HORAS cada spawn paga o
@@ -8272,11 +8362,11 @@ draw_preview :: proc(r: rl.Rectangle) {
 		np := clamp((rl.GetMousePosition().x - pbar.x) / pbar.width, 0, 1) * total
 		if src_preview >= 0 {
 			src_t = np
-			if !clips[src_preview].streaming do clip_show(&clips[src_preview], int(np * DEC_FPS)) // cache: scrub instantâneo
+			if !clips[src_preview].streaming do clip_show(&clips[src_preview], int(np * cfps_of(&clips[src_preview]))) // cache: scrub instantâneo
 		} else {
 			st.playhead = np
 			v := view_seg()
-			if v >= 0 && !seg_src(v).streaming do clip_show(seg_src(v), int(seg_local(v, np) * DEC_FPS))
+			if v >= 0 && !seg_src(v).streaming do clip_show(seg_src(v), int(seg_local(v, np) * cfps_of(seg_src(v))))
 		}
 	}
 

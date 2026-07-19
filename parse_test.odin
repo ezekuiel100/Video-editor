@@ -16,45 +16,70 @@ import "base:intrinsics"
 
 @(test)
 probe_parse_campos :: proc(t: ^testing.T) {
-	d, c, w, h := probe_parse("codec_name=h264\nwidth=1920\nheight=1080\nduration=123.5\n")
+	d, c, w, h, _ := probe_parse("codec_name=h264\nwidth=1920\nheight=1080\nduration=123.5\n")
 	testing.expect(t, t_feq(d, 123.5) && c == "h264", "duração e codec por chave")
 	testing.expect(t, w == 1920 && h == 1080, "largura e altura por chave")
 }
 
 @(test)
 probe_parse_ordem_indiferente :: proc(t: ^testing.T) {
-	d, c, w, h := probe_parse("duration=42.0\nwidth=1080\ncodec_name=hevc\nheight=1920\n")
+	d, c, w, h, _ := probe_parse("duration=42.0\nwidth=1080\ncodec_name=hevc\nheight=1920\n")
 	testing.expect(t, t_feq(d, 42) && c == "hevc" && w == 1080 && h == 1920, "ordem das chaves não importa")
 }
 
 @(test)
 probe_parse_crlf_e_espacos :: proc(t: ^testing.T) {
-	d, c, _, _ := probe_parse("codec_name=hevc\r\nduration=17632.229000\r\n")
+	d, c, _, _, _ := probe_parse("codec_name=hevc\r\nduration=17632.229000\r\n")
 	testing.expect(t, c == "hevc", "linhas CRLF do Windows não sujam o codec")
 	testing.expect(t, t_feq(d, 17632.229), "duração de vídeo de ~5h parseia")
-	d, c, _, _ = probe_parse("  codec_name=vp9  \n\n  duration=42.0  \n")
+	d, c, _, _, _ = probe_parse("  codec_name=vp9  \n\n  duration=42.0  \n")
 	testing.expect(t, c == "vp9" && t_feq(d, 42), "espaços e linhas em branco ignorados")
 }
 
 @(test)
 probe_parse_duracao_na :: proc(t: ^testing.T) {
-	d, c, _, _ := probe_parse("duration=N/A\ncodec_name=h264\n")
+	d, c, _, _, _ := probe_parse("duration=N/A\ncodec_name=h264\n")
 	testing.expect(t, d == 0 && c == "h264", "duração N/A não quebra o parse")
-	d, c, _, _ = probe_parse("")
+	d, c, _, _, _ = probe_parse("")
 	testing.expect(t, d == 0 && c == "", "saída vazia = zero-values")
 }
 
 @(test)
 probe_parse_rotacao_troca_dims :: proc(t: ^testing.T) {
 	// celular gravado deitado: pixels 1920x1080 + display matrix -90 → exibe 1080x1920
-	_, _, w, h := probe_parse("width=1920\nheight=1080\nrotation=-90\n")
+	_, _, w, h, _ := probe_parse("width=1920\nheight=1080\nrotation=-90\n")
 	testing.expect(t, w == 1080 && h == 1920, "rotação -90 (side_data) troca largura/altura")
-	_, _, w, h = probe_parse("width=1920\nheight=1080\nTAG:rotate=90\n")
+	_, _, w, h, _ = probe_parse("width=1920\nheight=1080\nTAG:rotate=90\n")
 	testing.expect(t, w == 1080 && h == 1920, "tag rotate=90 (ffmpeg antigo) também troca")
-	_, _, w, h = probe_parse("width=1080\nheight=1920\nrotation=180\n")
+	_, _, w, h, _ = probe_parse("width=1080\nheight=1920\nrotation=180\n")
 	testing.expect(t, w == 1080 && h == 1920, "rotação 180 não inverte dimensões")
-	_, _, w, h = probe_parse("width=1080\nheight=1920\n")
+	_, _, w, h, _ = probe_parse("width=1080\nheight=1920\n")
 	testing.expect(t, w == 1080 && h == 1920, "sem rotação: dimensões como vieram")
+}
+
+@(test)
+probe_parse_fps :: proc(t: ^testing.T) {
+	// avg_frame_rate (fração) tem prioridade
+	_, _, _, _, f := probe_parse("codec_name=h264\navg_frame_rate=60/1\nr_frame_rate=60/1\n")
+	testing.expect(t, t_feq(f, 60), "60/1 = 60fps")
+	// 29.97: 30000/1001
+	_, _, _, _, f = probe_parse("avg_frame_rate=30000/1001\n")
+	testing.expect(t, f > 29.9 && f < 30.0, "30000/1001 ≈ 29.97fps")
+	// avg "0/0" (VFR sem info) cai p/ r_frame_rate
+	_, _, _, _, f = probe_parse("avg_frame_rate=0/0\nr_frame_rate=25/1\n")
+	testing.expect(t, t_feq(f, 25), "avg 0/0 inválido cai p/ r_frame_rate")
+	// sem info nenhuma = 0 (chamador usa DEC_FPS)
+	_, _, _, _, f = probe_parse("codec_name=h264\n")
+	testing.expect(t, f == 0, "sem frame_rate = 0 (fallback do chamador)")
+}
+
+@(test)
+parse_fps_fracao :: proc(t: ^testing.T) {
+	testing.expect(t, t_feq(parse_fps("60/1"), 60), "fração simples")
+	testing.expect(t, t_feq(parse_fps("30"), 30), "número solto")
+	testing.expect(t, parse_fps("0/0") == 0, "denominador zero = 0")
+	testing.expect(t, parse_fps("N/A") == 0, "texto inválido = 0")
+	testing.expect(t, parse_fps("") == 0, "vazio = 0")
 }
 
 @(test)
