@@ -7314,7 +7314,10 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 
 	// iniciar seleção por retângulo: press em área VAZIA do painel (nenhuma miniatura pegou
 	// o clique). Modo SOMAR se Ctrl/Shift; senão substitui a seleção atual.
-	if !bin_marquee && !handled && rl.IsMouseButtonPressed(.LEFT) && hovered(r) && st.drag == .None && src_preview < 0 {
+	// (roda também com a prévia de origem aberta: o duplo-clique de importar depende do fluxo
+	// da marquee — com o guard `src_preview < 0` aqui, abrir uma prévia MATAVA o "duplo-clique
+	// na área vazia importa" até o usuário sair da prévia com Esc/clique na timeline)
+	if !bin_marquee && !handled && rl.IsMouseButtonPressed(.LEFT) && hovered(r) && st.drag == .None {
 		bin_marquee = true
 		bin_marquee_start = rl.GetMousePosition()
 		bin_marquee_moved = false
@@ -7337,7 +7340,7 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 			for k in 0 ..< nclips do if !intrinsics.atomic_load(&clips[k].failed) && !clips[k].closed do have += 1
 			now := rl.GetTime()
 			if have == 0 { want_import = true }
-			else if bin_empty_click_t > 0 && now - bin_empty_click_t < 0.35 { want_import = true; bin_empty_click_t = -1 }
+			else if bin_empty_click_t > 0 && now - bin_empty_click_t < 0.5 { want_import = true; bin_empty_click_t = -1 } // 0.5s = duplo-clique padrão do Windows (0.35 perdia cliques)
 			else { bin_empty_click_t = now }
 		}
 	}
