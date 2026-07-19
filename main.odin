@@ -725,11 +725,17 @@ play_frame: int = -1
 SMOOTH_HARD  :: f32(0.25)  // drift catastrófico: reata seco (bate com os limiares de underrun/fim)
 SMOOTH_GAIN  :: f32(0.05)  // correção suave por frame: ~0.27s p/ absorver drift (A/V inaudível)
 smooth_clock :: proc(raw, dt: f32) -> f32 {
-	if aud_prev < 0 do return raw                  // 1º frame após seek/aquisição: assenta no áudio
+	if aud_prev < 0 do return raw                  // sem âncora (segurança; a prévia sempre ancora)
 	sm := aud_prev + dt                            // avança liso pelo tempo de render (vsync)
 	drift := raw - sm
-	if abs(drift) > SMOOTH_HARD do return raw       // catastrófico: reata seco no áudio
-	sm += drift * SMOOTH_GAIN                        // PLL: puxa devagar p/ o áudio, sem congelar/pular
+	// |drift| grande = relógio INVÁLIDO — jamais snap, avança pelo dt e re-sincroniza quando
+	// o raw assentar. Casos reais medidos: (a) após Stop→Seek→Play com pré-encher, o
+	// GetMusicTimePlayed "wrapa" p/ ~fim-do-arquivo−buffer (~19.6s num clipe de 20s!) até o
+	// 1º sub-buffer tocar (~0.3s) — snap p/ FRENTE fazia o replay começar no fim ("play de
+	// novo não volta pro início"); (b) fim de stream/troca de janela zera o relógio — snap p/
+	// TRÁS rebobinava a prévia no fim. Seeks reais ancoram aud_prev na posição PEDIDA
+	// (src_acquire), então o PLL captura assim que o raw fica são.
+	if abs(drift) <= SMOOTH_HARD do sm += drift * SMOOTH_GAIN
 	if sm < aud_prev do sm = aud_prev               // monotônico (nunca recua)
 	return sm
 }
@@ -3068,6 +3074,10 @@ parts_worker :: proc(c: ^Clip) {
 try_part_open :: proc(c: ^Clip, local: f32) -> bool {
 	if audio_clock_ok(c, local) do return true
 	if intrinsics.atomic_load(&c.parts_done) < 1 do return false // FLAC ainda não pronto
+	// cache/áudio (não-streaming, sem head): QUALQUER música base-0 aberta já é a parte 0
+	// completa — não há janela melhor. Sem este guard, áudio mais curto que o vídeo caía no
+	// caso abaixo (end < dur-0.5) e descarregava/reabria o MESMO arquivo a cada frame da cauda.
+	if !c.streaming && c.has_audio && c.music_base == 0 do return false
 	// já é o FLAC completo (base 0, cobre ~c.dur)? então não há o que trocar
 	if c.has_audio && c.music_base == 0 {
 		end := f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
@@ -5040,7 +5050,10 @@ seek_global :: proc(t: f32) {
 src_acquire :: proc() {
 	if src_preview < 0 do return
 	c := &clips[src_preview]
-	aud_prev = -1; play_frame = -1
+	// ancora o relógio na posição PEDIDA (lição 3 da timeline): logo após Stop→Seek→Play o
+	// GetMusicTimePlayed lê lixo (wrap p/ ~fim-do-arquivo por ~0.3s) — o smooth_clock rejeita
+	// o glitch e captura quando o raw assentar perto da âncora
+	aud_prev = clamp(src_t, 0, c.dur); play_frame = -1
 	if !c.has_audio do return
 	if !try_part_open(c, src_t) do _ = try_chunk_open(c, src_t)
 	if audio_clock_ok(c, src_t) {
@@ -5263,8 +5276,15 @@ update_src_preview :: proc(dt: f32) {
 		src_t = nt
 		if !rl.IsMusicStreamPlaying(c.music) && src_t < c.dur - 0.25 do rl.ResumeMusicStream(c.music) // underrun
 	} else {
-		// fora da janela (áudio longo ainda extraindo) ou clipe sem áudio: relógio de parede
-		if c.has_audio && !try_part_open(c, src_t) && !try_chunk_open(c, src_t) do chunk_request(c, src_t)
+		// fora da janela ativa (ou sem áudio): relógio de parede. Cache com o áudio completo
+		// pronto: a parte 0 é a ÚNICA janela — se não cobre src_t, é a CAUDA além do fim do
+		// áudio (0.25s finais, ou áudio mais curto que o vídeo); pedir chunk aqui extraía a
+		// cauda, a adoção rebobinava o relógio ~1s e o fim da prévia virava loop bugado.
+		// Chunks só p/ streaming ou enquanto o completo não ficou pronto.
+		if c.has_audio && !try_part_open(c, src_t) &&
+		   (c.streaming || intrinsics.atomic_load(&c.parts_done) < 1) {
+			if !try_chunk_open(c, src_t) do chunk_request(c, src_t)
+		}
 		src_t += dt
 	}
 	if src_t >= c.dur - 0.02 { // fim da fonte: para no fim
