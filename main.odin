@@ -724,6 +724,7 @@ play_frame: int = -1
 // "engasgos duplos" que sobravam de judder.
 SMOOTH_HARD  :: f32(0.25)  // drift catastrófico: reata seco (bate com os limiares de underrun/fim)
 SMOOTH_GAIN  :: f32(0.05)  // correção suave por frame: ~0.27s p/ absorver drift (A/V inaudível)
+smooth_bad: int // frames consecutivos com drift fora do range (ver smooth_clock)
 smooth_clock :: proc(raw, dt: f32) -> f32 {
 	if aud_prev < 0 do return raw                  // sem âncora (segurança; a prévia sempre ancora)
 	sm := aud_prev + dt                            // avança liso pelo tempo de render (vsync)
@@ -735,7 +736,21 @@ smooth_clock :: proc(raw, dt: f32) -> f32 {
 	// novo não volta pro início"); (b) fim de stream/troca de janela zera o relógio — snap p/
 	// TRÁS rebobinava a prévia no fim. Seeks reais ancoram aud_prev na posição PEDIDA
 	// (src_acquire), então o PLL captura assim que o raw fica são.
-	if abs(drift) <= SMOOTH_HARD do sm += drift * SMOOTH_GAIN
+	if abs(drift) <= SMOOTH_HARD {
+		smooth_bad = 0
+		sm += drift * SMOOTH_GAIN
+	} else {
+		// glitch transitório some sozinho em <0.35s. Se persistir ~0.75s é deslocamento REAL
+		// — ex.: travada longa (modal/chunk) em que o dt é capado a 0.1s mas o áudio correu
+		// de verdade: sem isto o drift ficava > SMOOTH_HARD PRA SEMPRE (PLL desligado) e o
+		// vídeo tocava permanentemente atrasado do áudio. Reata só P/ FRENTE (recuo
+		// persistente não existe em playback são; o fim/underrun cuidam dele).
+		smooth_bad += 1
+		if smooth_bad > 45 {
+			smooth_bad = 0
+			if raw > sm do return raw
+		}
+	}
 	if sm < aud_prev do sm = aud_prev               // monotônico (nunca recua)
 	return sm
 }
@@ -5053,7 +5068,7 @@ src_acquire :: proc() {
 	// ancora o relógio na posição PEDIDA (lição 3 da timeline): logo após Stop→Seek→Play o
 	// GetMusicTimePlayed lê lixo (wrap p/ ~fim-do-arquivo por ~0.3s) — o smooth_clock rejeita
 	// o glitch e captura quando o raw assentar perto da âncora
-	aud_prev = clamp(src_t, 0, c.dur); play_frame = -1
+	aud_prev = clamp(src_t, 0, c.dur); play_frame = -1; smooth_bad = 0
 	if !c.has_audio do return
 	if !try_part_open(c, src_t) do _ = try_chunk_open(c, src_t)
 	if audio_clock_ok(c, src_t) {
@@ -5062,8 +5077,10 @@ src_acquire :: proc() {
 		rl.StopMusicStream(c.music); rl.SeekMusicStream(c.music, target) // Stop zera os buffers antigos
 		if st.playing do rl.PlayMusicStream(c.music)
 		for _ in 0 ..< 8 do rl.UpdateMusicStream(c.music) // pré-enche c/ o áudio novo
-	} else {
-		chunk_request(c, src_t) // fora da janela: encomenda o áudio da região
+	} else if c.streaming || intrinsics.atomic_load(&c.parts_done) < 1 {
+		// fora da janela: encomenda o áudio da região. Cache com o completo pronto NÃO pede
+		// (a parte 0 é a única janela — fora dela é a cauda sem áudio; mesmo guard do update)
+		chunk_request(c, src_t)
 	}
 }
 
@@ -5191,7 +5208,7 @@ draw_fullscreen_video :: proc(sw, sh: f32) {
 	rl.DrawRectangleRounded({ pbar.x, pbar.y, frac * pbar.width, pbar.height }, 1, 4, fa(ACCENT, a))
 	pkx := pbar.x + frac * pbar.width
 	rl.DrawCircleV({ pkx, pbar.y + pbar.height/2 }, (player_seek_drag || hovered(pbar_hit)) ? 8 : 6, fa(rl.WHITE, a))
-	if interactive && rl.IsMouseButtonPressed(.LEFT) && hovered(pbar_hit) { player_seek_drag = true; st.playing = false }
+	if interactive && rl.IsMouseButtonPressed(.LEFT) && hovered(pbar_hit) { player_seek_drag = true; st.playing = false; seek_drag_hush() }
 	if rl.IsMouseButtonReleased(.LEFT) && player_seek_drag {
 		player_seek_drag = false
 		if src_preview >= 0 { src_acquire(); clip_frame(&clips[src_preview], src_t) } else do seek_global(st.playhead)
@@ -5306,6 +5323,20 @@ update_src_preview :: proc(dt: f32) {
 			// d <= -2: segura (render mais rápido que o conteúdo, ex. 75Hz -> pulldown uniforme)
 		}
 		clip_show(c, play_frame)
+	}
+}
+
+// silencia o áudio ativo no INSTANTE em que a barra de progresso é agarrada: setar só
+// st.playing=false deixava o rl.Music tocando ~0.7s de buffer velho durante o arrasto
+// (o update para de alimentá-lo e ele morre por starvation, não por pausa). Pausa
+// EXPLÍCITA e deliberada de um gesto de seek — não é o "pause em clique global" da lição 1
+// (aqui o playback já foi parado junto, então o update não interpreta como fim de clipe).
+seek_drag_hush :: proc() {
+	if src_preview >= 0 && src_preview < nclips {
+		c := &clips[src_preview]
+		if !c.closed && c.has_audio do rl.PauseMusicStream(c.music)
+	} else if play_clip >= 0 && seg_src(play_clip).has_audio {
+		rl.PauseMusicStream(seg_src(play_clip).music)
 	}
 }
 
@@ -8373,7 +8404,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	rl.DrawRectangleRounded({ pbar.x, pbar.y, frac * pbar.width, pbar.height }, 1, 4, ACCENT)
 	pkx := pbar.x + frac * pbar.width
 	rl.DrawCircleV({ pkx, pbar.y + pbar.height/2 }, (player_seek_drag || hovered(pbar_hit)) ? 7 : 5, rl.WHITE)
-	if rl.IsMouseButtonPressed(.LEFT) && hovered(pbar_hit) { player_seek_drag = true; st.playing = false }
+	if rl.IsMouseButtonPressed(.LEFT) && hovered(pbar_hit) { player_seek_drag = true; st.playing = false; seek_drag_hush() }
 	if rl.IsMouseButtonReleased(.LEFT) && player_seek_drag {
 		player_seek_drag = false
 		if src_preview >= 0 { src_acquire(); clip_frame(&clips[src_preview], src_t) } else do seek_global(st.playhead)
