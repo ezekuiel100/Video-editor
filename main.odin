@@ -8516,8 +8516,19 @@ draw_preview :: proc(r: rl.Rectangle) {
 		}
 	}
 
-	cx := tb.x + tb.width/2
+	// LAYOUT RESPONSIVO da barra: com o player estreito (divisória vertical), timecode + botões
+	// centrais + cluster da direita se SOBREPUNHAM (precisam de ~710px). Estreito: timecode só
+	// com a posição; apertado: esconde proporção/qualidade (raramente usados — reaparecem ao
+	// alargar). O cluster central centra no ESPAÇO LIVRE entre o timecode e a direita, clampado.
+	narrow := tb.width < 700
+	tight  := tb.width < 560
+	tc: cstring = narrow ? timecode(pos) : rl.TextFormat("%s / %s", timecode(pos), timecode(total))
+	tcw := txt_w(tc, 15)
+	// direita: fullscreen(‑30) + câmera(‑32) + alto-falante(‑30) => spr.x = fim‑92; proporção fica 150 antes
+	rclust := tb.x + tb.width - 92 - (tight ? 0 : 150)
+	cl := tb.x + 16 + tcw + 12
 	cy := tb.y + 42 // linha de botões abaixo da barra de progresso
+	cx := clamp((cl + rclust) / 2, cl + 76, max(cl + 76, rclust - 118))
 
 	rl.DrawTriangle({cx - 60, cy - 7}, {cx - 60, cy + 7}, {cx - 68, cy}, TEXT)
 	rl.DrawRectangleRec({cx - 70, cy - 7, 2, 14}, TEXT)
@@ -8545,8 +8556,8 @@ draw_preview :: proc(r: rl.Rectangle) {
 	}
 	rl.DrawRectangleRec(sr, hovered(sr) ? TEXT : MUTED)
 
-	// timecode à esquerda: posição ATUAL / duração TOTAL
-	txt(rl.TextFormat("%s / %s", timecode(pos), timecode(total)), tb.x + 16, cy - 8, 15, TEXT)
+	// timecode à esquerda: posição atual (e a duração total quando há espaço)
+	txt(tc, tb.x + 16, cy - 8, 15, TEXT)
 
 	// --- cluster à direita: volume do player | screenshot | tela cheia ---
 	// tela cheia (canto): 4 cantoneiras
@@ -8588,7 +8599,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	}
 	// qualidade da prévia p/ clipes STREAMING (longos): Baixa=360p (leve) <-> Alta=720p
 	// (nítido, ~4x os bytes/frame). Estilo dropdown "Total/1/2/..." de NLEs, aqui binário.
-	{
+	if !tight {
 		qlabel: cstring = stream_hi ? "Alta" : "Baixa"
 		qw := txt_w(qlabel, 12) + 22
 		qr := rl.Rectangle{ spr.x - 14 - qw, cy - 11, qw, 22 }
@@ -8609,6 +8620,9 @@ draw_preview :: proc(r: rl.Rectangle) {
 	}
 
 	// --- formato do projeto: botão + dropdown rápido de presets ("Personalizar…" abre o modal) ---
+	// (recolhido no modo apertado, junto com a qualidade — reaparece ao alargar o player)
+	if tight do ar_menu_open = false
+	if !tight {
 	arb := rl.Rectangle{ spr.x - 150, cy - 11, 64, 22 }
 	if clicked(arb) do ar_menu_open = !ar_menu_open
 	rl.DrawRectangleRounded(arb, 0.3, 4, (ar_menu_open || hovered(arb)) ? HOVER : PANEL2)
@@ -8635,6 +8649,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		if clicked(cpr) { ar_menu_open = false; open_projset_modal() }
 		if rl.IsMouseButtonPressed(.LEFT) && !hovered(mr) && !hovered(arb) do ar_menu_open = false // clique fora fecha
 	}
+	} // fim do !tight (proporção)
 
 	g_insp_card = {} // repovoado por draw_seg_inspector se houver seleção
 	if !crop_mode do draw_seg_inspector(video) // no modo recorte o cartão fica oculto (tapava o Concluir)
