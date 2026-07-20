@@ -627,6 +627,11 @@ bin_drop_dur:   f32
 bin_drop_newtrack: bool         // drop cria uma trilha NOVA: footprint desenhado sobre a banda "+ trilha"
 bin_drop_zone: rl.Rectangle     // retângulo dessa banda (p/ posicionar o footprint da prévia)
 bin_empty_click_t: f64 = -1   // último clique em área vazia do bin (importar por clique/duplo-clique)
+bin_empty_click_p: rl.Vector2 // posição desse clique — o 2º precisa cair no MESMO lugar (±8px)
+// --- divisória entre o conteúdo (bin/preview) e a timeline: arrastável na vertical ---
+TL_FRAC_DEF :: f32(0.34)      // fração padrão da altura da janela ocupada pela timeline
+tl_frac: f32 = TL_FRAC_DEF    // fração ATUAL (persistida na sessão; arrastar a divisória muda)
+tl_split_drag: bool           // arrastando a divisória
 blade_mode: bool    // ferramenta lâmina: clicar num segmento corta ali (estilo NLE)
 tl_scroll: f32      // deslocamento horizontal da timeline (px); 0 = início
 tl_hbar_drag: bool  // arrastando a barra de rolagem horizontal
@@ -5369,7 +5374,7 @@ update :: proc() {
 	// FPS dinâmico: parado (sem playback nem arrasto), 30fps bastam p/ a UI —
 	// metade do custo de render; qualquer interação volta a 60 no frame seguinte.
 	// O avanço por relógio de parede usa dt, então funciona em qualquer fps.
-	idle := !st.playing && st.drag == .None && !win_dragging && !tl_hbar_drag && !zoom_bar_drag && !bin_marquee && !tl_marquee
+	idle := !st.playing && st.drag == .None && !win_dragging && !tl_hbar_drag && !zoom_bar_drag && !bin_marquee && !tl_marquee && !tl_split_drag
 	// PLAYBACK: sem cap de CPU — deixa o VSYNC ditar o ritmo (trava no vblank do monitor,
 	// como o VLC). SetTargetFPS(60) por timer de CPU não sincroniza com o refresh e batia
 	// contra o vsync = judder/tearing. 0 = ilimitado, mas o VSYNC_HINT segura no refresh atual
@@ -6468,9 +6473,38 @@ draw :: proc() {
 	topbar_h  : f32 = 34
 	toolbar_h : f32 = 64
 	subbar_h  : f32 = 38
-	tl_h := max(f32(250), sh * 0.34)
-	tl_top := sh - tl_h
 	content_top := topbar_h + toolbar_h + subbar_h
+	// altura da timeline = fração da janela (arrastável pela divisória), com MÍN e MÁX:
+	// TL_MIN mantém a timeline usável (toolbar+régua+2 trilhas); CONTENT_MIN garante que o
+	// bin/preview nunca encolham a ponto de inutilizar o player (66px são só do transport).
+	TL_MIN      :: f32(250) // toolbar(34)+régua(22)+~3 trilhas — 170 deixava 1 trilha só ("muito pequeno")
+	CONTENT_MIN :: f32(280)
+	tl_max := max(TL_MIN, sh - content_top - CONTENT_MIN)
+	tl_h := clamp(sh * tl_frac, TL_MIN, tl_max)
+	tl_top := sh - tl_h
+
+	// divisória ARRASTÁVEL (estilo NLE): faixa fina no limite conteúdo/timeline. Zona de 6px
+	// (tl_top-3..+3) escolhida p/ NÃO sobrepor os botões da toolbar da timeline (começam em
+	// tl_top+4) nem os controles do player (terminam 8px acima). O press daqui roda ANTES dos
+	// painéis, e a marquee do bin checa !tl_split_drag (os 3px de cima tocam o rodapé dela).
+	m_div := rl.GetMousePosition()
+	if tl_split_drag {
+		if !rl.IsMouseButtonDown(.LEFT) do tl_split_drag = false // solto (ou perdemos o release)
+		else {
+			// clampa a PRÓPRIA fração nos limites (não só o tl_h): senão arrastar além do teto
+			// acumulava fração "fantasma" e o knob demorava a reagir no arrasto de volta
+			tl_frac = clamp((sh - m_div.y) / sh, TL_MIN / sh, tl_max / sh)
+			tl_h = clamp(sh * tl_frac, TL_MIN, tl_max)
+			tl_top = sh - tl_h
+		}
+	} else if rl.IsMouseButtonPressed(.LEFT) && hovered({ 0, tl_top - 6, sw, 9 }) &&
+	          st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !win_dragging && modal == .None {
+		// zona de 9px esticada p/ CIMA (6px sobre o rodapé do bin/preview — a divisória tem
+		// prioridade sobre eles; 3px p/ baixo, longe dos botões da toolbar em tl_top+4).
+		// Com 6px o usuário errava o agarre e o clique caía no bin (2 erros <0.5s = importar).
+		tl_split_drag = true
+	}
+
 	media_w := sw * 0.47
 
 	draw_topbar(sw, topbar_h)
@@ -6479,6 +6513,12 @@ draw :: proc() {
 	draw_media_panel(rl.Rectangle{ 0, content_top, media_w, tl_top - content_top })
 	draw_preview(rl.Rectangle{ media_w, topbar_h + toolbar_h, sw - media_w, tl_top - (topbar_h + toolbar_h) })
 	draw_timeline(rl.Rectangle{ 0, tl_top, sw, tl_h })
+
+	// feedback da divisória (depois do draw_timeline: o cursor setado aqui vence o de lá)
+	if tl_split_drag || (hovered({ 0, tl_top - 6, sw, 9 }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && modal == .None) {
+		rl.SetMouseCursor(.RESIZE_NS)
+		rl.DrawRectangleRec({ 0, tl_top - 1, sw, 2 }, rl.Color{ ACCENT.r, ACCENT.g, ACCENT.b, tl_split_drag ? 235 : 130 })
+	}
 
 	// fantasma do item do bin sendo arrastado para a timeline (com contagem se forem vários)
 	if st.drag == .Bin && bin_drag >= 0 && bin_drag < nclips {
@@ -7202,7 +7242,9 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		rl.DrawLineEx({ cx + 14, cy + 9 }, { cx + 14, cy + 16 }, 3.5, cyan)
 		rl.DrawLineEx({ cx - 15.5, cy + 16 }, { cx + 15.5, cy + 16 }, 3.5, cyan)
 		txt_c("Clique aqui para importar (ou solte vídeos)", cx, cy + 52, 14, hov ? TEXT : MUTED)
-		if clicked(r) && src_preview < 0 do want_import = true // bin vazio: 1 clique importa
+			// bin vazio: 1 clique importa — MENOS na faixa de 24px encostada na divisória (agarre
+		// perdido do redimensionar caía aqui e abria o diálogo) e nunca durante o arrasto dela
+		if clicked(r) && src_preview < 0 && !tl_split_drag && rl.GetMousePosition().y < r.y + r.height - 24 do want_import = true
 		return
 	}
 	if nmatch == 0 { // há mídia, mas nada casa com a busca
@@ -7317,7 +7359,7 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 	// (roda também com a prévia de origem aberta: o duplo-clique de importar depende do fluxo
 	// da marquee — com o guard `src_preview < 0` aqui, abrir uma prévia MATAVA o "duplo-clique
 	// na área vazia importa" até o usuário sair da prévia com Esc/clique na timeline)
-	if !bin_marquee && !handled && rl.IsMouseButtonPressed(.LEFT) && hovered(r) && st.drag == .None {
+	if !bin_marquee && !handled && !tl_split_drag && rl.IsMouseButtonPressed(.LEFT) && hovered(r) && st.drag == .None {
 		bin_marquee = true
 		bin_marquee_start = rl.GetMousePosition()
 		bin_marquee_moved = false
@@ -7334,14 +7376,19 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		was_click := !bin_marquee_moved
 		if !bin_marquee_moved && !bin_marquee_add { bin_clear_marks(); bin_sel = -1 }
 		bin_marquee = false; bin_marquee_moved = false
-		// IMPORTAR clicando na área VAZIA do bin: sem mídia = 1 clique; com mídia = duplo-clique
-		if was_click && !bin_marquee_add {
+		// IMPORTAR clicando na área VAZIA do bin: sem mídia = 1 clique; com mídia = duplo-clique.
+		// Anti-acidente (o usuário mirava a DIVISÓRIA, errava, e 2 erros viravam "importar"):
+		//  - clique a menos de 24px do rodapé não conta (é agarre perdido da divisória);
+		//  - o 2º clique tem de cair no MESMO lugar do 1º (±8px) — duplo-clique real não anda,
+		//    tentativas de agarre re-miram e mudam de posição.
+		if was_click && !bin_marquee_add && bin_marquee_start.y < r.y + r.height - 24 {
 			have := 0
 			for k in 0 ..< nclips do if !intrinsics.atomic_load(&clips[k].failed) && !clips[k].closed do have += 1
 			now := rl.GetTime()
+			same_spot := abs(bin_marquee_start.x - bin_empty_click_p.x) < 8 && abs(bin_marquee_start.y - bin_empty_click_p.y) < 8
 			if have == 0 { want_import = true }
-			else if bin_empty_click_t > 0 && now - bin_empty_click_t < 0.5 { want_import = true; bin_empty_click_t = -1 } // 0.5s = duplo-clique padrão do Windows (0.35 perdia cliques)
-			else { bin_empty_click_t = now }
+			else if bin_empty_click_t > 0 && now - bin_empty_click_t < 0.5 && same_spot { want_import = true; bin_empty_click_t = -1 } // 0.5s = duplo-clique padrão do Windows
+			else { bin_empty_click_t = now; bin_empty_click_p = bin_marquee_start }
 		}
 	}
 
