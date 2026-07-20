@@ -6515,9 +6515,17 @@ draw :: proc() {
 	draw_timeline(rl.Rectangle{ 0, tl_top, sw, tl_h })
 
 	// feedback da divisória (depois do draw_timeline: o cursor setado aqui vence o de lá)
-	if tl_split_drag || (hovered({ 0, tl_top - 6, sw, 9 }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && modal == .None) {
+	split_hot := tl_split_drag || (hovered({ 0, tl_top - 6, sw, 9 }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && modal == .None)
+	if split_hot {
 		rl.SetMouseCursor(.RESIZE_NS)
 		rl.DrawRectangleRec({ 0, tl_top - 1, sw, 2 }, rl.Color{ ACCENT.r, ACCENT.g, ACCENT.b, tl_split_drag ? 235 : 130 })
+	}
+	// pegador SEMPRE visível no centro (pílula + 3 pontinhos): mostra ONDE agarrar mesmo sem hover
+	gp := rl.Rectangle{ sw/2 - 26, tl_top - 4, 52, 8 }
+	rl.DrawRectangleRounded(gp, 1, 4, split_hot ? ACCENT : rl.Color{ 74, 80, 92, 255 })
+	dc := split_hot ? rl.Color{ 18, 22, 28, 255 } : rl.Color{ 165, 172, 184, 255 }
+	for i in 0 ..< 3 {
+		rl.DrawCircleV({ gp.x + gp.width/2 + f32(i - 1) * 9, gp.y + gp.height/2 }, 1.6, dc)
 	}
 
 	// fantasma do item do bin sendo arrastado para a timeline (com contagem se forem vários)
