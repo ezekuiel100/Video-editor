@@ -632,6 +632,10 @@ bin_empty_click_p: rl.Vector2 // posição desse clique — o 2º precisa cair n
 TL_FRAC_DEF :: f32(0.34)      // fração padrão da altura da janela ocupada pela timeline
 tl_frac: f32 = TL_FRAC_DEF    // fração ATUAL (persistida na sessão; arrastar a divisória muda)
 tl_split_drag: bool           // arrastando a divisória
+// --- divisória VERTICAL entre o bin e o player: arrastável na horizontal (alarga o player) ---
+MD_FRAC_DEF :: f32(0.47)      // fração padrão da largura da janela ocupada pelo bin
+md_frac: f32 = MD_FRAC_DEF
+md_split_drag: bool
 blade_mode: bool    // ferramenta lâmina: clicar num segmento corta ali (estilo NLE)
 tl_scroll: f32      // deslocamento horizontal da timeline (px); 0 = início
 tl_hbar_drag: bool  // arrastando a barra de rolagem horizontal
@@ -5374,7 +5378,7 @@ update :: proc() {
 	// FPS dinâmico: parado (sem playback nem arrasto), 30fps bastam p/ a UI —
 	// metade do custo de render; qualquer interação volta a 60 no frame seguinte.
 	// O avanço por relógio de parede usa dt, então funciona em qualquer fps.
-	idle := !st.playing && st.drag == .None && !win_dragging && !tl_hbar_drag && !zoom_bar_drag && !bin_marquee && !tl_marquee && !tl_split_drag
+	idle := !st.playing && st.drag == .None && !win_dragging && !tl_hbar_drag && !zoom_bar_drag && !bin_marquee && !tl_marquee && !tl_split_drag && !md_split_drag
 	// PLAYBACK: sem cap de CPU — deixa o VSYNC ditar o ritmo (trava no vblank do monitor,
 	// como o VLC). SetTargetFPS(60) por timer de CPU não sincroniza com o refresh e batia
 	// contra o vsync = judder/tearing. 0 = ilimitado, mas o VSYNC_HINT segura no refresh atual
@@ -6505,7 +6509,24 @@ draw :: proc() {
 		tl_split_drag = true
 	}
 
-	media_w := sw * 0.47
+	// largura do bin = fração da janela (divisória VERTICAL bin↔player, espelho da de cima):
+	// arrastar p/ a esquerda ALARGA o player. Limites: bin com ~2 colunas de miniaturas;
+	// player nunca menor que 420px.
+	MD_MIN :: f32(280)
+	PV_MIN :: f32(420)
+	md_max := max(MD_MIN, sw - PV_MIN)
+	media_w := clamp(sw * md_frac, MD_MIN, md_max)
+	if md_split_drag {
+		if !rl.IsMouseButtonDown(.LEFT) do md_split_drag = false
+		else {
+			md_frac = clamp(m_div.x / sw, MD_MIN / sw, md_max / sw)
+			media_w = clamp(sw * md_frac, MD_MIN, md_max)
+		}
+	} else if rl.IsMouseButtonPressed(.LEFT) && hovered({ media_w - 5, content_top, 8, tl_top - content_top }) &&
+	          !tl_split_drag && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !win_dragging && modal == .None {
+		// zona de 8px (5 sobre o bin, 3 sobre o player); a de cima tem prioridade (T-junção)
+		md_split_drag = true
+	}
 
 	draw_topbar(sw, topbar_h)
 	draw_toolbar(sw, topbar_h, toolbar_h)
@@ -6514,8 +6535,8 @@ draw :: proc() {
 	draw_preview(rl.Rectangle{ media_w, topbar_h + toolbar_h, sw - media_w, tl_top - (topbar_h + toolbar_h) })
 	draw_timeline(rl.Rectangle{ 0, tl_top, sw, tl_h })
 
-	// feedback da divisória (depois do draw_timeline: o cursor setado aqui vence o de lá)
-	split_hot := tl_split_drag || (hovered({ 0, tl_top - 6, sw, 9 }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && modal == .None)
+	// feedback das divisórias (depois do draw_timeline: o cursor setado aqui vence o de lá)
+	split_hot := tl_split_drag || (hovered({ 0, tl_top - 6, sw, 9 }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !md_split_drag && modal == .None)
 	if split_hot {
 		rl.SetMouseCursor(.RESIZE_NS)
 		rl.DrawRectangleRec({ 0, tl_top - 1, sw, 2 }, rl.Color{ ACCENT.r, ACCENT.g, ACCENT.b, tl_split_drag ? 235 : 130 })
@@ -6526,6 +6547,18 @@ draw :: proc() {
 	dc := split_hot ? rl.Color{ 18, 22, 28, 255 } : rl.Color{ 165, 172, 184, 255 }
 	for i in 0 ..< 3 {
 		rl.DrawCircleV({ gp.x + gp.width/2 + f32(i - 1) * 9, gp.y + gp.height/2 }, 1.6, dc)
+	}
+	// divisória VERTICAL bin↔player: mesma linguagem visual, cursor EW e pegador em pé
+	md_hot := md_split_drag || (hovered({ media_w - 5, content_top, 8, tl_top - content_top }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !tl_split_drag && modal == .None)
+	if md_hot {
+		rl.SetMouseCursor(.RESIZE_EW)
+		rl.DrawRectangleRec({ media_w - 1, content_top, 2, tl_top - content_top }, rl.Color{ ACCENT.r, ACCENT.g, ACCENT.b, md_split_drag ? 235 : 130 })
+	}
+	mgp := rl.Rectangle{ media_w - 4, (content_top + tl_top)/2 - 26, 8, 52 }
+	rl.DrawRectangleRounded(mgp, 1, 4, md_hot ? ACCENT : rl.Color{ 74, 80, 92, 255 })
+	mdc := md_hot ? rl.Color{ 18, 22, 28, 255 } : rl.Color{ 165, 172, 184, 255 }
+	for i in 0 ..< 3 {
+		rl.DrawCircleV({ mgp.x + mgp.width/2, mgp.y + mgp.height/2 + f32(i - 1) * 9 }, 1.6, mdc)
 	}
 
 	// fantasma do item do bin sendo arrastado para a timeline (com contagem se forem vários)
@@ -7250,9 +7283,13 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		rl.DrawLineEx({ cx + 14, cy + 9 }, { cx + 14, cy + 16 }, 3.5, cyan)
 		rl.DrawLineEx({ cx - 15.5, cy + 16 }, { cx + 15.5, cy + 16 }, 3.5, cyan)
 		txt_c("Clique aqui para importar (ou solte vídeos)", cx, cy + 52, 14, hov ? TEXT : MUTED)
-			// bin vazio: 1 clique importa — MENOS na faixa de 24px encostada na divisória (agarre
-		// perdido do redimensionar caía aqui e abria o diálogo) e nunca durante o arrasto dela
-		if clicked(r) && src_preview < 0 && !tl_split_drag && rl.GetMousePosition().y < r.y + r.height - 24 do want_import = true
+			// bin vazio: 1 clique importa — MENOS nas faixas de 24px encostadas nas divisórias
+		// (agarre perdido do redimensionar caía aqui e abria o diálogo) e nunca durante arrasto
+		mi := rl.GetMousePosition()
+		if clicked(r) && src_preview < 0 && !tl_split_drag && !md_split_drag &&
+		   mi.y < r.y + r.height - 24 && mi.x < r.x + r.width - 24 {
+			want_import = true
+		}
 		return
 	}
 	if nmatch == 0 { // há mídia, mas nada casa com a busca
@@ -7367,7 +7404,7 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 	// (roda também com a prévia de origem aberta: o duplo-clique de importar depende do fluxo
 	// da marquee — com o guard `src_preview < 0` aqui, abrir uma prévia MATAVA o "duplo-clique
 	// na área vazia importa" até o usuário sair da prévia com Esc/clique na timeline)
-	if !bin_marquee && !handled && !tl_split_drag && rl.IsMouseButtonPressed(.LEFT) && hovered(r) && st.drag == .None {
+	if !bin_marquee && !handled && !tl_split_drag && !md_split_drag && rl.IsMouseButtonPressed(.LEFT) && hovered(r) && st.drag == .None {
 		bin_marquee = true
 		bin_marquee_start = rl.GetMousePosition()
 		bin_marquee_moved = false
@@ -7389,7 +7426,7 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		//  - clique a menos de 24px do rodapé não conta (é agarre perdido da divisória);
 		//  - o 2º clique tem de cair no MESMO lugar do 1º (±8px) — duplo-clique real não anda,
 		//    tentativas de agarre re-miram e mudam de posição.
-		if was_click && !bin_marquee_add && bin_marquee_start.y < r.y + r.height - 24 {
+		if was_click && !bin_marquee_add && bin_marquee_start.y < r.y + r.height - 24 && bin_marquee_start.x < r.x + r.width - 24 {
 			have := 0
 			for k in 0 ..< nclips do if !intrinsics.atomic_load(&clips[k].failed) && !clips[k].closed do have += 1
 			now := rl.GetTime()
@@ -8685,7 +8722,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		hw := g_frame.width*s/2; hh := g_frame.height*s/2
 		inside := abs(m.x-ccx) <= hw && abs(m.y-ccy) <= hh
 		if inside && !hovered(g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
-		   rl.IsMouseButtonPressed(.LEFT) && !ctx_open && !ctx_ate {
+		   rl.IsMouseButtonPressed(.LEFT) && !ctx_open && !ctx_ate && !md_split_drag && !tl_split_drag {
 			st.drag = .PreviewMove; drag_clip = selected; prev_grab = { m.x-ccx, m.y-ccy }
 		}
 	}
