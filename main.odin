@@ -4043,6 +4043,22 @@ src_placed :: proc(i: int) -> bool {
 	return false
 }
 
+// (botão "+" da miniatura do bin) coloca a mídia na timeline a partir do PLAYHEAD, empurrando
+// p/ o 1º vão livre da trilha — mesma regra do drop do bin, sem precisar arrastar.
+// Áudio vai p/ trilha de áudio; vídeo/imagem/texto p/ V1.
+bin_add_to_timeline :: proc(i: int) {
+	if i < 0 || i >= nclips do return
+	c := &clips[i]
+	if !media_ready(i) do return
+	tr := track_for_media(i, 0)
+	start := free_start(tr, -1, st.playhead, c.dur)
+	si := add_seg(i, start, 0, c.dur, tr)
+	if si < 0 do return // add_seg já avisa (timeline cheia)
+	selected = si; bin_sel = -1; insp_tab = 0
+	seek_global(st.playhead)
+	set_toast(rl.TextFormat("%s adicionado à timeline", cs(c.name)))
+}
+
 // cria um segmento (colocação na timeline) na trilha `track`. Retorna o índice, ou -1 se lotado.
 add_seg :: proc(src: int, start, in_off, dur: f32, track := 0) -> int {
 	if nsegs >= MAX_SEGS { set_toast("Máximo de segmentos na timeline"); return -1 }
@@ -7429,9 +7445,30 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		hot := i == view_src()
 		border := sel ? rl.WHITE : (hot ? ACCENT : (placed ? ACCENT_D : LINE))
 		rl.DrawRectangleLinesEx(box, (sel || hot) ? 2 : 1, border)
-		if placed do txt("na timeline", tx + 4, ty + 3, 10, ACCENT)
 		if c.name_el == nil do c.name_el = strings.clone_to_cstring(string(elide(c.name, 11, tw)))
 		txt(c.name_el, tx, ty + th + 3, 11, MUTED)
+
+		// --- badge do canto inferior direito (estilo NLE) ---
+		// JÁ na timeline: "✓" fixo (dispensa o rótulo "na timeline", que roubava o canto).
+		// Senão, ao passar o mouse: "+" clicável que joga a mídia na timeline sem arrastar.
+		badge_r := rl.Rectangle{ box.x + box.width - 22, box.y + box.height - 22, 18, 18 }
+		// o "+" está clicável neste frame? (usado p/ o press da miniatura NÃO virar arrasto)
+		badge_add := media_ready(i) && !placed && hovered(box)
+		if media_ready(i) {
+			br := badge_r
+			if placed {
+				rl.DrawRectangleRounded(br, 0.3, 4, rl.Color{ 40, 150, 130, 235 })
+				// tique: perna curta descendo + perna longa subindo
+				rl.DrawLineEx({ br.x + 4, br.y + 9 }, { br.x + 8, br.y + 13 }, 2, rl.WHITE)
+				rl.DrawLineEx({ br.x + 8, br.y + 13 }, { br.x + 14, br.y + 5 }, 2, rl.WHITE)
+			} else if hovered(box) {
+				bhot := hovered(br)
+				rl.DrawRectangleRounded(br, 0.3, 4, bhot ? ACCENT : rl.Color{ 40, 150, 130, 235 })
+				rl.DrawRectangleRec({ br.x + 8, br.y + 4, 2, 10 }, rl.WHITE)
+				rl.DrawRectangleRec({ br.x + 4, br.y + 8, 10, 2 }, rl.WHITE)
+				if clicked(br) { bin_add_to_timeline(i); handled = true; break } // segs mudou: redesenha no próximo frame
+			}
+		}
 
 		// botão remover (X) no canto — aparece ao passar o mouse sobre a miniatura
 		if hovered(box) {
@@ -7444,7 +7481,8 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 
 		// pressionar seleciona o item e inicia o arrasto p/ a timeline; Ctrl/Shift+clique
 		// ALTERNA a marcação (seleção múltipla); DUPLO-clique toca a mídia crua no player.
-		if rl.IsMouseButtonPressed(.LEFT) && hovered(box) && intrinsics.atomic_load(&c.probed) {
+		// (o press no badge "+" não vira seleção/arrasto: o clique é dele)
+		if rl.IsMouseButtonPressed(.LEFT) && hovered(box) && !(badge_add && hovered(badge_r)) && intrinsics.atomic_load(&c.probed) {
 			handled = true
 			now := rl.GetTime()
 			ctrl := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
