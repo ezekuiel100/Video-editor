@@ -737,13 +737,6 @@ want_import: bool // pedido de abrir o diálogo de importar (tratado no update)
 // espúrio disparava respawn de vídeo à toa). Zerado (=-1) a cada seek/aquisição.
 aud_prev: f32 = -1
 
-// frame de vídeo EXIBIDO no playback, avançado por PASSO travado no vsync (não amostrado do
-// relógio). A 60fps num monitor de 60Hz o período do conteúdo == período do render: amostrar
-// int(src_t*fps) por frame gera "beat" (repete+pula) a cada leve jitter de fase. Avançar +1 por
-// frame de render dentro de uma zona-morta mata o beat (1:1 perfeito); fora dela persegue o
-// relógio de áudio (corrige drift / faz pulldown quando render != conteúdo, ex. 75Hz). -1 =
-// re-ancora no próximo frame (resetado junto de aud_prev em seek/aquisição).
-play_frame: int = -1
 
 // relógio de reprodução SUAVE (anti-judder). GetMusicTimePlayed avança em degraus de ~10-20ms
 // (granularidade do callback de áudio); amostrá-lo 1×/frame de render (16.7ms) faz o índice de
@@ -761,6 +754,7 @@ play_frame: int = -1
 SMOOTH_HARD  :: f32(0.25)  // drift catastrófico: reata seco (bate com os limiares de underrun/fim)
 SMOOTH_GAIN  :: f32(0.05)  // correção suave por frame: ~0.27s p/ absorver drift (A/V inaudível)
 smooth_bad: int // frames consecutivos com drift fora do range (ver smooth_clock)
+g_frame_no: i64 = 1 // nº do frame de render (update incrementa; 0 = "nunca" p/ os pframe_tick)
 smooth_clock :: proc(raw, dt: f32) -> f32 {
 	if aud_prev < 0 do return raw                  // sem âncora (segurança; a prévia sempre ancora)
 	sm := aud_prev + dt                            // avança liso pelo tempo de render (vsync)
@@ -885,6 +879,11 @@ Clip :: struct {
 	// --- modo cache (clipes curtos): todos os frames em RAM ---
 	streaming: bool,
 	cfps:   f32, // fps do cache: segue a fonte (teto 60). 0 = streaming/imagem (usa DEC_FPS)
+	// passo TRAVADO no vsync (anti-beat) do playback em cache — ver clip_frame. pframe = frame
+	// exibido; pframe_tick = g_frame_no em que foi decidido (gate de 1 decisão/frame de render
+	// E detector de continuidade: se o clipe não foi exibido no frame anterior, reancora).
+	pframe:      int,
+	pframe_tick: i64,
 	total:  int,
 	cached: int, // atômico
 	shown:  int,
@@ -3932,7 +3931,34 @@ clip_frame :: proc(c: ^Clip, local: f32) {
 	if c.is_text do return // texto não decodifica vídeo (desenhado no compositing)
 	l := clamp(local, 0, c.dur)
 	if !c.streaming {
-		clip_show(c, int(l * cfps_of(c)))
+		// PASSO TRAVADO NO VSYNC (anti-beat), só durante o playback: amostrar int(t*fps) por
+		// frame de render "bate" quando o período do conteúdo ≈ período do render (60fps em
+		// 60Hz) — o jitter residual do relógio repete um frame e pula o próximo. Aqui o frame
+		// exibido avança +1 por frame de render dentro de uma zona-morta e só REancora em
+		// descontinuidade real. Parado/scrub/seek: índice exato (pulos têm de ser imediatos).
+		target := int(l * cfps_of(c))
+		if !st.playing || st.drag != .None || player_seek_drag {
+			c.pframe = target; c.pframe_tick = g_frame_no
+			clip_show(c, target)
+			return
+		}
+		if c.pframe_tick == g_frame_no { // 2º chamador no MESMO frame (update+draw, transição):
+			clip_show(c, c.pframe)       // reusa a decisão — senão o vídeo andava 2x
+			return
+		}
+		cont := g_frame_no - c.pframe_tick == 1 // exibido no frame anterior = cadência contínua
+		c.pframe_tick = g_frame_no
+		if !cont {
+			c.pframe = target // acabou de entrar em cena (início/corte/transição): ancora
+		} else {
+			d := target - c.pframe
+			if d > 5 || d < -5 do c.pframe = target // salto real (corte p/ outro trecho, hitch): pula direto
+			else if d >= 2 do c.pframe += 2         // atrasado: alcança (+1 líquido por frame)
+			else if d >= 0 do c.pframe += 1         // zona-morta: passo travado (absorve o jitter de ±1)
+			// d < 0: segura (conteúdo mais lento que o render, ex. 30fps em 60Hz = pulldown limpo;
+			// avançar aqui — como a 1ª versão fazia — deixava o vídeo até 2 frames À FRENTE do áudio)
+		}
+		clip_show(c, c.pframe)
 		return
 	}
 	// respawn assíncrono no ar: o worker é o dono do live stream — congela o
@@ -4859,7 +4885,7 @@ set_play_clip :: proc(si: int, local: f32) {
 		rl.PauseMusicStream(seg_src(play_clip).music)
 	}
 	play_clip = si
-	aud_prev = -1; play_frame = -1 // relógio monotônico e passo de frame recomeçam após seek/aquisição
+	aud_prev = -1; smooth_bad = 0 // relógio suave recomeça após seek/aquisição (âncora = loc0 no bloco)
 	c := seg_src(si)
 	// troca a janela p/ a parte da região ou o chunk no bolso, se prontos
 	if c.has_audio && !try_part_open(c, local) do _ = try_chunk_open(c, local)
@@ -5247,7 +5273,7 @@ src_acquire :: proc() {
 	// ancora o relógio na posição PEDIDA (lição 3 da timeline): logo após Stop→Seek→Play o
 	// GetMusicTimePlayed lê lixo (wrap p/ ~fim-do-arquivo por ~0.3s) — o smooth_clock rejeita
 	// o glitch e captura quando o raw assentar perto da âncora
-	aud_prev = clamp(src_t, 0, c.dur); play_frame = -1; smooth_bad = 0
+	aud_prev = clamp(src_t, 0, c.dur); smooth_bad = 0
 	if !c.has_audio do return
 	if !try_part_open(c, src_t) do _ = try_chunk_open(c, src_t)
 	if audio_clock_ok(c, src_t) {
@@ -5488,21 +5514,9 @@ update_src_preview :: proc(dt: f32) {
 		st.playing = false
 		if c.has_audio do rl.PauseMusicStream(c.music)
 	}
-	// DISPLAY: frame por PASSO travado no vsync (ver play_frame). Cache indexa a RAM direto;
-	// streaming decodifica por tempo (respawn/EOF) e mantém o caminho antigo.
-	if c.streaming {
-		clip_frame(c, src_t)
-	} else {
-		target := int(src_t * cfps_of(c))
-		if play_frame < 0 do play_frame = target
-		else {
-			d := target - play_frame
-			if d >= 2 do play_frame += 2         // atrasado 2+: acelera (raro; hitch/render mais lento)
-			else if d > -2 do play_frame += 1    // zona-morta -1..+1: sempre +1 (1:1, sem beat)
-			// d <= -2: segura (render mais rápido que o conteúdo, ex. 75Hz -> pulldown uniforme)
-		}
-		clip_show(c, play_frame)
-	}
+	// DISPLAY: o passo travado no vsync agora mora DENTRO do clip_frame (ramo de cache),
+	// compartilhado com o playback da timeline — um mecanismo só p/ os dois caminhos.
+	clip_frame(c, src_t)
 }
 
 // silencia o áudio ativo no INSTANTE em que a barra de progresso é agarrada: setar só
@@ -5556,6 +5570,7 @@ update :: proc() {
 	// Parado: mantém o cap de 30 (economia; sem playback a suavidade não importa).
 	rl.SetTargetFPS(idle ? 30 : 0)
 
+	g_frame_no += 1 // frame de render novo (gate do passo travado — ver clip_frame)
 	dt := rl.GetFrameTime()
 	// TETO no dt: uma travada longa (respawn do decoder de vídeo ~250ms, extração de
 	// chunk, loop modal do Windows ao redimensionar, GC) faz o GetFrameTime devolver o
@@ -6140,29 +6155,17 @@ update :: proc() {
 				// na borda de cortes separados (SEEKS disparava). Confia no loc0 pedido.
 				local := acquired ? loc0 : rl.GetMusicTimePlayed(c.music) + c.music_base // posição na FONTE (chunk tem offset)
 				// seek do seek_global neste frame: a leitura acima é stale — usa a posição pedida
-				if !acquired && seek_pending do local = seek_pending_loc
+				was_seek := !acquired && seek_pending
+				if was_seek do local = seek_pending_loc
 				seek_pending = false
-				// relógio MONOTÔNICO: GetMusicTimePlayed oscila p/ trás em até ~1
-				// sub-buffer (pior com buffers grandes). O recuo espúrio disparava o
-				// respawn "pulo p/ trás" do vídeo a cada oscilação (~250ms de bloqueio
-				// cada -> picote). Durante playback contínuo o relógio nunca recua;
-				// seeks reais passam por set_play_clip, que zera aud_prev.
-				if !acquired && aud_prev >= 0 && local < aud_prev do local = aud_prev
-					// proteção contra salto p/ FRENTE (metade que faltava do relógio monotônico):
-					// num playback contínuo o relógio avança ~dt/frame. Um pulo > 3s num único
-					// frame que NÃO é seek = glitch da troca de janela de áudio (head->chunk->OGG
-					// recalcula music_base / GetMusicTimePlayed dessincroniza) — seguir cegamente
-					// jogava o playhead lá na frente e o vídeo enlouquecia atrás (imagem virava
-					// miniatura — "piora com o tempo" durante a extração do áudio). Segue no ritmo
-					// normal e re-sincroniza no frame seguinte. 3s separa o glitch (100s+) de
-					// qualquer hitch legítimo (< 1s de áudio por frame). Seeks reais têm aud_prev=-1.
-					if aud_prev >= 0 && local > aud_prev + 3.0 {
-						dbg_jmp_n += 1; dbg_jmp_from = aud_prev; dbg_jmp_to = local
-						dbg_jmp_gmtp = rl.GetMusicTimePlayed(c.music); dbg_jmp_base = c.music_base
-						dbg_jmp_loc0 = loc0; dbg_jmp_len = f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
-						dbg_jmp_acq = acquired; dbg_jmp_pend = seek_pending
-						local = aud_prev + dt // avança no ritmo normal em vez do salto
-					}
+				// relógio SUAVE (PLL — o mesmo da prévia do bin): substitui o clamp monotônico e
+				// a guarda de salto >3s, que eram versões rústicas da mesma ideia. Absorve os
+				// degraus de 10-20ms do GetMusicTimePlayed (lição 9: oscila p/ trás; lição 8:
+				// buffers velhos) E os glitches da troca de janela de áudio (o antigo salto >3s):
+				// drift fora de ±SMOOTH_HARD avança pelo dt e reata sozinho se persistir
+				// (~0.75s). Seeks/acquire ancoram por loc0/seek_pending_loc; aud_prev assume o
+				// valor no fim do bloco (mesmo papel de antes).
+				if !acquired && !was_seek do local = smooth_clock(local, dt)
 				// e nunca deixa o jitter do relógio recuar o playhead pra antes do
 				// início do segmento (sairia dele e re-entraria em loop)
 				if local < sg.in_off do local = sg.in_off
