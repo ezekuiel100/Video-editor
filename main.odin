@@ -4525,6 +4525,29 @@ snap_start :: proc(tr, moving: int, proposed: f32, dur: f32) -> f32 {
 	return max(0, result)
 }
 
+// encaixa UMA borda (aparo) nas bordas de todos os clipes / início / playhead — mesmos pontos
+// do snap_start, mas para um ponto só (o snap_start move o bloco inteiro; aqui a outra borda
+// fica parada). Acende a guia de alinhamento entre trilhas, igual ao mover.
+snap_edge :: proc(moving: int, proposed: f32) -> f32 {
+	thr := SNAP_PX / pps()
+	result := proposed
+	bestd := thr
+	pts: [2 * MAX_SEGS + 2]f32
+	n := 0
+	pts[n] = 0; n += 1
+	pts[n] = st.playhead; n += 1
+	for i in 0 ..< nsegs {
+		if i == moving || !seg_blocks(i) do continue
+		pts[n] = segs[i].start; n += 1
+		pts[n] = segs[i].start + segs[i].dur; n += 1
+	}
+	for k in 0 ..< n {
+		p := pts[k]
+		if d := math.abs(proposed - p); d < bestd { bestd = d; result = p; snap_line = p }
+	}
+	return result
+}
+
 // segmento de VÍDEO de topo que contém t (-1 se nenhum) — vence no preview e nos cliques.
 // Ignora clipes só-áudio (não têm imagem); trilhas de áudio nunca aparecem no preview.
 seg_at :: proc(t: f32) -> int {
@@ -5756,7 +5779,12 @@ update :: proc() {
 			// limites: in_off >= 0 (nada antes da fonte), fim do vizinho à esquerda, dur > 0.
 			// in_off zera quando o início recua sg.in_off/speed na timeline.
 			lo := max(sg.start - sg.in_off / spd, left_wall(sg.track, drag_clip, sg.start + 0.001))
-			new_start := clamp(mt, lo, old_end - 0.05)
+			// encaixa a borda nas bordas dos outros clipes (inclusive de OUTRAS trilhas) e
+			// acende a guia; se o clamp (fonte/vizinho) tirar do ponto, apaga a guia — ela só
+			// aparece onde a borda REALMENTE parou
+			snapped := snap_edge(drag_clip, mt)
+			new_start := clamp(snapped, lo, old_end - 0.05)
+			if abs(new_start - snapped) > 0.0001 do snap_line = -1
 			sg.in_off += (new_start - sg.start) * spd
 			sg.start = new_start
 			sg.dur = old_end - new_start
@@ -5766,7 +5794,11 @@ update :: proc() {
 			srcdur := (src.is_img || src.is_text) ? f32(3600) : src.dur
 			// a fonte restante (srcdur - in_off) rende (srcdur - in_off)/speed na timeline
 			max_end := min(sg.start + (srcdur - sg.in_off) / seg_speed(drag_clip), right_wall(sg.track, drag_clip, sg.start + 0.05))
-			sg.dur = clamp(mt, sg.start + 0.05, max_end) - sg.start
+			// mesma guia de encaixe do aparo da esquerda, agora p/ a borda do FIM
+			snapped := snap_edge(drag_clip, mt)
+			new_end := clamp(snapped, sg.start + 0.05, max_end)
+			if abs(new_end - snapped) > 0.0001 do snap_line = -1
+			sg.dur = new_end - sg.start
 		}
 	} else if st.drag == .FadeIn && drag_clip >= 0 && drag_clip < nsegs {
 		sg := &segs[drag_clip]
