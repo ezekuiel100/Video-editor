@@ -1323,6 +1323,21 @@ write_bulge_maps :: proc(str, cx, cy, rad: f32, w, h: int, xpath, ypath: string)
 	return os.write_entire_file(xpath, xb[:]) == nil && os.write_entire_file(ypath, yb[:]) == nil
 }
 
+// trecho da FONTE que o segmento i consome: [t0,t1] mais o quanto falta congelar nas pontas
+// quando não há footage p/ os handles do dissolver. FONTE ÚNICA DA VERDADE — o mesmo cálculo
+// alimenta o `-ss` do input E o `trim` do filtro; se os dois divergissem, o vídeo exportado
+// sairia deslocado/dessincronizado SEM erro nenhum. hd/tl = esticões da transição (0 fora dela).
+seg_src_span :: proc(i: int, hd, tl: f32) -> (t0, t1, freeze_hd, freeze_tl: f32) {
+	sg := segs[i]
+	cc := &clips[sg.src]
+	sp := sg.speed <= 0 ? f32(1) : sg.speed
+	if cc.is_img do return 0, sg.dur + hd + tl, 0, 0 // imagem: input em loop, sempre do 0
+	head_avail := sg.in_off                             // footage antes do in-point
+	tail_avail := max(0, cc.dur - (sg.in_off + sg.dur*sp)) // footage depois do out-point
+	real_hd := min(hd, head_avail); real_tl := min(tl, tail_avail)
+	return sg.in_off - real_hd, sg.in_off + sg.dur*sp + real_tl, hd - real_hd, tl - real_tl
+}
+
 // monta o -filter_complex e dispara o ffmpeg. Respeita trilhas/transform/proporção/
 // cortes/volume/fades/mixagem. Renderiza a partir dos ARQUIVOS-fonte (resolução cheia).
 start_export :: proc(out: string, gpu: bool) {
@@ -1387,6 +1402,22 @@ start_export :: proc(out: string, gpu: bool) {
 		}
 		if c.is_img { // imagem: repete o frame por dur (+ handles da transição) segundos
 			append(&args, "-loop", "1", "-framerate", "30", "-t", fmt.tprintf("%.3f", segs[i].dur + thead[i] + ttail[i]))
+		} else {
+			// SEEK NA ENTRADA (-ss ANTES do -i): o ffmpeg pula pro keyframe e decodifica só até
+			// o ponto pedido. Antes o corte era SÓ no filtro (trim), o que obriga a DECODIFICAR
+			// O ARQUIVO DESDE O ZERO até o in-point — num trecho aos 60min de uma live de 4h a
+			// exportação levava minutos só p/ COMEÇAR (medido: >120s, contra 0.7s com -ss).
+			// `-copyts` PRESERVA os timestamps originais: sem ele o seek rebaseia p/ zero e todo
+			// `trim`/`atrim` do grafo (que usa tempo ABSOLUTO da fonte) teria de ser deslocado à
+			// mão — é onde um erro dessincronizaria áudio/vídeo em silêncio. Com -copyts o grafo
+			// fica INTACTO. Verificado: vídeo bit-idêntico (inclusive com múltiplos inputs); o
+			// áudio muda só ~-93 dBFS (arredondamento do decoder AAC ao iniciar noutro ponto).
+			// Cada segmento tem seu PRÓPRIO input, então o -ss é por segmento, sem interferência.
+			// Recua um keyframe (SEEK_PAD) do trecho pedido: garante que o trim tenha material
+			// antes do in-point mesmo se o keyframe cair depois dele.
+			SEEK_PAD :: f32(2)
+			t0, _, _, _ := seg_src_span(i, thead[i], ttail[i])
+			if ss := t0 - SEEK_PAD; ss > 0.001 do append(&args, "-ss", fmt.tprintf("%.3f", ss), "-copyts")
 		}
 		append(&args, "-i", c.path)
 		seg_inp[i] = inp; inp += 1
@@ -1488,18 +1519,9 @@ start_export :: proc(out: string, gpu: bool) {
 			// que existe e CONGELA o resto com tpad (clone do 1º/último frame) — o dissolver
 			// funciona entre quaisquer clipes sem o usuário aparar nada. (hd/tl só são >0 em
 			// transições, onde sp==1, então a matemática de folga usa dur diretamente.)
-			freeze_hd := f32(0); freeze_tl := f32(0)
-			t0, t1: f32
-			if cc.is_img {
-				t0 = 0; t1 = sg.dur + hd + tl
-			} else {
-				head_avail := sg.in_off                            // footage antes do in_off
-				tail_avail := max(0, cc.dur - (sg.in_off + sg.dur*sp)) // footage após o out-point
-				real_hd := min(hd, head_avail); freeze_hd = hd - real_hd
-				real_tl := min(tl, tail_avail); freeze_tl = tl - real_tl
-				t0 = sg.in_off - real_hd
-				t1 = sg.in_off + sg.dur*sp + real_tl
-			}
+			t0, t1, freeze_hd, freeze_tl := seg_src_span(i, hd, tl)
+			// trim em tempo ABSOLUTO da fonte: o input pode vir seekado (-ss), mas o -copyts
+			// preserva os timestamps, então esta conta independe do seek (ver montagem dos inputs)
 			fmt.sbprintf(&fb, "[%d:v]trim=%.3f:%.3f", seg_inp[i], t0, t1)
 			if freeze_hd > 0.001 do fmt.sbprintf(&fb, ",tpad=start_mode=clone:start_duration=%.3f", freeze_hd)
 			if freeze_tl > 0.001 do fmt.sbprintf(&fb, ",tpad=stop_mode=clone:stop_duration=%.3f", freeze_tl)
@@ -1608,6 +1630,8 @@ start_export :: proc(out: string, gpu: bool) {
 		vv := sg.vol <= 0 ? 1 : sg.vol
 		sp := sg.speed <= 0 ? 1 : sg.speed
 		sep := strings.builder_len(fb) > 0 ? ";" : "" // MP3: sem grafo de vídeo, a 1ª cadeia não leva ";"
+		// atrim em tempo ABSOLUTO da fonte (o -copyts do input preserva os timestamps, então o
+		// seek de entrada não desloca nada aqui — nada a compensar)
 		fmt.sbprintf(&fb, "%s[%d:a]atrim=%.3f:%.3f,asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,volume=%.3f",
 			sep, seg_inp[i], sg.in_off, sg.in_off+sg.dur*sp, vv)
 		// velocidade: atempo aceita 0.5..2 por estágio; encadeia p/ cobrir 0.25..4.
