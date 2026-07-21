@@ -9509,6 +9509,28 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	if px >= vlane.x && px <= r.x + r.width {
 		rl.DrawTriangle({px - 6, ruler.y}, {px + 6, ruler.y}, {px, ruler.y + 10}, PLAYHEAD)
 		rl.DrawLineEx({px, ruler.y}, {px, r.y + r.height}, 1.5, PLAYHEAD)
+		// TESOURA no playhead (estilo Filmora): corta tudo que estiver sob ele, sem precisar
+		// da tecla S nem de ligar a lâmina. Só aparece quando HÁ o que cortar (algum segmento
+		// destravado cruzando o playhead) — botão morto confunde mais do que ajuda.
+		if !blade_mode && st.drag == .None && modal == .None {
+			cutable := false
+			for i in 0 ..< nsegs {
+				if !seg_ready(i) || track_locked[segs[i].track] do continue
+				if st.playhead > segs[i].start + 0.05 && st.playhead < segs[i].start + segs[i].dur - 0.05 { cutable = true; break }
+			}
+			if cutable {
+				cut_r := rl.Rectangle{ px - 11, rows_top - 26, 22, 22 } // logo acima das trilhas, na linha
+				bh := hovered(cut_r)
+				rl.DrawCircleV({ px, cut_r.y + 11 }, 11, bh ? rl.Color{ 245, 120, 110, 255 } : PLAYHEAD)
+				sc := rl.WHITE
+				rl.DrawLineEx({ px - 4, cut_r.y + 5 }, { px + 5, cut_r.y + 14 }, 1.7, sc) // lâminas em X
+				rl.DrawLineEx({ px + 4, cut_r.y + 5 }, { px - 5, cut_r.y + 14 }, 1.7, sc)
+				rl.DrawCircleLinesV({ px - 4, cut_r.y + 16 }, 2.6, sc)                    // cabos
+				rl.DrawCircleLinesV({ px + 4, cut_r.y + 16 }, 2.6, sc)
+				if bh do rl.SetMouseCursor(.POINTING_HAND)
+				if clicked(cut_r) do split_at_playhead()
+			}
+		}
 	}
 
 	draw_fx_on_tracks(rows_clip) // barras de EFEITO por cima dos clipes, na trilha de cada um
