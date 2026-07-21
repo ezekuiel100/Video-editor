@@ -44,7 +44,13 @@ STREAM_LO_H :: i32(360)
 STREAM_HI_W :: i32(1280)
 STREAM_HI_H :: i32(720)
 STREAM_FBYTES_MAX :: int(STREAM_HI_W) * int(STREAM_HI_H) * 3
-stream_hi: bool // false = Baixa (360p); true = Alta (720p). Global (estilo NLE)
+// false = Baixa (360p); true = Alta (720p). Global (estilo NLE). PADRÃO = Alta: o cache dos
+// clipes curtos é 720p (DEC_W×DEC_H), então deixar o streaming em 360p fazia clipe curto sair
+// NÍTIDO e clipe longo BORRADO no mesmo projeto, sem motivo aparente. E não há custo real:
+// medido neste arquivo (1080p h264, 4h) o decode ao vivo dá 321fps em 720p vs 264fps em 360p
+// no NVDEC (a escala roda na GPU, o decode domina) e 431fps vs 569fps por software — ambos
+// MUITO acima dos 30fps necessários. O toggle fica p/ máquinas fracas.
+stream_hi: bool = true
 stream_dw :: proc() -> i32 { return stream_hi ? STREAM_HI_W : STREAM_LO_W }
 stream_dh :: proc() -> i32 { return stream_hi ? STREAM_HI_H : STREAM_LO_H }
 // scrub (streaming): distância MÁX (s, no tempo da fonte) que o último frame decodificado
@@ -1826,6 +1832,7 @@ save_project :: proc(path: string) {
 	// Chaves novas: projetos antigos simplesmente não as têm e caem nos padrões (o switch do
 	// load ignora chaves desconhecidas, então o formato segue compatível nos dois sentidos).
 	fmt.sbprintf(&b, "layout %.4f %.4f\n", tl_frac, md_frac)
+	fmt.sbprintf(&b, "prevq %d\n", stream_hi ? 1 : 0) // qualidade da prévia de clipes streaming
 	fmt.sbprintf(&b, "trackh")
 	for i in 0 ..< MAXTRACKS do fmt.sbprintf(&b, " %.1f", track_h[i]) // 0 = altura padrão
 	fmt.sbprintf(&b, "\n")
@@ -1849,6 +1856,7 @@ load_project :: proc(path: string) {
 	res_w, res_h := 0, 0 // resolução salva (0 = ausente em projetos antigos; deriva de `ar`)
 	lnv := -1; lna := -1 // contagem de trilhas do arquivo (-1 = não especificada; deriva do uso)
 	ltl := f32(-1); lmd := f32(-1) // divisórias salvas (-1 = ausente: mantém o padrão)
+	lpq := stream_hi               // qualidade da prévia salva (ausente = mantém a atual)
 	lth: [MAXTRACKS]f32            // alturas de trilha salvas (0 = padrão)
 	mpaths := make([dynamic]string, context.temp_allocator)
 	Seg2 :: struct { fields: [34]f32 }
@@ -1872,6 +1880,8 @@ load_project :: proc(path: string) {
 				if v, o := strconv.parse_f64(toks[1]); o do ltl = f32(v)
 				if v, o := strconv.parse_f64(toks[2]); o do lmd = f32(v)
 			}
+		case "prevq": // qualidade da prévia de streaming (0 = Baixa/360p, 1 = Alta/720p)
+			if len(toks) >= 2 do lpq = (strconv.parse_int(toks[1]) or_else 1) != 0
 		case "trackh": // altura de cada trilha (0 = padrão)
 			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS {
 				if v, o := strconv.parse_f64(toks[k]); o do lth[k - 1] = f32(v)
@@ -1951,6 +1961,7 @@ load_project :: proc(path: string) {
 	// no padrão. Ausente (projeto antigo) mantém o que já estava.
 	if ltl > 0.05 && ltl < 0.95 do tl_frac = ltl
 	if lmd > 0.05 && lmd < 0.95 do md_frac = lmd
+	stream_hi = lpq // qualidade da prévia (set_stream_quality não serve aqui: nada foi importado ainda)
 	for i in 0 ..< MAXTRACKS {
 		track_h[i] = (lth[i] >= TRACK_H_MIN && lth[i] <= TRACK_H_MAX) ? lth[i] : 0 // 0 = padrão
 	}
@@ -8798,7 +8809,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		rl.DrawRectangleRounded(qr, 0.35, 6, hovered(qr) ? HOVER : PANEL2)
 		rl.DrawRectangleRoundedLinesEx(qr, 0.35, 6, 1, stream_hi ? ACCENT : LINE)
 		txt_c(qlabel, qr.x + qr.width/2, qr.y + 4, 12, stream_hi ? ACCENT : TEXT)
-		if clicked(qr) do set_stream_quality(!stream_hi)
+		if clicked(qr) { set_stream_quality(!stream_hi); dirty = true } // escolha vai no .ovp
 	}
 	if vol_popup { // painel com slider VERTICAL acima do alto-falante
 		pw := f32(34); ph := f32(108)
