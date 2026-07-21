@@ -25,7 +25,9 @@ t_reset :: proc() {
 	clips[0].probed = true; clips[0].dur = 100
 	clips[1].probed = true; clips[1].dur = 100
 	g_nv = 3; g_na = 2
-	for i in 0 ..< MAXTRACKS { track_muted[i] = false; track_locked[i] = false }
+	for i in 0 ..< MAXTRACKS { track_muted[i] = false; track_locked[i] = false; track_h[i] = 0 }
+	// geometria vertical determinística (o draw_timeline é quem seta isso em runtime)
+	g_lanes_top = 0; g_track_h = 72; g_track_gap = 3
 	st = State{}
 	selected = -1; play_clip = -1; drag_clip = -1; sel_trans = -1; bin_sel = -1
 	src_preview = -1
@@ -292,4 +294,95 @@ timeline_dur_por_trilha :: proc(t: ^testing.T) {
 	testing.expect(t, t_feq(timeline_dur(), 35), "fim do último segmento em qualquer trilha")
 	clips[1].probed = false
 	testing.expect(t, t_feq(timeline_dur(), 15), "fonte não-pronta não conta")
+}
+
+// ---------- geometria vertical das trilhas (altura POR TRILHA) ----------
+// A altura deixou de ser um global único: track_y soma as alturas das linhas ACIMA e
+// track_at_y percorre acumulando. Se as duas saírem de sincronia, clipes são desenhados
+// numa trilha e o arrasto/drop acerta OUTRA — daí os testes de ida-e-volta.
+// Layout usado: g_nv=3, g_na=2 -> 5 linhas. Vídeo é invertido (V3 no topo), áudio embaixo:
+//   linha 0 = V3(t=2) | 1 = V2(t=1) | 2 = V1(t=0) | 3 = A1(t=MAXV) | 4 = A2(t=MAXV+1)
+t_mixed_heights :: proc() {
+	track_h[2] = 100          // V3 (linha 0)
+	track_h[1] = 0            // V2 (linha 1) -> padrão 72
+	track_h[0] = 50           // V1 (linha 2)
+	track_h[MAXV] = 120       // A1 (linha 3)
+	track_h[MAXV + 1] = 0     // A2 (linha 4) -> padrão 72
+}
+
+@(test)
+th_usa_padrao_quando_zero :: proc(t: ^testing.T) {
+	t_reset()
+	testing.expect(t, t_feq(th(0), g_track_h), "0 = altura padrão (trilha nova nasce assim)")
+	track_h[0] = 150
+	testing.expect(t, t_feq(th(0), 150), "valor próprio quando definido")
+}
+
+@(test)
+track_of_row_inverte_track_row :: proc(t: ^testing.T) {
+	t_reset()
+	for tr in ([]int{ 0, 1, 2, MAXV, MAXV + 1 }) {
+		testing.expectf(t, track_of_row(track_row(tr)) == tr, "ida-e-volta linha<->trilha (t=%d)", tr)
+	}
+	testing.expect(t, track_of_row(0) == 2, "linha 0 = trilha de vídeo do TOPO (V3)")
+	testing.expect(t, track_of_row(g_nv) == MAXV, "1ª linha de áudio = A1")
+}
+
+@(test)
+track_y_soma_alturas_individuais :: proc(t: ^testing.T) {
+	t_reset()
+	t_mixed_heights()
+	// acumulado esperado: 0 | +100+3 | +72+3 | +50+3 | +120+3
+	testing.expect(t, t_feq(track_y(2), 0),   "V3 (linha 0) começa no topo das trilhas")
+	testing.expect(t, t_feq(track_y(1), 103), "V2 = depois de V3(100) + gap(3)")
+	testing.expect(t, t_feq(track_y(0), 178), "V1 = 103 + V2 padrão(72) + gap")
+	testing.expect(t, t_feq(track_y(MAXV), 231), "A1 = 178 + V1(50) + gap")
+	testing.expect(t, t_feq(track_y(MAXV+1), 354), "A2 = 231 + A1(120) + gap")
+}
+
+@(test)
+track_y_respeita_lanes_top :: proc(t: ^testing.T) {
+	t_reset()
+	t_mixed_heights()
+	base := track_y(0)
+	g_lanes_top = 500 // o scroll vertical desloca a origem
+	testing.expect(t, t_feq(track_y(0), base + 500), "todas as trilhas deslocam com g_lanes_top")
+}
+
+@(test)
+track_at_y_ida_e_volta :: proc(t: ^testing.T) {
+	t_reset()
+	t_mixed_heights()
+	for tr in ([]int{ 2, 1, 0, MAXV, MAXV + 1 }) {
+		y := track_y(tr)
+		h := th(tr)
+		testing.expectf(t, track_at_y(y + 1) == tr,       "topo da trilha %d mapeia de volta nela", tr)
+		testing.expectf(t, track_at_y(y + h/2) == tr,     "meio da trilha %d idem", tr)
+		testing.expectf(t, track_at_y(y + h - 1) == tr,   "base da trilha %d idem (antes do gap)", tr)
+	}
+}
+
+@(test)
+track_at_y_gap_e_bordas :: proc(t: ^testing.T) {
+	t_reset()
+	t_mixed_heights()
+	// o gap pertence à trilha de CIMA (o loop testa y < acumulado + altura + gap)
+	testing.expect(t, track_at_y(track_y(1) - 1) == 2, "gap entre linhas fica com a trilha de cima")
+	// fora da faixa clampa nas pontas (mesmo contrato do clamp antigo) — arrastar acima/abaixo
+	// de tudo não pode devolver trilha inválida
+	testing.expect(t, track_at_y(-1000) == track_of_row(0), "acima de tudo = 1ª linha")
+	testing.expect(t, track_at_y(99999) == track_of_row(g_nv + g_na - 1), "abaixo de tudo = última linha")
+}
+
+@(test)
+tracks_content_h_soma_tudo :: proc(t: ^testing.T) {
+	t_reset()
+	testing.expect(t, t_feq(tracks_content_h(), 5*(72+3)), "padrão: 5 linhas × (72 + gap)")
+	t_mixed_heights()
+	// 103 + 75 + 53 + 123 + 75
+	testing.expect(t, t_feq(tracks_content_h(), 429), "soma as alturas individuais + gaps")
+	// coerência com track_y: a última trilha termina exatamente no fim do conteúdo
+	last := track_of_row(g_nv + g_na - 1)
+	testing.expect(t, t_feq(track_y(last) + th(last) + g_track_gap, tracks_content_h()),
+		"fim da última trilha == altura total do conteúdo (scroll depende disso)")
 }
