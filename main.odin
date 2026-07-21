@@ -605,8 +605,25 @@ g_vlane:   rl.Rectangle // retângulo de TODAS as trilhas (p/ hit-test do drop d
 g_newv_zone: rl.Rectangle // banda escura acima do vídeo: soltar aqui cria trilha de vídeo nova
 g_newa_zone: rl.Rectangle // banda escura abaixo do áudio: soltar aqui cria trilha de áudio nova
 g_lanes_top: f32        // y do topo da área das trilhas (p/ mapear Y<->trilha)
-g_track_h:   f32 = 84   // altura de cada trilha (px)
+g_track_h:   f32 = 84   // altura PADRÃO de trilha (px); por trilha vem de track_h/th()
 g_track_gap: f32 = 3    // espaço vertical entre trilhas
+// altura POR TRILHA (arrastar a borda de baixo do cabeçalho). 0 = usar o padrão g_track_h, então
+// projeto novo/trilha nova já nasce certo sem inicializar nada. Trilha mais alta = miniaturas
+// maiores E forma de onda proporcionalmente maior (facilita achar o ponto do corte no áudio).
+track_h: [MAXTRACKS]f32
+TRACK_H_MIN :: f32(44)   // ainda mostra a barra de título + um fio de conteúdo
+TRACK_H_MAX :: f32(320)
+track_resize: int = -1   // trilha sendo redimensionada (-1 = nenhuma)
+// altura efetiva da trilha t
+th :: proc(t: int) -> f32 { return track_h[t] > 0 ? track_h[t] : g_track_h }
+// índice da trilha na linha `row` (inverso de track_row): vídeo em cima invertido, áudio embaixo
+track_of_row :: proc(row: int) -> int { return row < g_nv ? (g_nv - 1 - row) : (MAXV + (row - g_nv)) }
+// soma das alturas (+gaps) de todas as linhas visíveis
+tracks_content_h :: proc() -> f32 {
+	s: f32 = 0
+	for r in 0 ..< g_nv + g_na do s += th(track_of_row(r)) + g_track_gap
+	return s
+}
 g_view_w:  f32          // largura visível da timeline (px), guardada no draw p/ o atalho de ajuste
 snap_line: f32 = -1 // tempo (s) da guia de encaixe ativa (-1 = nenhuma)
 SNAP_PX :: 10.0     // distância (px) para o encaixe magnético
@@ -1713,7 +1730,7 @@ clear_project :: proc() {
 	nsegs = 0; selected = -1; bin_sel = -1; drag_clip = -1; sel_trans = -1; st.drag = .None
 	nfx = 0; fx_sel = -1; fxlib_drag = -1
 	g_nv = 3; g_na = 2; tl_vscroll = 0 // volta à contagem de trilhas padrão
-	for i in 0 ..< MAXTRACKS { track_muted[i] = false; track_locked[i] = false; track_hidden[i] = false } // trilhas limpas
+	for i in 0 ..< MAXTRACKS { track_muted[i] = false; track_locked[i] = false; track_hidden[i] = false; track_h[i] = 0 } // trilhas limpas (h=0 => padrão)
 	bin_clear_marks(); seg_clear_marks()
 	for i in 0 ..< nclips do clip_close(&clips[i])
 	for i in 0 ..< MAX_SEGS do spv_release(i) // libera os WAVs de velocidade
@@ -4571,12 +4588,24 @@ show_playhead_frame :: proc() {
 // (V-topo..V1, invertido), áudio embaixo (A1..A_n). Vídeo t ocupa a linha (g_nv-1-t); áudio
 // (índice MAXV+a) ocupa a linha (g_nv+a).
 track_row :: proc(t: int) -> int { return t < MAXV ? (g_nv - 1 - t) : (g_nv + (t - MAXV)) }
-track_y :: proc(t: int) -> f32 { return g_lanes_top + f32(track_row(t)) * (g_track_h + g_track_gap) }
-// trilha sob a coordenada y (usado no drop/arraste vertical)
+// y do topo da trilha: soma as alturas das linhas ACIMA (alturas são por trilha, não uniformes)
+track_y :: proc(t: int) -> f32 {
+	y := g_lanes_top
+	row := track_row(t)
+	for r in 0 ..< row do y += th(track_of_row(r)) + g_track_gap
+	return y
+}
+// trilha sob a coordenada y (usado no drop/arraste vertical). Percorre acumulando as alturas;
+// fora da faixa clampa na 1ª/última linha (mesmo comportamento do clamp antigo).
 track_at_y :: proc(y: f32) -> int {
 	nrows := g_nv + g_na
-	row := clamp(int((y - g_lanes_top) / (g_track_h + g_track_gap)), 0, nrows - 1) // 0 = topo
-	return row < g_nv ? (g_nv - 1 - row) : (MAXV + (row - g_nv)) // vídeo: inverte; áudio: base MAXV
+	yy := g_lanes_top
+	for r in 0 ..< nrows {
+		h := th(track_of_row(r)) + g_track_gap
+		if y < yy + h do return track_of_row(r)
+		yy += h
+	}
+	return track_of_row(nrows - 1)
 }
 // ajusta a trilha alvo ao TIPO da mídia: áudio só em trilha de áudio; vídeo/imagem só em vídeo
 track_for_media :: proc(src, t: int) -> int {
@@ -5378,7 +5407,7 @@ update :: proc() {
 	// FPS dinâmico: parado (sem playback nem arrasto), 30fps bastam p/ a UI —
 	// metade do custo de render; qualquer interação volta a 60 no frame seguinte.
 	// O avanço por relógio de parede usa dt, então funciona em qualquer fps.
-	idle := !st.playing && st.drag == .None && !win_dragging && !tl_hbar_drag && !zoom_bar_drag && !bin_marquee && !tl_marquee && !tl_split_drag && !md_split_drag
+	idle := !st.playing && st.drag == .None && !win_dragging && !tl_hbar_drag && !zoom_bar_drag && !bin_marquee && !tl_marquee && !tl_split_drag && !md_split_drag && track_resize < 0
 	// PLAYBACK: sem cap de CPU — deixa o VSYNC ditar o ritmo (trava no vblank do monitor,
 	// como o VLC). SetTargetFPS(60) por timer de CPU não sincroniza com o refresh e batia
 	// contra o vsync = judder/tearing. 0 = ilimitado, mas o VSYNC_HINT segura no refresh atual
@@ -6569,7 +6598,7 @@ draw :: proc() {
 		// FOOTPRINT: retângulo verde onde a mídia vai cair (posição + duração na trilha alvo)
 		if bin_drop_show {
 			if bin_drop_newtrack { // trilha NOVA: fantasma (altura de clipe) centrado na área de drop
-				gh := min(bin_drop_zone.height - 8, g_track_h - 8)
+				gh := min(bin_drop_zone.height - 8, th(bin_drop_tr) - 8)
 				fy := bin_drop_zone.y + (bin_drop_zone.height - gh)/2
 				fr := rl.Rectangle{ tl_x(bin_drop_start), fy, bin_drop_dur*pps(), gh }
 				rl.DrawRectangleRec(fr, rl.Color{ 90, 200, 120, 60 })
@@ -6577,7 +6606,7 @@ draw :: proc() {
 				txt(cs(c.name), fr.x + 6, fr.y + 4, 11, rl.WHITE)
 			} else {
 				ok := !track_locked[bin_drop_tr] // trilha travada = não pode receber (vermelho)
-				fr := rl.Rectangle{ tl_x(bin_drop_start), track_y(bin_drop_tr) + 4, bin_drop_dur*pps(), g_track_h - 8 }
+				fr := rl.Rectangle{ tl_x(bin_drop_start), track_y(bin_drop_tr) + 4, bin_drop_dur*pps(), th(bin_drop_tr) - 8 }
 				rl.DrawRectangleRec(fr, ok ? rl.Color{ 90, 200, 120, 60 } : rl.Color{ 200, 70, 70, 55 })
 				rl.DrawRectangleLinesEx(fr, 1.6, ok ? rl.Color{ 90, 200, 120, 235 } : rl.Color{ 200, 70, 70, 235 })
 			}
@@ -8749,7 +8778,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 // retângulo do clipe de efeito i (altura cheia da trilha), igual ao de um segmento de vídeo.
 fx_rect :: proc(i: int) -> rl.Rectangle {
 	f := fxsegs[i]
-	return { tl_x(f.start), track_y(f.track) + 4, max(f32(8), f.dur * pps()), g_track_h - 8 }
+	return { tl_x(f.start), track_y(f.track) + 4, max(f32(8), f.dur * pps()), th(f.track) - 8 }
 }
 // clipe de efeito cujo retângulo contém o ponto m; -1 se nenhum. Do topo (último desenhado) p/ baixo.
 fx_bar_at :: proc(m: rl.Vector2) -> int {
@@ -8798,7 +8827,7 @@ draw_fx_on_tracks :: proc(clip: rl.Rectangle) {
 		if !is_audio_track(ty) {
 			tr := clamp(ty, 0, g_nv - 1)
 			gx := tl_x(fx_free_start(tr, -1, max(0, tl_t(m.x - DROP_LEAD)), 3))
-			rl.DrawRectangleRounded({ gx, track_y(tr) + 4, 3*pps(), g_track_h - 8 }, 0.12, 5, rl.Color{ 200, 175, 90, 150 })
+			rl.DrawRectangleRounded({ gx, track_y(tr) + 4, 3*pps(), th(tr) - 8 }, 0.12, 5, rl.Color{ 200, 175, 90, 150 })
 		}
 	}
 }
@@ -8917,9 +8946,9 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	// cria a trilha. Elas ABSORVEM o espaço vazio da timeline — com poucas trilhas ficam grandes;
 	// com muitas encolhem até um mínimo e as trilhas rolam. NÃO mudam de tamanho ao arrastar.
 	NEWZONE_MIN :: f32(28) // altura mínima da área de drop (quando as trilhas tomam o espaço)
-	g_track_h = 72         // altura FIXA da trilha (não expande nem encolhe; quando não cabem, ROLA)
+	g_track_h = 72         // altura PADRÃO (não expande nem encolhe sozinha; quando não cabem, ROLA)
 	nrows := g_nv + g_na
-	content_h := f32(nrows) * (g_track_h + g_track_gap)                                     // altura total das trilhas
+	content_h := tracks_content_h()                                                         // soma as alturas POR TRILHA
 	lanes_top := r.y + toolbar_h + ruler_h
 	region_bot := r.y + r.height - 10
 	slack := max(0, (region_bot - lanes_top) - content_h - 2*NEWZONE_MIN - 2*g_track_gap)   // espaço vazio p/ dividir entre as 2 bandas
@@ -8993,23 +9022,44 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	}
 	rl.EndScissorMode()
 
-	WAVE_H :: f32(22) // faixa da forma de onda no rodapé do bloco
-	lane_h := g_track_h
+	WAVE_H :: f32(22) // faixa MÍNIMA da forma de onda no rodapé do bloco (cresce com a trilha)
 	vlane := g_vlane // viewport de TODAS as trilhas (refs horizontais)
+	// soltou o botão: encerra o redimensionamento de trilha (mesmo fora da zona)
+	if track_resize >= 0 && !rl.IsMouseButtonDown(.LEFT) do track_resize = -1
 	// fundo + cabeçalho de cada trilha visível, RECORTADO ao viewport rolável (o scroll vertical
 	// desliza as trilhas sob a faixa de efeitos/bandas sem vazar por cima delas)
 	rl.BeginScissorMode(i32(r.x), i32(rows_top), i32(r.width), i32(rows_vh))
 	for row in 0 ..< nrows {
-		t := row < g_nv ? (g_nv - 1 - row) : (MAXV + (row - g_nv)) // linha -> índice de trilha
+		t := track_of_row(row)
 		ly := track_y(t)
-		if ly + lane_h < rows_top || ly > rows_top + rows_vh do continue // fora da viewport: pula
+		lh := th(t)
+		if ly + lh < rows_top || ly > rows_top + rows_vh do continue // fora da viewport: pula
 		aud := is_audio_track(t)
 		label := aud ? rl.TextFormat("A%d", i32(t - MAXV + 1)) : rl.TextFormat("V%d", i32(t + 1))
-		draw_track_header({ r.x, ly, LANE_X, lane_h }, label, t)
-		rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lane_h }, aud ? rl.Color{ 28, 34, 32, 255 } : rl.Color{ 30, 33, 40, 255 })
-		if track_locked[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lane_h }, rl.Color{ 210, 160, 50, 20 }) // tint bloqueada
-		if track_muted[t]  do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lane_h }, rl.Color{ 170, 60, 60, 24 })  // tint muda
-		if track_hidden[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lane_h }, rl.Color{ 80, 100, 130, 30 })  // tint oculta
+		// PEGADOR de altura na borda de baixo do cabeçalho (6px, abaixo dos botões M/cadeado/olho
+		// que terminam em lh-6). Press tratado ANTES do header p/ ter prioridade sobre eles.
+		hz := rl.Rectangle{ r.x, ly + lh - 3, LANE_X, 6 }
+		if track_resize < 0 && rl.IsMouseButtonPressed(.LEFT) && hovered(hz) &&
+		   st.drag == .None && !tl_split_drag && !md_split_drag && modal == .None {
+			track_resize = t
+		}
+		if track_resize == t { // arrastando: a altura segue o mouse (o topo da trilha não muda)
+			track_h[t] = clamp(rl.GetMousePosition().y - ly, TRACK_H_MIN, TRACK_H_MAX)
+			lh = th(t)
+		}
+		draw_track_header({ r.x, ly, LANE_X, lh }, label, t)
+		rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, aud ? rl.Color{ 28, 34, 32, 255 } : rl.Color{ 30, 33, 40, 255 })
+		if track_locked[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, rl.Color{ 210, 160, 50, 20 }) // tint bloqueada
+		if track_muted[t]  do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, rl.Color{ 170, 60, 60, 24 })  // tint muda
+		if track_hidden[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, rl.Color{ 80, 100, 130, 30 })  // tint oculta
+		// feedback do pegador: pontilhado discreto, acende no hover/arrasto
+		hot := track_resize == t || (track_resize < 0 && hovered(hz) && st.drag == .None && modal == .None)
+		if hot {
+			rl.SetMouseCursor(.RESIZE_NS)
+			rl.DrawRectangleRec({ r.x, ly + lh - 1, LANE_X, 2 }, ACCENT)
+		} else {
+			for k in 0 ..< 3 do rl.DrawCircleV({ r.x + LANE_X/2 + f32(k - 1)*7, ly + lh - 2 }, 1.1, rl.Color{ 110, 118, 132, 255 })
+		}
 	}
 	rl.EndScissorMode()
 	// bandas "criar trilha" PINADAS (topo=vídeo, base=áudio): escuras, com "+"; arraste mídia aqui OU clique no "+"
@@ -9032,7 +9082,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		}
 		rl.DrawRectangleRounded(thumb, 1, 4, (tl_vbar_drag || hovered(thumb)) ? ACCENT : rl.Color{70, 76, 88, 255})
 	}
-	if segs_ready() == 0 do txt_c("arraste um clipe do bin para cá", vlane.x + vlane.width/2, track_y(0) + lane_h/2 - 8, 13, MUTED)
+	if segs_ready() == 0 do txt_c("arraste um clipe do bin para cá", vlane.x + vlane.width/2, track_y(0) + th(0)/2 - 8, 13, MUTED)
 
 	// segmentos de vídeo (e blocos de áudio) colocados na timeline
 	vc := view_seg()
@@ -9051,11 +9101,18 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		w := sg.dur * pps()
 		active := i == vc
 
-		vr := rl.Rectangle{ x, track_y(sg.track) + 4, w, lane_h - 8 }
+		vr := rl.Rectangle{ x, track_y(sg.track) + 4, w, th(sg.track) - 8 }
 		alike := c.is_audio || sg.aonly // se comporta como áudio (mídia só-áudio OU áudio separado)
 		rl.DrawRectangleRounded(vr, 0.06, 4, alike ? rl.Color{ 34, 52, 46, 255 } : (c.is_text ? rl.Color{ 58, 48, 78, 255 } : CLIP))
-		// clipe só-áudio: a onda ocupa o bloco todo (sem filmstrip); vídeo: onda no rodapé
-		wave_h := alike ? (vr.height - 15) : (c.has_audio ? WAVE_H : 0)
+		// clipe só-áudio: a onda ocupa o bloco todo (sem filmstrip). Vídeo: REPARTIÇÃO em que a
+		// IMAGEM cresce devagar (FILM_BASE + 25% do espaço extra, teto FILM_MAX) e TODO o resto
+		// vai pra ONDA — aumentar a trilha engorda o áudio, que é o ponto (achar o corte). Na
+		// altura padrão a conta dá exatamente o visual de sempre (tira 27px, onda WAVE_H).
+		FILM_BASE :: f32(27)  // tira na trilha padrão (avail 49 = 27 de imagem + 22 de onda)
+		FILM_MAX  :: f32(96)  // além disso a miniatura não ganha nada em legibilidade
+		avail := vr.height - 15 // abaixo da barra de título
+		film := clamp(FILM_BASE + max(0, avail - 49) * 0.25, 0, FILM_MAX)
+		wave_h := alike ? avail : (c.has_audio ? clamp(avail - film, WAVE_H, max(WAVE_H, avail)) : 0)
 		// clipe de texto: mostra o conteúdo centralizado (sem miniaturas)
 		if c.is_text && w > 30 {
 			txt_c(elide(c.text, 12, w - 16), vr.x + vr.width/2, vr.y + vr.height/2 - 4, 12, rl.Color{ 214, 204, 236, 255 })
@@ -9178,7 +9235,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		}
 
 		// divisória no início do segmento (mostra o corte entre segmentos vizinhos, na trilha dele)
-		if i > 0 do rl.DrawLineEx({x, track_y(sg.track)}, {x, track_y(sg.track) + lane_h}, 1, rl.Color{20,22,27,255})
+		if i > 0 do rl.DrawLineEx({x, track_y(sg.track)}, {x, track_y(sg.track) + th(sg.track)}, 1, rl.Color{20,22,27,255})
 	}
 
 	// SEGUNDO PASSO: indicadores de transição/fade POR CIMA de todos os blocos (senão um
@@ -9187,7 +9244,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		if !seg_ready(i) do continue
 		sg := &segs[i]
 		x := tl_x(sg.start); w := sg.dur * pps()
-		vr := rl.Rectangle{ x, track_y(sg.track) + 4, w, lane_h - 8 }
+		vr := rl.Rectangle{ x, track_y(sg.track) + 4, w, th(sg.track) - 8 }
 		xbtn :: proc(xr: rl.Rectangle) -> bool {
 			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : rl.Color{ 60, 64, 74, 235 })
 			rl.DrawLineEx({xr.x+4,xr.y+4},{xr.x+10,xr.y+10},1.7,rl.WHITE)
@@ -9290,7 +9347,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	// TRILHA TRAVADA: hachura diagonal sobre os clipes (aparência de bloqueio, estilo NLE)
 	for i in 0 ..< nsegs {
 		if !seg_ready(i) || !track_locked[segs[i].track] do continue
-		hvr := rl.Rectangle{ tl_x(segs[i].start), track_y(segs[i].track) + 4, segs[i].dur*pps(), lane_h - 8 }
+		hvr := rl.Rectangle{ tl_x(segs[i].start), track_y(segs[i].track) + 4, segs[i].dur*pps(), th(segs[i].track) - 8 }
 		hx0 := max(hvr.x, clip_rect.x); hx1 := min(hvr.x + hvr.width, clip_rect.x + clip_rect.width)
 		if hx1 <= hx0 do continue
 		rl.BeginScissorMode(i32(hx0), i32(hvr.y), i32(hx1 - hx0), i32(hvr.height))
@@ -9405,7 +9462,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			if !seg_ready(i) do continue
 			x := tl_x(segs[i].start)
 			w := segs[i].dur * pps()
-			cr := rl.Rectangle{ x, track_y(segs[i].track) + 4, w, lane_h - 8 }
+			cr := rl.Rectangle{ x, track_y(segs[i].track) + 4, w, th(segs[i].track) - 8 }
 			if rl.CheckCollisionPointRec(mp, cr) {
 				hit = i
 				// perto de uma borda (e o segmento largo o bastante) -> aparar
@@ -9470,7 +9527,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			if !tl_marquee_add do seg_clear_marks()
 			for i in 0 ..< nsegs {
 				if !seg_ready(i) || track_locked[segs[i].track] do continue // trilha travada não entra na seleção
-				sr := rl.Rectangle{ tl_x(segs[i].start), track_y(segs[i].track) + 4, segs[i].dur*pps(), lane_h - 8 }
+				sr := rl.Rectangle{ tl_x(segs[i].start), track_y(segs[i].track) + 4, segs[i].dur*pps(), th(segs[i].track) - 8 }
 				if rl.CheckCollisionRecs(sr, mq) do seg_marked[i] = true
 			}
 			if selected < 0 || !seg_marked[selected] { // mantém um foco válido p/ o inspector
