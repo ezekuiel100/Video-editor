@@ -84,6 +84,10 @@ CHUNK_SECS    :: f32(300) // áudio sob demanda: seek além do coberto extrai um
 FULL_PART     :: f32(1800)
 WAVE_PPS      :: 100  // buckets de pico por segundo na forma de onda (10ms de resolução)
 WAVE_RATE     :: 8000 // taxa (Hz, mono) do PCM extraído só p/ a onda — deve casar com o "-ar" do ffmpeg
+// ganho de EXIBIÇÃO do corpo RMS: o RMS de material normal fica em ~0.15-0.35 (bem abaixo do
+// pico), então sem ganho o corpo sólido ficaria um fiapo. 2.8 deixa música cheia perto de 3/4
+// da faixa, preservando a dinâmica (o contorno do pico, translúcido, marca o teto real).
+WAVE_RMS_GAIN :: f32(2.8)
 // miniatura: alimenta o filmstrip da trilha (desenhado pequeno) E o fallback de scrub no
 // player (streaming: esticado a ~900px). 96×54 era ok na trilha mas virava um borrão de
 // upscale ~9x no player durante o arrasto rápido; 256×144 (16:9) dá ~4x mais nitidez lá e
@@ -857,8 +861,12 @@ Clip :: struct {
 	chunk_ok:   bool, // atômico: extração do chunk deu certo
 	chunk_busy: bool, // (main) worker no ar
 	music_base: f32,  // offset (na fonte) do stream ATIVO em c.music (0 = head/completo)
-	// --- forma de onda (envelope de picos, calculada do WAV em thread de fundo) ---
+	// --- forma de onda (calculada do áudio em thread de fundo) ---
+	// DOIS envelopes por bucket, como nos NLEs: o PICO vira o contorno claro e o RMS (energia
+	// média) o corpo sólido. Só pico não serve: música moderna é comprimida e o pico fica ~1.0
+	// em quase todo bucket de 10ms -> a onda virava um BLOCO CHEIO, sem dinâmica visível.
 	wave:       []f32, // pico [0,1] por bucket, WAVE_PPS buckets/seg (heap, dono)
+	wave_rms:   []f32, // RMS [0,1] por bucket (mesmo tamanho/índice de wave)
 	wave_ready: bool,  // atômico: envelope pronto p/ desenhar
 	// --- tira de miniaturas (filmstrip) na trilha de vídeo ---
 	thumb_px:       []u8,           // pixels de nthumbs frames (heap; liberado após upload)
@@ -2871,12 +2879,19 @@ compute_waveform :: proc(c: ^Clip) {
 	tame_process(c, p, true) // fundo
 
 	if c.wave == nil do c.wave = make([]f32, max(1, int(c.dur * WAVE_PPS)))
+	if c.wave_rms == nil do c.wave_rms = make([]f32, len(c.wave))
 	n := len(c.wave)
 	buf := make([]u8, 1 << 16)
 	defer delete(buf)
 	frame_idx := 0
 	fill := 0
 	published := false
+	// acumulador do bucket ATUAL p/ o RMS: as amostras chegam em ordem de tempo, então o bucket
+	// fecha quando o índice muda — aí grava sqrt(média dos quadrados) e zera. Mantém a escrita
+	// IN-PLACE de um f32 por bucket (a main lê sem trava, como o pico).
+	acc_b := -1
+	acc_sq: f64 = 0
+	acc_n  := 0
 	for {
 		if intrinsics.atomic_load(&c.stop) do break // app fechando
 		rn, rerr := os.read(r, buf[fill:])
@@ -2890,6 +2905,15 @@ compute_waveform :: proc(c: ^Clip) {
 			if b >= 0 && b < n {
 				v := f32(av) / 32768.0
 				if v > c.wave[b] do c.wave[b] = v
+				if b != acc_b { // virou de bucket: fecha o anterior e começa o novo
+					if acc_b >= 0 && acc_b < n && acc_n > 0 {
+						c.wave_rms[acc_b] = f32(math.sqrt(acc_sq / f64(acc_n)))
+					}
+					acc_b = b; acc_sq = 0; acc_n = 0
+				}
+				fv := f64(v)
+				acc_sq += fv * fv
+				acc_n += 1
 			}
 			frame_idx += 1
 			i += 2
@@ -2900,6 +2924,7 @@ compute_waveform :: proc(c: ^Clip) {
 		if !published { intrinsics.atomic_store(&c.wave_ready, true); published = true } // mostra já enquanto enche
 		if rn <= 0 || rerr != nil do break
 	}
+	if acc_b >= 0 && acc_b < n && acc_n > 0 do c.wave_rms[acc_b] = f32(math.sqrt(acc_sq / f64(acc_n))) // último bucket
 	os.close(r)
 	if intrinsics.atomic_load(&c.stop) do _ = os.process_kill(p) // fechando: não espera o ffmpeg terminar sozinho
 	_, _ = os.process_wait(p)
@@ -2919,6 +2944,20 @@ wave_peak :: proc(c: ^Clip, t0, t1: f32) -> f32 {
 	step := max(1, (i1 - i0) / 8)
 	m: f32 = 0
 	for i := i0; i <= i1; i += step do if c.wave[i] > m do m = c.wave[i]
+	return m
+}
+
+// RMS [0,1] da fonte no intervalo (mesma amostragem do wave_peak). -1 = ainda não pronto.
+// O RMS é ~3-5x menor que o pico, então o desenho aplica um ganho de exibição (WAVE_RMS_GAIN).
+wave_rms_at :: proc(c: ^Clip, t0, t1: f32) -> f32 {
+	if !intrinsics.atomic_load(&c.wave_ready) || len(c.wave_rms) == 0 do return -1
+	n := len(c.wave_rms)
+	i0 := clamp(int(t0 * WAVE_PPS), 0, n - 1)
+	i1 := clamp(int(t1 * WAVE_PPS), 0, n - 1)
+	if i1 < i0 do i1 = i0
+	step := max(1, (i1 - i0) / 8)
+	m: f32 = 0
+	for i := i0; i <= i1; i += step do if c.wave_rms[i] > m do m = c.wave_rms[i]
 	return m
 }
 
@@ -3899,6 +3938,7 @@ clip_close :: proc(c: ^Clip) {
 	if c.streaming { stream_stop(c); delete(c.fbuf) }
 	else do delete(c.cache)
 	delete(c.wave)
+	delete(c.wave_rms)
 	for i in 0 ..< c.thumbs_up do rl.UnloadTexture(c.thumbs[i]) // só as que subiram
 	delete(c.thumbs)
 	delete(c.thumb_px)
@@ -9183,22 +9223,37 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			wx0 := ar.x + 3
 			wx1 := min(ar.x + ar.width - 3, clip_rect.x + clip_rect.width)
 			if wx0 < clip_rect.x do wx0 += math.ceil((clip_rect.x - wx0) / STEP) * STEP // preserva a fase da grade
-			cy := ar.y + ar.height / 2
-			amp := ar.height / 2 - 2
-			wcol := sg.muted ? rl.Color{ 120, 126, 136, 170 } : rl.Color{ 95, 180, 150, 220 } // cinza se mudo
+			// SINGLE-SIDED (não espelhada): a onda preenche a partir da BASE da faixa, como
+			// no Filmora/Premiere. Espelhar no centro gastava metade da altura desenhando a
+			// imagem refletida — de um lado só o mesmo espaço mostra o DOBRO de detalhe, que
+			// é o que importa pra achar o ponto do corte.
+			base := ar.y + ar.height - 2
+			amp := ar.height - 4
+			cy := ar.y + ar.height / 2 // só p/ posicionar o ícone de mudo
+			// corpo (RMS) sólido + contorno (pico) translúcido; cinza quando mudo
+			wcol := sg.muted ? rl.Color{ 120, 126, 136, 190 } : rl.Color{ 95, 180, 150, 235 }
+			pcol := sg.muted ? rl.Color{ 120, 126, 136,  70 } : rl.Color{ 95, 180, 150,  90 }
 			for wx := wx0; wx < wx1; wx += STEP {
 				tl := tl_t(wx)
 				// tempo na FONTE nas duas bordas desta coluna (respeita o in_off do corte)
 				ta := (tl             - sg.start) * seg_speed(i) + sg.in_off
 				tb := (tl_t(wx + STEP) - sg.start) * seg_speed(i) + sg.in_off
 				p := wave_peak(c, ta, tb)
-				if p < 0 { // ainda calculando: barra fininha esmaecida
-					rl.DrawRectangleRec({wx, cy - 2, STEP, 4}, rl.Color{70, 100, 92, 130})
+				if p < 0 { // ainda calculando: fio esmaecido na base
+					rl.DrawRectangleRec({wx, base - 3, STEP, 3}, rl.Color{70, 100, 92, 130})
 				} else {
-					// a altura reflete o GANHO (volume × fade × mudo): baixar o volume
-					// encolhe a onda; a onda também afina ao longo das rampas de fade
-					hh := max(f32(1), clamp(p * seg_gain(i, tl), 0, 1) * amp)
-					rl.DrawRectangleRec({wx, cy - hh, STEP, hh * 2}, wcol)
+					// DUAS camadas (estilo NLE): contorno do PICO em tom claro/translúcido e o
+					// corpo do RMS sólido por cima. Só o pico virava um bloco cheio em música
+					// comprimida (pico ~1.0 em todo bucket); o RMS é que mostra a dinâmica.
+					// A altura reflete o GANHO (volume × fade × mudo): baixar o volume encolhe
+					// a onda, que também afina ao longo das rampas de fade.
+					g := clamp(seg_gain(i, tl), 0, 1)
+					hp := max(f32(1), clamp(p * g, 0, 1) * amp)
+					rl.DrawRectangleRec({wx, base - hp, STEP, hp}, pcol)
+					if rms := wave_rms_at(c, ta, tb); rms > 0 {
+						hr := max(f32(1), min(clamp(rms * WAVE_RMS_GAIN * g, 0, 1) * amp, hp))
+						rl.DrawRectangleRec({wx, base - hr, STEP, hr}, wcol)
+					}
 				}
 			}
 			// ícone de mudo à esquerda da faixa
