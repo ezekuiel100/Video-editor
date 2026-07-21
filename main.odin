@@ -1797,6 +1797,14 @@ save_project :: proc(path: string) {
 		fmt.sbprintf(&b, "%d %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f\n",
 			idx[s.src], s.track, s.start, s.in_off, s.dur, s.vol, s.muted ? 1 : 0, s.fade_in, s.fade_out, s.scale, s.px, s.py, s.rot, s.opacity, s.speed <= 0 ? 1 : s.speed, s.trans, s.vfin, s.vfout, s.crop_x, s.crop_y, s.crop_w, s.crop_h, s.zoom_anim ? 1 : 0, s.crop2_x, s.crop2_y, s.crop2_w, s.crop2_h, s.aonly ? 1 : 0, s.fx_bright, s.fx_contrast, s.fx_satur, s.fx_look, s.fx_vignette, s.fx_temp)
 	}
+	// LAYOUT do editor: divisórias (frações da janela) + altura de cada trilha. Não afeta o
+	// vídeo exportado, mas o usuário monta o espaço de trabalho e espera reencontrá-lo.
+	// Chaves novas: projetos antigos simplesmente não as têm e caem nos padrões (o switch do
+	// load ignora chaves desconhecidas, então o formato segue compatível nos dois sentidos).
+	fmt.sbprintf(&b, "layout %.4f %.4f\n", tl_frac, md_frac)
+	fmt.sbprintf(&b, "trackh")
+	for i in 0 ..< MAXTRACKS do fmt.sbprintf(&b, " %.1f", track_h[i]) // 0 = altura padrão
+	fmt.sbprintf(&b, "\n")
 	// clipes de EFEITO (faixa): kind start dur amount radius cx cy wobble speed angle track
 	fmt.sbprintf(&b, "fx %d\n", nfx)
 	for i in 0 ..< nfx {
@@ -1816,6 +1824,8 @@ load_project :: proc(path: string) {
 	ar: f32 = 16.0/9
 	res_w, res_h := 0, 0 // resolução salva (0 = ausente em projetos antigos; deriva de `ar`)
 	lnv := -1; lna := -1 // contagem de trilhas do arquivo (-1 = não especificada; deriva do uso)
+	ltl := f32(-1); lmd := f32(-1) // divisórias salvas (-1 = ausente: mantém o padrão)
+	lth: [MAXTRACKS]f32            // alturas de trilha salvas (0 = padrão)
 	mpaths := make([dynamic]string, context.temp_allocator)
 	Seg2 :: struct { fields: [34]f32 }
 	segd := make([dynamic]Seg2, context.temp_allocator)
@@ -1833,6 +1843,15 @@ load_project :: proc(path: string) {
 			if len(toks) >= 3 { res_w = strconv.parse_int(toks[1]) or_else 0; res_h = strconv.parse_int(toks[2]) or_else 0 }
 		case "tracks":
 			if len(toks) >= 3 { lnv = strconv.parse_int(toks[1]) or_else -1; lna = strconv.parse_int(toks[2]) or_else -1 }
+		case "layout": // divisórias (frações da janela)
+			if len(toks) >= 3 {
+				if v, o := strconv.parse_f64(toks[1]); o do ltl = f32(v)
+				if v, o := strconv.parse_f64(toks[2]); o do lmd = f32(v)
+			}
+		case "trackh": // altura de cada trilha (0 = padrão)
+			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS {
+				if v, o := strconv.parse_f64(toks[k]); o do lth[k - 1] = f32(v)
+			}
 		case "media":
 			n := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else 0) : 0
 			for _ in 0 ..< n { if li < len(lines) { append(&mpaths, strings.clone(strings.trim_space(lines[li]), context.temp_allocator)); li += 1 } }
@@ -1903,6 +1922,14 @@ load_project :: proc(path: string) {
 	g_na = clamp(max(lna, ma, 1), 1, MAXA)
 	for i in 0 ..< nfx do if fxsegs[i].track < 0 do fxsegs[i].track = g_nv - 1 // efeitos antigos (sem track) = topo
 	tl_vscroll = 0
+	// LAYOUT salvo (aplicado DEPOIS do clear_project, que zera as alturas). Valores validados:
+	// arquivo corrompido/editado à mão não pode deixar a UI inutilizável — fora da faixa, cai
+	// no padrão. Ausente (projeto antigo) mantém o que já estava.
+	if ltl > 0.05 && ltl < 0.95 do tl_frac = ltl
+	if lmd > 0.05 && lmd < 0.95 do md_frac = lmd
+	for i in 0 ..< MAXTRACKS {
+		track_h[i] = (lth[i] >= TRACK_H_MIN && lth[i] <= TRACK_H_MAX) ? lth[i] : 0 // 0 = padrão
+	}
 	if res_w > 0 && res_h > 0 do set_proj_res(res_w, res_h) // resolução salva (novo formato)
 	else do set_proj_ar(ar)                                  // projeto antigo: deriva do aspecto
 	ar_auto = false // projeto salvo traz seu próprio formato — não sobrescreve na próxima importação
@@ -6610,7 +6637,9 @@ draw :: proc() {
 	// painéis, e a marquee do bin checa !tl_split_drag (os 3px de cima tocam o rodapé dela).
 	m_div := rl.GetMousePosition()
 	if tl_split_drag {
-		if !rl.IsMouseButtonDown(.LEFT) do tl_split_drag = false // solto (ou perdemos o release)
+		// ao SOLTAR marca o projeto como não-salvo (o layout vai no .ovp): 1× por ajuste, não a
+		// cada frame de arrasto — sem isso o usuário monta o layout, fecha e perde sem aviso
+		if !rl.IsMouseButtonDown(.LEFT) { tl_split_drag = false; dirty = true }
 		else {
 			// clampa a PRÓPRIA fração nos limites (não só o tl_h): senão arrastar além do teto
 			// acumulava fração "fantasma" e o knob demorava a reagir no arrasto de volta
@@ -6634,7 +6663,7 @@ draw :: proc() {
 	md_max := max(MD_MIN, sw - PV_MIN)
 	media_w := clamp(sw * md_frac, MD_MIN, md_max)
 	if md_split_drag {
-		if !rl.IsMouseButtonDown(.LEFT) do md_split_drag = false
+		if !rl.IsMouseButtonDown(.LEFT) { md_split_drag = false; dirty = true } // idem: layout salvo no .ovp
 		else {
 			md_frac = clamp(m_div.x / sw, MD_MIN / sw, md_max / sw)
 			media_w = clamp(sw * md_frac, MD_MIN, md_max)
@@ -9135,7 +9164,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	WAVE_H :: f32(22) // faixa MÍNIMA da forma de onda no rodapé do bloco (cresce com a trilha)
 	vlane := g_vlane // viewport de TODAS as trilhas (refs horizontais)
 	// soltou o botão: encerra o redimensionamento de trilha (mesmo fora da zona)
-	if track_resize >= 0 && !rl.IsMouseButtonDown(.LEFT) do track_resize = -1
+	if track_resize >= 0 && !rl.IsMouseButtonDown(.LEFT) { track_resize = -1; dirty = true } // altura vai no .ovp
 	// fundo + cabeçalho de cada trilha visível, RECORTADO ao viewport rolável (o scroll vertical
 	// desliza as trilhas sob a faixa de efeitos/bandas sem vazar por cima delas)
 	rl.BeginScissorMode(i32(r.x), i32(rows_top), i32(r.width), i32(rows_vh))
