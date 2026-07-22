@@ -5427,21 +5427,49 @@ player_source :: proc() -> (pc: int, t: f32) {
 	return -1, 0
 }
 
-// salva o frame atual do player em `out` (resolução cheia via ffmpeg -ss no ponto exato)
+// salva o frame atual do player em `out` — COM as edições aplicadas. Antes isto
+// redecodificava a FONTE no tempo t (`ffmpeg -ss`), então saía o vídeo ORIGINAL: sem
+// recorte, transform, opacidade, cor/efeitos, texto, transição nem as outras trilhas.
+// Agora compõe o MESMO `composite_video` do preview num RenderTexture do tamanho do
+// projeto (padrão de render_text_png). Custo: a imagem vem da textura de PREVIEW
+// (DEC_W×DEC_H), não da fonte em resolução cheia — o mesmo teto que o preview já tem.
 take_screenshot :: proc(out: string) {
-	pc, t := player_source()
-	if pc < 0 { set_toast("Nada no player para capturar"); return }
-	cmd := []string{
-		"ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-		"-ss", fmt.tprintf("%.3f", t), "-i", clips[pc].path,
-		"-frames:v", "1", "-update", "1", out,
+	// prévia de origem (duplo-clique no bin): não há edição aplicada, então vale mais a
+	// resolução CHEIA da fonte — segue pelo ffmpeg.
+	if src_preview >= 0 && src_preview < nclips {
+		cmd := []string{
+			"ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+			"-ss", fmt.tprintf("%.3f", clamp(src_t, 0, clips[src_preview].dur)),
+			"-i", clips[src_preview].path, "-frames:v", "1", "-update", "1", out,
+		}
+		if p, e := os.process_start(os.Process_Desc{ command = cmd }); e == nil {
+			_, _ = os.process_wait(p) // 1 frame: rápido
+			set_toast(rl.TextFormat("Screenshot salvo: %s", cs(out)))
+			shot_n += 1
+		} else {
+			set_toast("Falha ao salvar screenshot")
+		}
+		return
 	}
-	if p, e := os.process_start(os.Process_Desc{ command = cmd }); e == nil {
-		_, _ = os.process_wait(p) // 1 frame: rápido
+	if pc, _ := player_source(); pc < 0 { set_toast("Nada no player para capturar"); return }
+	W, H := export_dims()
+	rt := rl.LoadRenderTexture(i32(W), i32(H))
+	if rt.texture.id == 0 { set_toast("Falha ao salvar screenshot"); return }
+	rl.BeginTextureMode(rt)
+	rl.ClearBackground(rl.BLACK) // fundo do canvas, igual ao preview
+	any := composite_video(0, 0, f32(W), f32(H), false) // sel_box=false: sem a moldura de seleção
+	rl.EndTextureMode()
+	img := rl.LoadImageFromTexture(rt.texture)
+	rl.ImageFlipVertical(&img)                     // RenderTexture vem espelhado no eixo Y
+	rl.ImageFormat(&img, .UNCOMPRESSED_R8G8B8)     // sem alfa: o JPG não a usa e o PNG fica menor
+	ok := any && rl.ExportImage(img, strings.clone_to_cstring(out, context.temp_allocator))
+	rl.UnloadImage(img)
+	rl.UnloadRenderTexture(rt)
+	if ok {
 		set_toast(rl.TextFormat("Screenshot salvo: %s", cs(out)))
 		shot_n += 1
 	} else {
-		set_toast("Falha ao salvar screenshot")
+		set_toast(any ? "Falha ao salvar screenshot" : "Nada no player para capturar")
 	}
 }
 
