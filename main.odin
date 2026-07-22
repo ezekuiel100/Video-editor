@@ -4720,13 +4720,14 @@ trans_deny_toast :: proc(bi: int) {
 // cada fonte decodifica seu frame; draw_preview desenha todas com seus transforms.
 show_playhead_frame :: proc() {
 	pt := prof_beg(.Video); defer prof_end(.Video, pt)
+	vt := view_t() // no fim da timeline, o último frame em vez de nada
 	for t in 0 ..< g_nv {
 		if track_hidden[t] do continue // trilha oculta: não decodifica (não aparece)
 		// transição centrada no corte: decodifica AMBOS os clipes no seu tempo de fonte
 		// (o que SAI passa do out-point = pós-roll; o que ENTRA fica antes de in_off =
 		// pré-roll). Quando não há footage sobrando, o clamp CONGELA o frame da borda —
 		// o efeito funciona sem exigir aparo. Instantâneo p/ cache; streaming é aproximado.
-		tb := trans_overlap(t, st.playhead)
+		tb := trans_overlap(t, vt)
 		if tb >= 0 {
 			a := trans_prev(tb)
 			frz :: proc(c: ^Clip, sec: f32) { clip_frame(c, clamp(sec, 0, max(0, c.dur - 1.0/cfps_of(c)))) }
@@ -4739,16 +4740,16 @@ show_playhead_frame :: proc() {
 			//    decodifica; num corte contíguo os tempos são idênticos, sem perda.
 			//  - fonte de trilha mais BAIXA sob o playhead (seg_is_dup): o dono decide.
 			if a >= 0 && segs[a].src != segs[tb].src && !seg_is_dup(a) {
-				frz(seg_src(a), segs[a].in_off + (st.playhead - segs[a].start))
+				frz(seg_src(a), segs[a].in_off + (vt - segs[a].start))
 			}
-			if !seg_is_dup(tb) do frz(seg_src(tb), segs[tb].in_off + (st.playhead - segs[tb].start))
+			if !seg_is_dup(tb) do frz(seg_src(tb), segs[tb].in_off + (vt - segs[tb].start))
 		} else {
-			i := seg_on_track_at(t, st.playhead)
+			i := seg_on_track_at(t, vt)
 			if i >= 0 {
 				// mesma fonte já decodificando numa trilha mais baixa: este seg usa a
 				// vista dup (textura própria) — 1 clipe não serve 2 tempos ao mesmo tempo
-				if seg_is_dup(i) do dup_frame(i, seg_local(i, st.playhead))
-				else do clip_frame(seg_src(i), seg_local(i, st.playhead))
+				if seg_is_dup(i) do dup_frame(i, seg_local(i, vt))
+				else do clip_frame(seg_src(i), seg_local(i, vt))
 			}
 		}
 	}
@@ -4790,6 +4791,16 @@ track_for_seg :: proc(si, t: int) -> int {
 }
 
 // segmento a exibir no preview (topo sob o playhead; -1 = vazio -> preto)
+// tempo usado para MOSTRAR o quadro. Um segmento cobre [start, start+dur), então no
+// FIM exato da timeline o playhead não está DENTRO de nenhum: nem o decode nem a
+// composição achavam o que exibir e o preview ficava PRETO em vez de segurar o último
+// frame (como fazem os NLEs). Recua um fio só para exibição — o playhead e o timecode
+// continuam no fim de verdade. Vãos no MEIO da timeline seguem pretos, como devem.
+VIEW_EPS :: f32(0.001)
+view_t :: proc() -> f32 {
+	td := timeline_dur()
+	return (td > 0 && st.playhead >= td) ? max(0, td - VIEW_EPS) : st.playhead
+}
 view_seg :: proc() -> int { return seg_at(st.playhead) }
 // mídia-fonte sob o playhead (-1 = nenhuma) — usada p/ destacar no bin
 view_src :: proc() -> int { a := seg_at(st.playhead); return a >= 0 ? segs[a].src : -1 }
@@ -8250,13 +8261,14 @@ render_text_png :: proc(c: ^Clip, sg: Seg, path: string) -> bool {
 
 // desenha UM segmento de vídeo/texto no canvas com um multiplicador de opacidade
 // (usado pelo blend da transição: clipe que sai × (1-p), clipe que entra × p).
-draw_seg_composited :: proc(i: int, opac_mul, fx, fy, fw, fh: f32, sel_box: bool) {
+// `vt` é o tempo de EXIBIÇÃO (view_t), não o playhead cru — ver view_t.
+draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: bool) {
 	c := seg_src(i)
 	sg := segs[i]
 	// fade preto (rampa de opacidade) — só na região NORMAL do clipe (não no lead-in de dissolver)
 	bfade := f32(1)
-	if st.playhead >= sg.start {
-		p := st.playhead - sg.start
+	if vt >= sg.start {
+		p := vt - sg.start
 		if sg.vfin  > 0.01 && p < sg.vfin              do bfade = min(bfade, clamp(p / sg.vfin, 0, 1))
 		if sg.vfout > 0.01 && p > sg.dur - sg.vfout    do bfade = min(bfade, clamp((sg.dur - p) / sg.vfout, 0, 1))
 	}
@@ -8286,7 +8298,7 @@ draw_seg_composited :: proc(i: int, opac_mul, fx, fy, fw, fh: f32, sel_box: bool
 		// borrada, mas feedback INSTANTÂNEO na posição do cursor (estilo NLE); o frame
 		// nítido substitui assim que o decode assíncrono chega (tex_t alcança o alvo).
 		// Só fora do playback contínuo: um catch-up tocando NÃO deve piscar miniatura.
-		lt := seg_local(i, st.playhead)
+		lt := seg_local(i, vt)
 		waiting := st.drag == .Playhead || !st.playing || intrinsics.atomic_load(&c.rsp_busy)
 		past_eof := c.eof_at > 0 && lt >= c.eof_at - 0.05 // além do fim real: congela (comportamento antigo)
 		if waiting && !past_eof && abs(lt - c.tex_t) > SCRUB_SHARP_S {
@@ -8298,7 +8310,7 @@ draw_seg_composited :: proc(i: int, opac_mul, fx, fy, fw, fh: f32, sel_box: bool
 	s := sg.scale <= 0 ? f32(1) : sg.scale
 	// RECORTE: fonte = sub-região; ajusta a REGIÃO recortada ao canvas preservando o aspecto dela.
 	// seg_crop_at anima a região no tempo quando zoom_anim (Pan & Zoom); senão = recorte estático.
-	crx, cry, crw, crh := seg_crop_at(i, st.playhead)
+	crx, cry, crw, crh := seg_crop_at(i, vt)
 	// QUADRO da fonte = conteúdo real (sem o pillarbox do DEC): crop e fit passam a operar no
 	// aspecto verdadeiro, então 9:16 numa timeline 9:16 PREENCHE (antes o quadro 16:9 encolhia o vertical).
 	cr := dec_content_rect(c)
@@ -8317,7 +8329,7 @@ draw_seg_composited :: proc(i: int, opac_mul, fx, fy, fw, fh: f32, sel_box: bool
 	eft := sg.fx_temp; efv := sg.fx_vignette; efl := sg.fx_look
 	// DISTORÇÃO efetiva: a do clipe; se ele não tiver e o efeito de FAIXA sob o playhead for
 	// Distorção, aplica os parâmetros DELE (centro relativo ao quadro, tremor no tempo do efeito).
-	b_str := bulge_at(sg, st.playhead - sg.start)
+	b_str := bulge_at(sg, vt - sg.start)
 	b_cx := clamp(0.5+sg.bulge_x, 0, 1); b_cy := clamp(0.5+sg.bulge_y, 0, 1)
 	b_r := sg.bulge_r <= 0 ? BULGE_R_DEF : sg.bulge_r
 	rgb_off := [2]f32{ 0, 0 } // separação RGB do efeito de faixa (0 = desligado)
@@ -8326,7 +8338,7 @@ draw_seg_composited :: proc(i: int, opac_mul, fx, fy, fw, fh: f32, sel_box: bool
 	if af >= 0 {
 		fs := fxsegs[af]
 		if fs.kind == FX_DISTORT && !bulge_active(sg) {
-			b_str = fx_bulge_strength(fs, st.playhead - fs.start)
+			b_str = fx_bulge_strength(fs, vt - fs.start)
 			b_cx = clamp(0.5+fs.cx, 0, 1); b_cy = clamp(0.5+fs.cy, 0, 1); b_r = fs.radius <= 0 ? BULGE_R_DEF : fs.radius
 		} else if fs.kind == FX_RGB {
 			rgb_off = fx_rgb_offset(fs)
@@ -8387,18 +8399,19 @@ trans_overlap :: proc(t: int, time: f32) -> int {
 
 composite_video :: proc(fx, fy, fw, fh: f32, sel_box: bool) -> bool {
 	any := false
+	vt := view_t() // no fim da timeline, o último frame em vez de preto
 	for t in 0 ..< g_nv {
 		if track_hidden[t] do continue // trilha oculta (olho): não compõe no preview
-		tb := trans_overlap(t, st.playhead) // transição centrada cobrindo o playhead?
+		tb := trans_overlap(t, vt) // transição centrada cobrindo o playhead?
 		if tb >= 0 {
 			a := trans_prev(tb)
 			half := seg_trans(tb)/2; cut := segs[tb].start
-			p := clamp((st.playhead - (cut - half)) / (2*half), 0, 1) // 0 no início do overlap, 1 no fim
-			if a >= 0 { any = true; draw_seg_composited(a, 1-p, fx, fy, fw, fh, sel_box) } // SAI (cauda)
-			any = true; draw_seg_composited(tb, p, fx, fy, fw, fh, sel_box)                // ENTRA (cabeça)
+			p := clamp((vt - (cut - half)) / (2*half), 0, 1) // 0 no início do overlap, 1 no fim
+			if a >= 0 { any = true; draw_seg_composited(a, vt, 1-p, fx, fy, fw, fh, sel_box) } // SAI (cauda)
+			any = true; draw_seg_composited(tb, vt, p, fx, fy, fw, fh, sel_box)                // ENTRA (cabeça)
 		} else {
-			cur := seg_on_track_at(t, st.playhead)
-			if cur >= 0 { any = true; draw_seg_composited(cur, 1, fx, fy, fw, fh, sel_box) }
+			cur := seg_on_track_at(t, vt)
+			if cur >= 0 { any = true; draw_seg_composited(cur, vt, 1, fx, fy, fw, fh, sel_box) }
 		}
 	}
 	return any
