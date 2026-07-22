@@ -485,6 +485,22 @@ maybe_adopt_aspect :: proc(c: ^Clip) {
 	set_toast(rl.TextFormat("Formato do projeto: %dx%d (%s)", i32(proj_w), i32(proj_h), ratio_label(proj_w, proj_h)))
 }
 
+// dimensões NATIVAS do vídeo de referência, p/ o botão "Do vídeo" de Config. do Projeto:
+// o que está sob o playhead (é o que o usuário está vendo); senão o 1º da timeline — o
+// mesmo critério do maybe_adopt_aspect. 0,0 = nenhum (só áudio/texto, ou probe sem dims).
+proj_src_dims :: proc() -> (int, int) {
+	if v := view_seg(); v >= 0 {
+		c := seg_src(v)
+		if c.vw > 0 && c.vh > 0 do return int(c.vw), int(c.vh)
+	}
+	for i in 0 ..< nsegs {
+		if !seg_ready(i) do continue
+		c := seg_src(i)
+		if c.vw > 0 && c.vh > 0 do return int(c.vw), int(c.vh)
+	}
+	return 0, 0
+}
+
 // proporção do CANVAS de preview: na prévia de origem (duplo-clique no bin) segue a PRÓPRIA
 // fonte; caso contrário, o projeto. Assim um vídeo 9:16 aparece 9:16 mesmo num projeto 16:9.
 preview_ar :: proc() -> f32 {
@@ -6462,6 +6478,16 @@ draw_projset_modal :: proc(sw, sh: f32) {
 			if p.ar >= 1 { tf_set(&tf_pw, fmt.tprintf("%d", int(f32(1080)*p.ar+0.5))); tf_set(&tf_ph, "1080") }
 			else         { tf_set(&tf_pw, "1080"); tf_set(&tf_ph, fmt.tprintf("%d", int(f32(1080)/p.ar+0.5))) }
 		}
+	}
+	// "Do vídeo": tamanho EXATO da fonte — canvas casa com o vídeo, sem tarja nos cantos.
+	// É o mesmo que a autodetecção faz ao soltar o 1º vídeo; aqui dá p/ voltar a ele depois
+	// de experimentar um preset (antes não havia caminho de volta).
+	svw, svh := proj_src_dims()
+	nb := rl.Rectangle{ chx + 2*(54+6), chy + 30, 84, 24 }
+	if ui_btn(nb, "Do vídeo", svw > 0 && cwv == svw && chv == svh) {
+		if svw > 0 {
+			tf_set(&tf_pw, fmt.tprintf("%d", svw)); tf_set(&tf_ph, fmt.tprintf("%d", svh))
+		} else do set_toast("Nenhum vídeo na timeline para copiar o formato")
 	}
 
 	// --- Resolução: L × A + razão irredutível ---
