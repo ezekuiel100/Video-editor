@@ -6433,9 +6433,30 @@ update :: proc() {
 	if running do export_was_running = true
 }
 
-// abre a pasta no Explorer
-open_folder :: proc(dir: string) {
-	if p, e := os.process_start(os.Process_Desc{ command = []string{ "explorer", dir } }); e == nil do _ = p
+// abre a pasta no Explorer com o ARQUIVO já selecionado. Três pegadinhas do /select:
+//  1. só aceita barra INVERTIDA — e o caminho da exportação vem misturado
+//     (save_dir + "/" + nome), então tem de ser normalizado;
+//  2. as aspas vão em volta do CAMINHO, não do argumento inteiro. Por isso NÃO dá p/
+//     usar os.process_start: ele cita o argumento todo quando há espaço (medido:
+//     `explorer "/select,C:\...\video editor\x.mp4"`) e o Explorer, sem entender,
+//     abre uma pasta padrão. O ShellExecuteW passa lpParameters CRU — a citação fica
+//     sob nosso controle;
+//  3. arquivo movido/apagado depois do export: /select cairia na pasta padrão, então
+//     abre só o diretório.
+reveal_in_explorer :: proc(path: string) {
+	if path == "" do return
+	p, _ := strings.replace_all(path, "/", "\\", context.temp_allocator)
+	exists := false
+	if fh, oe := os.open(p); oe == nil { os.close(fh); exists = true }
+	params: string
+	if exists do params = fmt.tprintf("/select,\"%s\"", p)
+	else {
+		d := dir_of(p)
+		if d == "" do return
+		params = fmt.tprintf("\"%s\"", d)
+	}
+	win.ShellExecuteW(nil, win.utf8_to_wstring("open"), win.utf8_to_wstring("explorer.exe"),
+		win.utf8_to_wstring(params), nil, win.SW_SHOWNORMAL)
 }
 
 // modal de exportar / screenshot / conclusão (desenhado por cima de tudo)
@@ -6585,7 +6606,7 @@ draw_modal :: proc(sw, sh: f32) {
 		if ui_btn({ cx + 24, cy + ch - 52, 170, 36 }, "Reproduzir prévia", true) {
 			preview_pending = import_media(done_path, false); modal = .None
 		}
-		if ui_btn({ cx + 204, cy + ch - 52, 130, 36 }, "Abrir pasta", false) { if d := dir_of(done_path); d != "" do open_folder(d) }
+		if ui_btn({ cx + 204, cy + ch - 52, 130, 36 }, "Abrir pasta", false) do reveal_in_explorer(done_path)
 		if ui_btn({ cx + cw - 110, cy + ch - 52, 86, 36 }, "Fechar", false) do modal = .None
 		return
 	}
