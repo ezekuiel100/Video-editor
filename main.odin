@@ -4829,6 +4829,13 @@ crop_grab: rl.Vector2 // offset (frações) entre o mouse e o canto da região a
 // (já renderizados no preview E no export). Aba "Cortar" = livre; "Aproximar e Ampliar" =
 // proporção travada na saída (a região preenche o quadro = zoom de verdade). ---
 crop_tab:      int        // aba do modal: 0=Cortar 1=Aproximar e Ampliar
+// Só existe UM recorte por segmento (sg.crop_*) e as duas abas editam ele: "Cortar"
+// livre, "Aproximar e Ampliar" travado na proporção do projeto. Sem memória, entrar na
+// aba de zoom conformava o recorte livre e ele voltava deformado para a aba "Cortar".
+// Aqui cada aba lembra o SEU retângulo enquanto o modal está aberto; vale o da aba
+// ATIVA quando o usuário confirma.
+crop_memo:     [2][4]f32
+crop_memo_ok:  [2]bool
 crop_bk_seg:   int = -1   // segmento em edição no modal (-1 = modal fechado)
 crop_bk:       [4]f32     // crop_x/y/w/h originais (restaurados no Cancelar)
 crop_bk2:      [4]f32     // crop2_x/y/w/h originais (região do FIM)
@@ -8486,6 +8493,17 @@ crop_conform_lock_q :: proc(qx, qy, qw, qh: ^f32) {
 	qx^ = clamp(cxr - w/2, 0, 1-w); qy^ = clamp(cyr - h/2, 0, 1-h)
 }
 
+crop_memo_save :: proc(tab: int, sg: ^Seg) {
+	crop_memo[tab] = { sg.crop_x, sg.crop_y, sg.crop_w, sg.crop_h }
+	crop_memo_ok[tab] = true
+}
+crop_memo_load :: proc(tab: int, sg: ^Seg) -> bool {
+	if !crop_memo_ok[tab] do return false
+	m := crop_memo[tab]
+	sg.crop_x = m[0]; sg.crop_y = m[1]; sg.crop_w = m[2]; sg.crop_h = m[3]
+	return true
+}
+
 // abre o modal p/ o segmento selecionado (só vídeo/imagem). Chamado pelo botão da toolbar.
 open_crop_modal :: proc() {
 	if selected < 0 || selected >= nsegs || !seg_ready(selected) do return
@@ -8503,6 +8521,7 @@ open_crop_modal :: proc() {
 	crop_tab = sg.zoom_anim ? 1 : 0
 	crop_animate = sg.zoom_anim
 	crop_edit_end = false
+	crop_memo_ok = { false, false } // memória por aba começa vazia a cada abertura
 	crop_play = false; crop_play_t = 0 // começa pausado no início do clipe
 	// a trava de proporção é da aba de zoom; na aba "Cortar" o recorte é livre. Entrar
 	// na aba de zoom conforma na hora (ver o clique das abas).
@@ -8655,9 +8674,13 @@ draw_crop_modal :: proc(sw, sh: f32) {
 	tx := cx + 22; ty := cy + 46
 	for tab, i in tabs {
 		tr := rl.Rectangle{ tx, ty, tws[i], 26 }
-		if clicked(tr) {
-			if i == 1 && crop_tab != 1 do crop_conform_lock_q(&sg.crop_x, &sg.crop_y, &sg.crop_w, &sg.crop_h)
+		if clicked(tr) && i != crop_tab {
+			crop_memo_save(crop_tab, sg)          // guarda o retângulo da aba que sai
+			if !crop_memo_load(i, sg) && i == 1 { // 1ª visita ao zoom: conforma o recorte atual
+				crop_conform_lock_q(&sg.crop_x, &sg.crop_y, &sg.crop_w, &sg.crop_h)
+			}
 			crop_tab = i
+			crop_drag = -1
 		}
 		txt_c(tab, tr.x + tws[i]/2, tr.y + 6, 13, i == crop_tab ? TEXT : MUTED)
 		if i == crop_tab do rl.DrawRectangleRec({ tr.x + 8, tr.y + 24, tws[i] - 16, 2 }, ACCENT)
