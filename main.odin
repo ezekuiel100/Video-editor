@@ -8497,11 +8497,16 @@ open_crop_modal :: proc() {
 	crop_bk2 = { sg.crop2_x, sg.crop2_y, sg.crop2_w, sg.crop2_h }
 	crop_bk_anim = sg.zoom_anim
 	crop_bk_seg = selected
-	crop_tab = 1                 // abre direto na aba de zoom
+	// abre na aba "Cortar" (recorte livre) — é o que o botão promete. Exceção: o clipe
+	// que JÁ tem animação de zoom abre na aba dela, senão o OK (zoom_anim = animate &&
+	// crop_tab == 1) desligaria a animação existente sem o usuário pedir.
+	crop_tab = sg.zoom_anim ? 1 : 0
 	crop_animate = sg.zoom_anim
 	crop_edit_end = false
 	crop_play = false; crop_play_t = 0 // começa pausado no início do clipe
-	crop_conform_lock_q(&sg.crop_x, &sg.crop_y, &sg.crop_w, &sg.crop_h) // trava início na proporção
+	// a trava de proporção é da aba de zoom; na aba "Cortar" o recorte é livre. Entrar
+	// na aba de zoom conforma na hora (ver o clique das abas).
+	if crop_tab == 1 do crop_conform_lock_q(&sg.crop_x, &sg.crop_y, &sg.crop_w, &sg.crop_h)
 	if sg.crop2_w <= 0 { sg.crop2_x=sg.crop_x; sg.crop2_y=sg.crop_y; sg.crop2_w=sg.crop_w; sg.crop2_h=sg.crop_h } // fim = início
 	crop_conform_lock_q(&sg.crop2_x, &sg.crop2_y, &sg.crop2_w, &sg.crop2_h)
 	crop_drag = -1
