@@ -69,6 +69,7 @@ SCRUB_HW_MS :: f64(700)
 
 MAX_CLIPS     :: 12
 DBG_PLAY      :: false // LOG de diagnóstico do playback a cada frame (stderr); ligue p/ depurar
+DBG_SPV       :: false // LOG do preview de VELOCIDADE (WAV esticado): pedido, render e adoção
 STREAM_OVER   :: 45  // clipes acima disso decodificam ao vivo (streaming), não em RAM
 CACHE_BUDGET  :: 45  // teto de segundos (ponderado por fps) no cache RAM. Cortado de 180→45 ao
                      // subir o cache p/ 720p (4× bytes/frame): ~45s×30fps×2.76MB ≈ 3.7GB de teto,
@@ -1176,7 +1177,7 @@ close_now :: proc() {
 	if export_job != nil do TerminateJobObject(export_job, 1)
 	// 2) solta os handles de áudio do raylib -> libera o temporário que cada stream toca
 	for i in 0 ..< nclips do if clips[i].has_audio do rl.UnloadMusicStream(clips[i].music)
-	for i in 0 ..< MAX_SEGS do if spv[i].ok do rl.UnloadMusicStream(spv[i].music)
+	for i in 0 ..< MAX_SEGS do for s in 0 ..< 2 do if spv[i][s].ok do rl.UnloadMusicStream(spv[i][s].music)
 	// 3) apaga os temporários deste processo (os mesmos que clip_close/spv_release removiam)
 	for i in 0 ..< nclips {
 		c := &clips[i]
@@ -1187,7 +1188,9 @@ close_now :: proc() {
 		os.remove(c.aud_ck[1])
 		os.remove(part_path(c, 0)) // OGG completo
 	}
-	for i in 0 ..< MAX_SEGS do if spv[i].path != "" do os.remove(spv[i].path)
+	for i in 0 ..< MAX_SEGS do for s in 0 ..< 2 do if spv[i][s].path != "" do os.remove(spv[i][s].path)
+	if spv_render_path != "" do os.remove(spv_render_path) // render em voo (o Job mata o ffmpeg)
+	for t in spv_trash do os.remove(t)                     // lixeira ainda não varrida
 	// 4) sai — sem joins, sem desmontar o raylib; Jobs KILL_ON_JOB_CLOSE varrem o que escapou
 	os.exit(0)
 }
@@ -5033,44 +5036,91 @@ seg_audio_dup :: proc(i: int) -> bool {
 // preview soar natural, cada segmento com speed != 1 tem um WAV pré-renderizado com
 // EXATAMENTE `dur` segundos e tom corrigido (o mesmo atempo do export), tocado a 1x
 // e sincronizado ao playhead — como a mixagem secundária (aditivo, NÃO é relógio).
+// O WAV é gerado por JANELAS de SPV_CHUNK segundos de timeline, não pelo segmento
+// inteiro: um clipe de 30 min viraria um WAV de centenas de MB e dezenas de segundos
+// de render (antes havia um teto SPV_MAX_DUR e acima dele o preview ficava MUDO, sem
+// aviso — o bug "acelerei e o áudio parou"). Cada segmento tem 2 slots alternados
+// (slot = índice da janela & 1) para a janela seguinte ser pré-renderizada enquanto a
+// atual toca: a troca na borda não tem buraco. Mesma ideia dos chunks do áudio normal.
+SPV_CHUNK :: f32(120) // segundos de TIMELINE por WAV
+SPV_PRE   :: f32(25)  // começa a próxima janela a esta distância do fim da atual
+
 Spv :: struct {
 	music: rl.Music,
 	ok:    bool,   // main: WAV carregado e válido
 	on:    bool,   // main: tocando agora
-	key:   u64,    // conteúdo (src/in_off/dur/speed) que gerou o arquivo
+	key:   u64,    // conteúdo (src/in_off/dur/speed) + janela que gerou o arquivo
 	path:  string, // WAV temporário (heap, dono)
+	// render que FALHOU: sem isto o pedido é refeito todo frame (um processo ffmpeg
+	// por frame, mudo, para sempre). Desiste após SPV_TRIES e avisa uma vez.
+	bad_key: u64,
+	bad_n:   int,
 }
-spv: [MAX_SEGS]Spv
-spv_render_idx: int = -1      // segmento sendo renderizado (só a main escreve; -1 = ocioso)
-spv_render_key: u64           // key alvo do render em voo
-spv_args:       []string      // argv do ffmpeg (heap; liberado após o render)
-spv_thr:        ^thread.Thread
-spv_done:       bool          // atômico: worker terminou
-spv_ok:         bool          // atômico: ffmpeg saiu com sucesso
+SPV_TRIES :: 3
+spv: [MAX_SEGS][2]Spv
+spv_render_idx:  int = -1     // segmento sendo renderizado (só a main escreve; -1 = ocioso)
+spv_render_slot: int          // slot alvo do render em voo
+spv_render_ci:   int          // janela alvo do render em voo
+spv_render_path: string       // WAV sendo escrito agora (heap, dono até spv_poll)
+spv_serial:      int          // sufixo único: cada render vai p/ um arquivo novo
+spv_render_key:  u64          // key alvo do render em voo
+spv_args:        []string     // argv do ffmpeg (heap; liberado após o render)
+spv_thr:         ^thread.Thread
+spv_done:        bool         // atômico: worker terminou
+spv_ok:          bool         // atômico: ffmpeg saiu com sucesso
 
-// identidade do CONTEÚDO de áudio de um segmento (independe do índice, que desloca
-// ao remover): fonte + trecho + velocidade. Muda => o WAV precisa ser regerado.
-spv_key :: proc(i: int) -> u64 {
+// número de janelas do segmento (>=1, mesmo em segmentos curtíssimos)
+spv_nchunks :: proc(i: int) -> int { return max(1, int(math.ceil(segs[i].dur / SPV_CHUNK))) }
+
+// identidade do CONTEÚDO de áudio de uma JANELA (independe do índice do segmento, que
+// desloca ao remover): fonte + trecho + velocidade + janela. Muda => regerar o WAV.
+spv_key :: proc(i, ci: int) -> u64 {
 	sg := segs[i]
 	h: u64 = 1469598103934665603
 	h = (h ~ u64(u32(sg.src)))                 * 1099511628211
 	h = (h ~ u64(transmute(u32)sg.in_off))     * 1099511628211
 	h = (h ~ u64(transmute(u32)sg.dur))        * 1099511628211
 	h = (h ~ u64(transmute(u32)seg_speed(i)))  * 1099511628211
+	h = (h ~ u64(u32(ci)))                     * 1099511628211
 	return h
 }
 
+// LIXEIRA dos WAVs aposentados: o os.remove falha (sharing violation) enquanto o
+// raylib não solta o handle do stream — e ele demora alguns frames depois do Unload.
+// Apagar na hora deixava ~23 MB por ajuste de velocidade para trás. Aqui a remoção é
+// tentada de novo a cada frame até passar.
+spv_trash: [dynamic]string
+
+spv_trash_take :: proc(p: string) { if p != "" do append(&spv_trash, p) } // assume a posse
+
+spv_trash_sweep :: proc() {
+	for k := len(spv_trash) - 1; k >= 0; k -= 1 {
+		if os.remove(spv_trash[k]) == nil { delete(spv_trash[k]); unordered_remove(&spv_trash, k) }
+	}
+}
+
 spv_release :: proc(i: int) {
-	e := &spv[i]
-	if e.ok { rl.UnloadMusicStream(e.music); e.ok = false }
-	if e.path != "" { os.remove(e.path); delete(e.path); e.path = "" }
-	e.on = false; e.key = 0
+	for s in 0 ..< 2 {
+		e := &spv[i][s]
+		if e.ok { rl.UnloadMusicStream(e.music); e.ok = false }
+		spv_trash_take(e.path); e.path = ""
+		e.on = false; e.key = 0
+	}
 }
 
 // worker de fundo: renderiza o WAV esticado (1 por vez). Lê só globals (sem alocar).
 spv_worker :: proc() {
 	ok := false
-	p, pe := os.process_start(os.Process_Desc{ command = spv_args })
+	// captura o stderr do ffmpeg: sem isso uma falha de render vira só "ok=false" e o
+	// motivo se perde (o editor então retenta em laço, mudo, sem ninguém saber por quê)
+	desc := os.Process_Desc{ command = spv_args }
+	er, ew, epe := os.pipe()
+	if epe == nil do desc.stderr = ew
+	p, pe := os.process_start(desc)
+	if epe == nil do os.close(ew) // a ponta de escrita agora é do filho
+	if pe != nil {
+		when DBG_SPV do fmt.eprintfln("[spv] SPAWN FALHOU: %v", pe)
+	}
 	if pe == nil {
 		job := make_kill_job() // morre junto com o editor se fechar no meio
 		if job != nil do AssignProcessToJobObject(job, win.HANDLE(p.handle))
@@ -5081,6 +5131,12 @@ spv_worker :: proc() {
 			if we != nil && we != os.General_Error.Timeout do break
 		}
 		if job != nil do win.CloseHandle(job)
+	}
+	if epe == nil { // drena o pipe (sempre: se ninguém lesse, um stderr gordo travaria o ffmpeg)
+		buf: [4096]u8
+		n, _ := os.read(er, buf[:])
+		when DBG_SPV do if n > 0 do fmt.eprintfln("[spv] FFMPEG: %s", string(buf[:n]))
+		os.close(er)
 	}
 	intrinsics.atomic_store(&spv_ok, ok)
 	intrinsics.atomic_store(&spv_done, true)
@@ -5096,32 +5152,37 @@ spv_atempo :: proc(sp: f32) -> string {
 	return strings.to_string(b)
 }
 
-// dispara (se ocioso) o render do WAV do segmento i. Enquanto não fica pronto, o
-// segmento toca MUDO no preview (nunca com tom cru) — some em ~1-2s.
-SPV_MAX_DUR :: f32(300) // acima disso o WAV esticado seria enorme/lento: preview fica mudo
-
-spv_request :: proc(i: int, k: u64) {
+// dispara (se ocioso) o render do WAV da JANELA ci do segmento i. Enquanto não fica
+// pronto, o segmento toca MUDO no preview (nunca com tom cru) — some em ~1-2s.
+spv_request :: proc(i, ci: int, k: u64) {
 	if spv_render_idx >= 0 do return // um render por vez; os outros tentam no próximo frame
-	// descarrega o WAV antigo (conteúdo obsoleto) ANTES de reescrever o arquivo —
-	// senão o ffmpeg -y colide com o handle que o raylib mantém aberto (Windows).
-	if spv[i].ok { rl.UnloadMusicStream(spv[i].music); spv[i].ok = false; spv[i].on = false }
+	slot := ci & 1
 	sg := segs[i]
 	c  := seg_src(i)
 	sp := seg_speed(i)
-	span := sg.dur * sp // trecho da fonte a ler (rende `dur` após o atempo)
-	if spv[i].path == "" {
-		spv[i].path = fmt.aprintf("%s_%d_%d_spv%d.wav", AUDIO_BASE, u32(win.GetCurrentProcessId()), c.aid, i)
-	}
+	base := f32(ci) * SPV_CHUNK            // início da janela no tempo do SEGMENTO
+	clen := min(SPV_CHUNK, sg.dur - base)  // a última janela é mais curta
+	ss   := sg.in_off + base * sp          // ponto correspondente na FONTE
+	span := clen * sp                      // trecho da fonte a ler (rende `clen` após o atempo)
+	// arquivo NOVO a cada render, nunca reescrita: o rl.Music toca em STREAMING e
+	// segura o handle do WAV enquanto estiver carregado — o ffmpeg -y no mesmo caminho
+	// dava "Permission denied" (era o bug do áudio mudo ao mexer na velocidade).
+	// O antigo só é apagado quando o novo é adotado (spv_poll).
+	spv_serial += 1
+	spv_render_path = fmt.aprintf("%s_%d_%d_spv%d_%d_%d.wav", AUDIO_BASE, u32(win.GetCurrentProcessId()), c.aid, i, slot, spv_serial)
 	args := make([dynamic]string) // heap: precisa viver até o worker rodar o process_start
 	append(&args, strings.clone("ffmpeg"), strings.clone("-y"), strings.clone("-hide_banner"),
 		strings.clone("-loglevel"), strings.clone("error"),
-		strings.clone("-ss"), fmt.aprintf("%.3f", sg.in_off),
+		strings.clone("-ss"), fmt.aprintf("%.3f", ss),
 		strings.clone("-t"),  fmt.aprintf("%.3f", span),
 		strings.clone("-i"),  strings.clone(c.path),
 		strings.clone("-vn"), strings.clone("-filter:a"), strings.clone(spv_atempo(sp)),
-		strings.clone("-c:a"), strings.clone("pcm_s16le"), strings.clone(spv[i].path))
+		strings.clone("-c:a"), strings.clone("pcm_s16le"), strings.clone(spv_render_path))
+	when DBG_SPV do fmt.eprintfln("[spv] REQ i=%d ci=%d slot=%d ss=%.3f clen=%.3f sp=%.3f span=%.3f", i, ci, slot, f64(ss), f64(clen), f64(sp), f64(span))
 	spv_args = args[:]
 	spv_render_idx = i
+	spv_render_slot = slot
+	spv_render_ci = ci
 	spv_render_key = k
 	intrinsics.atomic_store(&spv_done, false)
 	spv_thr = thread.create_and_start(spv_worker)
@@ -5135,42 +5196,87 @@ spv_poll :: proc() {
 	ok := intrinsics.atomic_load(&spv_ok)
 	for s in spv_args do delete(s) // libera o argv clonado
 	delete(spv_args); spv_args = nil
+	when DBG_SPV do fmt.eprintfln("[spv] DONE i=%d ci=%d ffmpeg_ok=%v nsegs=%d ready=%v key_now=%d key_req=%d",
+		i, spv_render_ci, ok, nsegs, i < nsegs ? seg_ready(i) : false, i < nsegs ? spv_key(i, spv_render_ci) : 0, spv_render_key)
+	adopted := false
 	// só adota se o segmento ainda existe e nada mudou (senão o WAV está obsoleto)
-	if ok && i < nsegs && seg_ready(i) && spv_key(i) == spv_render_key {
-		e := &spv[i]
-		if e.ok { rl.UnloadMusicStream(e.music); e.ok = false }
+	if ok && i < nsegs && seg_ready(i) && spv_key(i, spv_render_ci) == spv_render_key {
+		e := &spv[i][spv_render_slot]
+		// solta o WAV anterior deste slot (fecha o handle) e só então o apaga
+		if e.ok { rl.UnloadMusicStream(e.music); e.ok = false; e.on = false }
+		spv_trash_take(e.path)                          // some quando o handle cair
+		e.path = spv_render_path; spv_render_path = "" // o slot passa a ser o dono
+		adopted = true
 		e.music = rl.LoadMusicStream(strings.clone_to_cstring(e.path, context.temp_allocator))
 		if e.music.frameCount > 0 { e.music.looping = false; e.ok = true; e.key = spv_render_key }
+		when DBG_SPV do fmt.eprintfln("[spv] LOAD i=%d frames=%d rate=%d ok=%v", i, e.music.frameCount, e.music.stream.sampleRate, e.ok)
 		e.on = false
+	} else if !ok && i < nsegs && spv_key(i, spv_render_ci) == spv_render_key {
+		// render falhou p/ este conteúdo: conta e, no limite, desiste (com aviso) em vez
+		// de respawnar o ffmpeg todo frame
+		e := &spv[i][spv_render_slot]
+		if e.bad_key == spv_render_key do e.bad_n += 1
+		else { e.bad_key = spv_render_key; e.bad_n = 1 }
+		if e.bad_n == SPV_TRIES do set_toast("Não consegui preparar o áudio nesta velocidade")
+	}
+	if !adopted && spv_render_path != "" { // render descartado (falhou ou já obsoleto)
+		spv_trash_take(spv_render_path); spv_render_path = ""
 	}
 	spv_render_idx = -1
 }
 
 // toca, em sincronia com o playhead, o áudio pré-renderizado dos segmentos com
 // speed != 1 sob o playhead. Chamado todo frame junto com audio_secondary.
+spv_dbg_tick: int
 audio_speed_preview :: proc() {
 	pt := prof_beg(.Audio); defer prof_end(.Audio, pt)
-	for i := nsegs; i < MAX_SEGS; i += 1 do if spv[i].ok || spv[i].path != "" do spv_release(i) // limpa slots mortos
+	when DBG_SPV do spv_dbg_tick += 1
+	spv_trash_sweep() // reaposenta os WAVs que o raylib acabou de soltar
+	for i := nsegs; i < MAX_SEGS; i += 1 do if spv[i][0].ok || spv[i][0].path != "" || spv[i][1].ok || spv[i][1].path != "" do spv_release(i) // limpa slots mortos
 	for i in 0 ..< nsegs {
-		e := &spv[i]
 		// usa o WAV por-segmento (spv) quando o áudio da fonte NÃO pode vir do c.music:
 		// velocidade != 1 (tom preservado) OU duplicado (mesma fonte já ocupa o c.music).
 		uses_spv := seg_ready(i) && seg_src(i).has_audio && (seg_speed(i) != 1 || seg_audio_dup(i))
 		if !uses_spv {
-			if e.on { rl.PauseMusicStream(e.music); e.on = false }
+			for s in 0 ..< 2 do if spv[i][s].on { rl.PauseMusicStream(spv[i][s].music); spv[i][s].on = false }
 			continue
 		}
 		sg := &segs[i]
 		inside := st.playhead >= sg.start && st.playhead < sg.start + sg.dur
 		want := st.playing && (st.drag == .None || audio_edit_drag()) && inside && !sg.muted && !track_muted[sg.track]
-		k := spv_key(i)
-		// (re)gera o WAV quando necessário e a interação assentou (não arrastando o slider).
-		// Segmentos muito longos não são pré-renderizados (WAV enorme) -> preview mudo.
-		if want && (!e.ok || e.key != k) && sg.dur <= SPV_MAX_DUR && ui_slider_active != 9 && spv_render_idx < 0 {
-			spv_request(i, k)
+		tl_local := clamp(st.playhead - sg.start, 0, sg.dur) // posição no tempo do SEGMENTO
+		ci := clamp(int(tl_local / SPV_CHUNK), 0, spv_nchunks(i) - 1)
+		e := &spv[i][ci & 1]
+		k := spv_key(i, ci)
+		// silencia o slot da OUTRA janela (a que acabou de sair de cena)
+		if o := &spv[i][1 - (ci & 1)]; o.on { rl.PauseMusicStream(o.music); o.on = false }
+		// (re)gera o WAV quando necessário e a interação assentou (não arrastando o slider)
+		if want && (!e.ok || e.key != k) && ui_slider_active != 9 && spv_render_idx < 0 &&
+		   !(e.bad_key == k && e.bad_n >= SPV_TRIES) {
+			spv_request(i, ci, k)
+		}
+		when DBG_SPV { // 1 linha por segundo por segmento: por que está (ou não) soando
+			if want && spv_dbg_tick % 60 == 0 {
+				wl := e.ok ? f32(e.music.frameCount) / f32(e.music.stream.sampleRate) : -1
+				fmt.eprintfln("[spv] WANT i=%d sp=%.2f dur=%.3f ci=%d/%d e.ok=%v key_eq=%v on=%v play=%v pos=%.2f/%.2f wav=%.2f slider=%d busy=%d",
+					i, f64(seg_speed(i)), f64(sg.dur), ci, spv_nchunks(i), e.ok, e.key == k, e.on,
+					e.ok ? rl.IsMusicStreamPlaying(e.music) : false,
+					f64(e.ok ? rl.GetMusicTimePlayed(e.music) : 0), f64(tl_local - f32(ci)*SPV_CHUNK), f64(wl),
+					ui_slider_active, spv_render_idx)
+			}
 		}
 		if want && e.ok && e.key == k {
-			local := clamp(st.playhead - sg.start, 0, sg.dur) // spv tem `dur` s @ 1x
+			// PRÉ-BUSCA da próxima janela no outro slot: renderiza enquanto esta toca,
+			// para a troca na borda não ficar muda pelos ~1-2s do ffmpeg.
+			if nci := ci + 1; nci < spv_nchunks(i) && tl_local > f32(nci)*SPV_CHUNK - SPV_PRE {
+				n  := &spv[i][nci & 1]
+				nk := spv_key(i, nci)
+				if (!n.ok || n.key != nk) && ui_slider_active != 9 && spv_render_idx < 0 &&
+				   !(n.bad_key == nk && n.bad_n >= SPV_TRIES) {
+					spv_request(i, nci, nk)
+				}
+			}
+			local := tl_local - f32(ci) * SPV_CHUNK // posição DENTRO da janela (WAV @ 1x)
 			if !e.on {
 				rl.StopMusicStream(e.music); rl.SeekMusicStream(e.music, local); rl.PlayMusicStream(e.music)
 				for _ in 0 ..< 4 do rl.UpdateMusicStream(e.music)
@@ -5251,7 +5357,7 @@ seek_global :: proc(t: f32) {
 	tt := clamp(t, 0, timeline_dur())
 	st.playhead = tt
 	for i in 0 ..< nclips do if !clips[i].closed && clips[i].has_audio { rl.PauseMusicStream(clips[i].music); clips[i].mix_on = false }
-	for i in 0 ..< nsegs do if spv[i].on { rl.PauseMusicStream(spv[i].music); spv[i].on = false } // pausa spv (reposiciona no frame seguinte)
+	for i in 0 ..< nsegs do for s in 0 ..< 2 do if spv[i][s].on { rl.PauseMusicStream(spv[i][s].music); spv[i][s].on = false } // pausa spv (reposiciona no frame seguinte)
 	play_clip = -1
 	show_playhead_frame() // vídeo: frame da trilha de topo sob o playhead
 	a := audio_seg_at(tt)  // áudio: relógio do topo COM áudio não-mudo
@@ -5295,7 +5401,7 @@ start_src_preview :: proc(i: int) {
 	if play_clip >= 0 && seg_src(play_clip).has_audio do rl.PauseMusicStream(seg_src(play_clip).music)
 	if src_preview >= 0 && src_preview != i && !clips[src_preview].closed && clips[src_preview].has_audio do rl.PauseMusicStream(clips[src_preview].music)
 	for k in 0 ..< nclips do if clips[k].mix_on { rl.PauseMusicStream(clips[k].music); clips[k].mix_on = false } // silencia mix
-	for k in 0 ..< nsegs do if spv[k].on { rl.PauseMusicStream(spv[k].music); spv[k].on = false } // silencia spv
+	for k in 0 ..< nsegs do for s in 0 ..< 2 do if spv[k][s].on { rl.PauseMusicStream(spv[k][s].music); spv[k][s].on = false } // silencia spv
 	play_clip = -1
 	src_preview = i
 	src_t = 0
