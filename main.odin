@@ -70,6 +70,7 @@ SCRUB_HW_MS :: f64(700)
 MAX_CLIPS     :: 12
 DBG_PLAY      :: false // LOG de diagnóstico do playback a cada frame (stderr); ligue p/ depurar
 DBG_SPV       :: false // LOG do preview de VELOCIDADE (WAV esticado): pedido, render e adoção
+DBG_SEEK      :: false // LOG do relógio nos ~3s após um seek na barra do player
 STREAM_OVER   :: 45  // clipes acima disso decodificam ao vivo (streaming), não em RAM
 CACHE_BUDGET  :: 45  // teto de segundos (ponderado por fps) no cache RAM. Cortado de 180→45 ao
                      // subir o cache p/ 720p (4× bytes/frame): ~45s×30fps×2.76MB ≈ 3.7GB de teto,
@@ -415,6 +416,12 @@ fs_ctl_alpha: f32        // opacidade atual dos controles em tela cheia (0..1, a
 fs_ctl_hold:  f32        // segundos que os controles ainda ficam visíveis (auto-hide estilo NLE)
 fs_vol_drag:  bool       // arrastando o slider de volume da barra em tela cheia
 player_seek_drag: bool   // arrastando a barra de progresso do player
+// tocava quando o usuário PEGOU a barra? O scrub pausa (senão brigaria com o relógio de
+// áudio), mas soltar tem de VOLTAR a tocar — antes parava e exigia apertar play de novo.
+// Escrito a cada clique na barra, então um arrasto cancelado (modal, sair da tela cheia)
+// não deixa valor velho para o próximo.
+seek_was_playing: bool
+dbg_seek_n: int // frames de log restantes após um seek (DBG_SEEK)
 g_frame:     rl.Rectangle // retângulo do frame base no preview (p/ mapear transform<->tela)
 g_insp_card: rl.Rectangle // retângulo do cartão do inspector (p/ não roubar cliques do preview)
 prev_grab:   rl.Vector2   // offset do mouse ao centro do clipe ao começar a mover no preview
@@ -790,8 +797,13 @@ smooth_clock :: proc(raw, dt: f32) -> f32 {
 		// glitch transitório some sozinho em <0.35s. Se persistir ~0.75s é deslocamento REAL
 		// — ex.: travada longa (modal/chunk) em que o dt é capado a 0.1s mas o áudio correu
 		// de verdade: sem isto o drift ficava > SMOOTH_HARD PRA SEMPRE (PLL desligado) e o
-		// vídeo tocava permanentemente atrasado do áudio. Reata só P/ FRENTE (recuo
-		// persistente não existe em playback são; o fim/underrun cuidam dele).
+		// vídeo tocava permanentemente atrasado do áudio. Reata só P/ FRENTE.
+		// TENTEI reatar p/ trás também (o áudio ficava 1s atrás ao adiantar na prévia) e MEDI
+		// que é errado: logo após Stop→Seek→Play o GetMusicTimePlayed fica com um VIÉS estável
+		// p/ menos (~0.69s medidos, o pré-enchimento de buffers) — o som está no lugar certo e
+		// só o relógio mente. Reatar ali PUXAVA o src_t 0.69s p/ trás, criando o erro que não
+		// existia. O atraso de verdade daquele bug tinha outra causa (janela de áudio adotada
+		// sem seek) e foi corrigido na raiz, no update_src_preview.
 		smooth_bad += 1
 		if smooth_bad > 45 {
 			smooth_bad = 0
@@ -5581,9 +5593,13 @@ draw_fullscreen_video :: proc(sw, sh: f32) {
 	rl.DrawRectangleRounded({ pbar.x, pbar.y, frac * pbar.width, pbar.height }, 1, 4, fa(ACCENT, a))
 	pkx := pbar.x + frac * pbar.width
 	rl.DrawCircleV({ pkx, pbar.y + pbar.height/2 }, (player_seek_drag || hovered(pbar_hit)) ? 8 : 6, fa(rl.WHITE, a))
-	if interactive && rl.IsMouseButtonPressed(.LEFT) && hovered(pbar_hit) { player_seek_drag = true; st.playing = false; seek_drag_hush() }
+	if interactive && rl.IsMouseButtonPressed(.LEFT) && hovered(pbar_hit) { player_seek_drag = true; seek_was_playing = st.playing; st.playing = false; seek_drag_hush() }
 	if rl.IsMouseButtonReleased(.LEFT) && player_seek_drag {
 		player_seek_drag = false
+		// retoma ANTES do seek: tanto src_acquire quanto seek_global só adquirem o áudio
+		// na posição nova se st.playing já for true (senão voltaria mudo por um frame)
+		if seek_was_playing { st.playing = true; seek_was_playing = false }
+		when DBG_SEEK do dbg_seek_n = 200
 		if src_preview >= 0 { src_acquire(); clip_frame(&clips[src_preview], src_t) } else do seek_global(st.playhead)
 	}
 	if player_seek_drag && total > 0 {
@@ -5671,16 +5687,39 @@ update_src_preview :: proc(dt: f32) {
 		// áudio (0.25s finais, ou áudio mais curto que o vídeo); pedir chunk aqui extraía a
 		// cauda, a adoção rebobinava o relógio ~1s e o fim da prévia virava loop bugado.
 		// Chunks só p/ streaming ou enquanto o completo não ficou pronto.
-		if c.has_audio && !try_part_open(c, src_t) &&
-		   (c.streaming || intrinsics.atomic_load(&c.parts_done) < 1) {
-			if !try_chunk_open(c, src_t) do chunk_request(c, src_t)
+		// Adotou uma janela NOVA? Tem de reposicionar o stream em src_t. O chunk é pedido
+		// com 1s de margem ANTES do ponto (chunk_request: local-1), então tocar do início da
+		// janela deixa o relógio 1s atrás — e o PLL travava nesse atraso PARA SEMPRE (o
+		// escape do smooth_clock só reatava p/ FRENTE). Era o "áudio dessincronizado depois
+		// de adiantar": medido, -1.02s cravado por centenas de frames. O caminho da timeline
+		// não tinha o bug porque re-adquire via set_play_clip, que seeka.
+		got := false
+		if c.has_audio {
+			got = try_part_open(c, src_t)
+			if !got && (c.streaming || intrinsics.atomic_load(&c.parts_done) < 1) {
+				got = try_chunk_open(c, src_t)
+				if !got do chunk_request(c, src_t)
+			}
 		}
-		src_t += dt
+		if got do src_acquire() // seek + play + ancora o PLL em src_t
+		else do src_t += dt
 	}
 	if src_t >= c.dur - 0.02 { // fim da fonte: para no fim
 		src_t = c.dur
 		st.playing = false
 		if c.has_audio do rl.PauseMusicStream(c.music)
+	}
+	when DBG_SEEK do if dbg_seek_n > 0 {
+		dbg_seek_n -= 1
+		fmt.eprintfln("[seek/PREVIA-BIN] src_t=%.3f/%.0f raw=%.3f d_aud=%+.3f clock_ok=%v play=%v | CHUNK busy=%v done=%v ok=%v base=%.1f cobre=%v | parts=%d mbase=%.1f | VIDEO ATRASO=%+.3f",
+			f64(src_t), f64(c.dur), f64(rl.GetMusicTimePlayed(c.music) + c.music_base),
+			f64((rl.GetMusicTimePlayed(c.music) + c.music_base) - src_t),
+			c.has_audio ? audio_clock_ok(c, src_t) : false,
+			c.has_audio ? rl.IsMusicStreamPlaying(c.music) : false,
+			c.chunk_busy, intrinsics.atomic_load(&c.chunk_done), intrinsics.atomic_load(&c.chunk_ok),
+			f64(c.chunk_base), src_t >= c.chunk_base && src_t < c.chunk_base + CHUNK_SECS - 0.5,
+			intrinsics.atomic_load(&c.parts_done), f64(c.music_base),
+			f64(src_t - c.tex_t))
 	}
 	// DISPLAY: o passo travado no vsync agora mora DENTRO do clip_frame (ramo de cache),
 	// compartilhado com o playback da timeline — um mecanismo só p/ os dois caminhos.
@@ -6278,6 +6317,10 @@ update :: proc() {
 				play_clip = -1
 			}
 			st.playhead += dt
+			when DBG_SEEK do if dbg_seek_n > 0 {
+				dbg_seek_n -= 1
+				fmt.eprintfln("[seek/SEM-AUDIO] ph=%.3f", f64(st.playhead))
+			}
 			if st.playhead >= timeline_dur() do st.playing = false
 			else do show_playhead_frame()
 		} else if seg_speed(a) != 1 {
@@ -6292,6 +6335,18 @@ update :: proc() {
 			nl := (st.playhead - sg.start) + dt
 			if nl >= sg.dur do st.playhead = sg.start + sg.dur
 			else { st.playhead = sg.start + nl; show_playhead_frame() }
+			when DBG_SEEK do if dbg_seek_n > 0 {
+				dbg_seek_n -= 1
+				cc := seg_src(a)
+				loc := clamp(st.playhead - sg.start, 0, sg.dur)
+				ci := clamp(int(loc / SPV_CHUNK), 0, spv_nchunks(a) - 1)
+				e := &spv[a][ci & 1]
+				fmt.eprintfln("[seek/VELOCIDADE] ph=%.3f loc=%.3f sp=%.2f | spv ok=%v on=%v pos=%.3f alvo=%.3f d_aud=%+.3f | VIDEO tex_t=%.3f ATRASO=%+.3f",
+					f64(st.playhead), f64(loc), f64(seg_speed(a)), e.ok, e.on,
+					f64(e.ok ? rl.GetMusicTimePlayed(e.music) : 0), f64(loc - f32(ci)*SPV_CHUNK),
+					f64((e.ok ? rl.GetMusicTimePlayed(e.music) : 0) - (loc - f32(ci)*SPV_CHUNK)),
+					f64(cc.tex_t), f64(seg_local(a, st.playhead) - cc.tex_t))
+			}
 		} else {
 			sg := &segs[a]
 			c := seg_src(a)
@@ -6334,6 +6389,13 @@ update :: proc() {
 				// (~0.75s). Seeks/acquire ancoram por loc0/seek_pending_loc; aud_prev assume o
 				// valor no fim do bloco (mesmo papel de antes).
 				if !acquired && !was_seek do local = smooth_clock(local, dt)
+				when DBG_SEEK do if dbg_seek_n > 0 {
+					dbg_seek_n -= 1
+					fmt.eprintfln("[seek] ph=%.3f raw=%.3f d_aud=%+.3f | VIDEO tex_t=%.3f ATRASO=%+.3f stream=%v rsp=%v | acq=%v pend=%v",
+						f64(st.playhead), f64(rl.GetMusicTimePlayed(c.music) + c.music_base), f64(local-loc0),
+						f64(c.tex_t), f64(local - c.tex_t), c.streaming, intrinsics.atomic_load(&c.rsp_busy),
+						acquired, was_seek)
+				}
 				// e nunca deixa o jitter do relógio recuar o playhead pra antes do
 				// início do segmento (sairia dele e re-entraria em loop)
 				if local < sg.in_off do local = sg.in_off
@@ -8927,9 +8989,13 @@ draw_preview :: proc(r: rl.Rectangle) {
 	rl.DrawRectangleRounded({ pbar.x, pbar.y, frac * pbar.width, pbar.height }, 1, 4, ACCENT)
 	pkx := pbar.x + frac * pbar.width
 	rl.DrawCircleV({ pkx, pbar.y + pbar.height/2 }, (player_seek_drag || hovered(pbar_hit)) ? 7 : 5, rl.WHITE)
-	if rl.IsMouseButtonPressed(.LEFT) && hovered(pbar_hit) { player_seek_drag = true; st.playing = false; seek_drag_hush() }
+	if rl.IsMouseButtonPressed(.LEFT) && hovered(pbar_hit) { player_seek_drag = true; seek_was_playing = st.playing; st.playing = false; seek_drag_hush() }
 	if rl.IsMouseButtonReleased(.LEFT) && player_seek_drag {
 		player_seek_drag = false
+		// retoma ANTES do seek: tanto src_acquire quanto seek_global só adquirem o áudio
+		// na posição nova se st.playing já for true (senão voltaria mudo por um frame)
+		if seek_was_playing { st.playing = true; seek_was_playing = false }
+		when DBG_SEEK do dbg_seek_n = 200
 		if src_preview >= 0 { src_acquire(); clip_frame(&clips[src_preview], src_t) } else do seek_global(st.playhead)
 	}
 	if player_seek_drag && total > 0 {
