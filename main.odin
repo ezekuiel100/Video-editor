@@ -4968,7 +4968,14 @@ set_play_clip :: proc(si: int, local: f32) {
 		target := clamp(local - c.music_base, 0, msdur) // posição no ARQUIVO ativo
 		// recarrega o áudio completo a cada seek (stream novo, decoder novo) em vez
 		// de só reposicionar — foi o que estabilizou o playback do áudio longo.
-		is_full := c.music_base == 0 && f32(c.music.frameCount) / f32(c.music.stream.sampleRate) >= c.dur - 1.0
+		// `parts_done >= 1` é OBRIGATÓRIO: sem ele o seek descarregava o stream que
+		// estava funcionando (head/chunk) e o music_open falhava no _full.ogg que o
+		// parts_worker AINDA estava gerando -> has_audio=false = clipe MUDO. Aparecia
+		// com vários vídeos porque os parts_worker rodam em prioridade baixa e brigam
+		// entre si, então o ogg do clipe pra onde você pula costuma não estar pronto.
+		// Os outros 3 pontos que abrem part_path(c,0) já checavam isso (3270/3374/3384).
+		is_full := intrinsics.atomic_load(&c.parts_done) >= 1 &&
+			c.music_base == 0 && f32(c.music.frameCount) / f32(c.music.stream.sampleRate) >= c.dur - 1.0
 		if is_full {
 			rl.UnloadMusicStream(c.music); c.has_audio = false
 			if music_open(c, part_path(c, 0)) {
