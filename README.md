@@ -61,7 +61,8 @@ odin test . -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
 
 - `ODIN_TEST_THREADS=1` é **obrigatório** — os testes compartilham os globais (`segs`/`clips`/`st`).
 - `INVARIANTS=true` liga o verificador durante os testes.
-- Cobre parsing do ffprobe, multi-seleção de arquivos, mapa NVDEC, forma de onda (inclusive `compute_waveform` de ponta a ponta com um tom gerado pelo ffmpeg), e a lógica de segmentos (corte, ripple, paredes, cadeia contígua, ganho de áudio).
+- Cobre parsing do ffprobe, multi-seleção de arquivos, mapa NVDEC, forma de onda (inclusive `compute_waveform` de ponta a ponta com um tom gerado pelo ffmpeg), a lógica de segmentos (corte, ripple, paredes, cadeia contígua, ganho de áudio) e a **montagem do comando de exportação**.
+- O export é testado como **texto**: `export_build_args(out, gpu, dry = true)` monta a linha de comando inteira sem tocar disco, GPU nem ffmpeg, e os testes conferem o `-filter_complex` resultante. Isso existe porque erro no export falha em silêncio — o ffmpeg aceita um grafo com o `trim` deslocado, sai com código 0 e entrega um arquivo válido com o áudio fora do lugar.
 
 ### Benchmark
 
