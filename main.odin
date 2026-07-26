@@ -303,14 +303,16 @@ Seg :: struct {
 	// ZOOM ANIMADO (Pan & Zoom estilo NLE): quando zoom_anim=true, a REGIÃO de recorte
 	// vai de (crop_*) no INÍCIO do clipe a (crop2_*) no FIM, interpolada no tempo com easing
 	// suave. Reaproveita TODO o render/escala do crop (a região menor = mais zoom). Preview
-	// anima ao vivo; export = TODO (crop com expressão em t). zoom_anim=false = recorte estático.
+	// anima ao vivo; no export vira `zoompan` com a MESMA curva (ver start_export — crop não
+	// serve lá: fixa w/h na init). zoom_anim=false = recorte estático.
 	zoom_anim: bool,
 	crop2_x, crop2_y, crop2_w, crop2_h: f32,
 	// EFEITO de distorção radial (bulge/pinch): infla o rosto/centro (bulge>0) ou aperta
 	// (bulge<0). bulge=0 no zero-value = efeito DESLIGADO. Centro do efeito = (0.5+bulge_x,
 	// 0.5+bulge_y) em coords LOCAIS da região exibida (bulge_x/y = deslocamento do meio).
 	// bulge_r = raio [0..1]; 0 no zero-value tratado como BULGE_R_DEF. Aplicado por um
-	// fragment shader no preview (ao vivo); export ainda não mapeado (TODO).
+	// fragment shader no preview (ao vivo); no export, por `remap` com mapas xmap/ymap
+	// gerados em PGM 16 bits (write_bulge_maps) e passados como inputs — ver start_export.
 	bulge:   f32,
 	bulge_x: f32,
 	bulge_y: f32,

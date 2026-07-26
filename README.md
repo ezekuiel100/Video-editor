@@ -18,7 +18,7 @@ Editor de vídeo não-linear, escrito em **[Odin](https://odin-lang.org/)** com 
 - **Controles de áudio por segmento** — volume (0–200%), mudo, fade in/out.
 - **Prévia em tela cheia** — só o vídeo ocupando o monitor inteiro, com controles no rodapé (progresso, play/pause, tempo, volume, sair) que somem sozinhos e reaparecem ao mexer o mouse perto.
 - **Vídeos longos** — clipes de até ~5 h via *streaming* (decode ao vivo) + áudio sob demanda em janela móvel.
-- **Decode por GPU** — usa `h264_cuvid` em placas NVIDIA quando disponível, com *fallback* automático por software.
+- **Decode por GPU** — usa `h264_cuvid` em placas NVIDIA no *streaming* e no *scrub*, com *fallback* automático por software. O cache em RAM é **sempre por software** de propósito: o NVDEC entrega alguns frames a mais em certos arquivos (1221 em vez de 1218 num teste), e o cache indexa por `int(t*fps)` assumindo frames uniformes — o desencontro virava *judder*.
 - **Export** — `ffmpeg filter_complex` reproduzindo transforms/fades/velocidade do preview.
 - **Screenshot** do quadro atual (PNG/JPG).
 - **Salvar / abrir projeto** (`.ovp`), **desfazer/refazer**.
@@ -127,7 +127,7 @@ Também dá pra arrastar arquivos de vídeo pra dentro da janela (vão pro bin).
 
 - **UI *immediate-mode* à mão sobre raylib**, não ImGui (este build do Odin não traz `vendor:imgui`). A barra de título, botões e painéis são todos desenhados a cada frame.
 - **Vídeo via ffmpeg por pipe, não bindings C.** ffmpeg/ffprobe resolvem pelo `PATH`.
-  - **Clipes curtos** (≤ 45 s e dentro do orçamento de RAM) são pré-decodificados **inteiros para a RAM** numa thread de fundo (`ffmpeg -f rawvideo -pix_fmt rgb24 …`), a **640×360**. Play/seek = só indexar o frame e `UpdateTexture` → **seek instantâneo**.
+  - **Clipes curtos** (≤ 45 s e dentro do orçamento de RAM) são pré-decodificados **inteiros para a RAM** numa thread de fundo (`ffmpeg -f rawvideo -pix_fmt rgb24 …`), a **1280×720**. Play/seek = só indexar o frame e `UpdateTexture` → **seek instantâneo**.
   - **Clipes longos** viram **streaming** (decode ao vivo, `-ss` por seek); áudio extraído sob demanda em janela móvel.
 - **Áudio = relógio-mestre.** A trilha é extraída para WAV e tocada via `rl.Music`; o vídeo indexa `GetMusicTimePlayed(music) * fps`. Isso mantém A/V em sincronia inclusive atravessando cortes.
 - **Fonte com SDF** (Segoe UI, *signed distance field*) pra ficar nítida em qualquer tamanho — sempre via `txt()`/`txt_c()` (a fonte default do raylib não é usada).
@@ -141,8 +141,8 @@ Também dá pra arrastar arquivos de vídeo pra dentro da janela (vão pro bin).
 | Mídias no bin | 12 (`MAX_CLIPS`) |
 | Segmentos na timeline | 64 (`MAX_SEGS`) |
 | Trilhas | 12 vídeo + 12 áudio |
-| Resolução do preview | 640×360 (streaming: alterna 360p/720p) |
-| Cache em RAM | ~180 s (`CACHE_BUDGET`), ~20 MB/s |
+| Resolução do preview | 1280×720 (`DEC_W`×`DEC_H`; streaming alterna 720p/360p) |
+| Cache em RAM | ~45 s (`CACHE_BUDGET`), ~83 MB/s a 30 fps (o orçamento é ponderado por fps: clipe de 60 fps conta em dobro) |
 
 ---
 
