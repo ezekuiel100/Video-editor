@@ -1,0 +1,334 @@
+package main
+
+// Testes da EXPORTAÇÃO. Rodar junto com o resto:
+//
+//   odin test . -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
+//
+// Por que estes testes existem: erro no export falha em SILÊNCIO. O ffmpeg aceita
+// um filtergraph com o trim deslocado sem reclamar — sai um arquivo perfeitamente
+// válido, com o áudio fora do lugar. Não há exceção, código de saída != 0, nem
+// nada na tela: só o usuário percebendo depois. Então o que dá p/ checar sem rodar
+// o ffmpeg (a matemática dos trechos e o texto do grafo) é checado aqui.
+//
+// Usa o t_reset() do segs_test.odin (mesmo package): 2 fontes falsas de 100s.
+
+import "core:testing"
+import "core:strings"
+import "core:strconv"
+import "core:fmt"
+
+// ---------- seg_src_span: trecho da FONTE consumido por um segmento ----------
+// Alimenta o `-ss` do input E o `trim` do filtro. Se os dois divergissem, o vídeo
+// sairia deslocado sem erro nenhum — daí ser fonte única da verdade.
+
+@(test)
+span_sem_transicao :: proc(t: ^testing.T) {
+	t_reset()
+	si := add_seg(0, 0, 10, 5) // fonte 0, timeline em 0, in_off 10, dur 5
+	t0, t1, fh, tl := seg_src_span(si, 0, 0)
+	testing.expect(t, t_feq(t0, 10), "sem transição o trecho começa no in_off")
+	testing.expect(t, t_feq(t1, 15), "e termina em in_off+dur")
+	testing.expect(t, fh == 0 && tl == 0, "sem handles não há nada p/ congelar")
+}
+
+@(test)
+span_velocidade_consome_o_dobro :: proc(t: ^testing.T) {
+	t_reset()
+	si := add_seg(0, 0, 10, 5)
+	segs[si].speed = 2 // 5s de timeline saem de 10s de fonte
+	t0, t1, _, _ := seg_src_span(si, 0, 0)
+	testing.expect(t, t_feq(t0, 10) && t_feq(t1, 20), "speed=2 consome dur*2 da fonte")
+	segs[si].speed = 0.5 // câmera lenta: 5s de timeline saem de 2.5s de fonte
+	_, t1s, _, _ := seg_src_span(si, 0, 0)
+	testing.expect(t, t_feq(t1s, 12.5), "speed=0.5 consome dur/2 da fonte")
+}
+
+@(test)
+span_handles_com_folga :: proc(t: ^testing.T) {
+	t_reset()
+	si := add_seg(0, 0, 10, 5) // sobra fonte dos 2 lados (clipe tem 100s)
+	t0, t1, fh, tl := seg_src_span(si, 1, 1)
+	testing.expect(t, t_feq(t0, 9), "há footage antes do in-point: o trecho recua o handle inteiro")
+	testing.expect(t, t_feq(t1, 16), "e avança o handle inteiro depois do out-point")
+	testing.expect(t, fh == 0 && tl == 0, "com folga dos 2 lados nada é congelado")
+}
+
+@(test)
+span_handle_curto_congela_o_resto :: proc(t: ^testing.T) {
+	t_reset()
+	si := add_seg(0, 0, 0.5, 5) // in_off 0.5: só meio segundo de footage antes
+	t0, _, fh, _ := seg_src_span(si, 2, 0)
+	testing.expect(t, t_feq(t0, 0), "não dá p/ recuar além do começo da fonte")
+	testing.expect(t, t_feq(fh, 1.5), "o que faltou do handle vira congelamento (tpad)")
+
+	sj := add_seg(1, 20, 95, 5) // termina exatamente no fim da fonte de 100s
+	_, t1, _, tl := seg_src_span(sj, 0, 2)
+	testing.expect(t, t_feq(t1, 100), "não dá p/ avançar além do fim da fonte")
+	testing.expect(t, t_feq(tl, 2), "a cauda inteira do handle vira congelamento")
+}
+
+@(test)
+span_imagem_sempre_do_zero :: proc(t: ^testing.T) {
+	t_reset()
+	clips[0].is_img = true
+	si := add_seg(0, 0, 10, 5) // in_off é ignorado: o input é um frame em loop
+	t0, t1, fh, tl := seg_src_span(si, 1, 1)
+	testing.expect(t, t_feq(t0, 0), "imagem entra em loop desde 0, ignorando o in_off")
+	testing.expect(t, t_feq(t1, 7), "e dura dur+handles")
+	testing.expect(t, fh == 0 && tl == 0, "imagem nunca congela: o loop cobre qualquer handle")
+}
+
+// A INVARIANTE que protege a sincronia: o material entregue ao filtro é sempre
+// exatamente o que o segmento precisa. Trecho lido da fonte + o que for congelado
+// nas pontas tem de bater com dur*speed + os dois handles — em QUALQUER combinação
+// de folga. Se esta conta furar, o trim recorta um pedaço que não corresponde ao
+// tempo pedido e a exportação sai dessincronizada, sem nenhum aviso.
+@(test)
+span_conserva_a_duracao :: proc(t: ^testing.T) {
+	Caso :: struct { in_off, dur, speed, hd, tl: f32 }
+	casos := []Caso{
+		{10,   5, 1,   0,   0  }, // sem transição
+		{10,   5, 1,   1,   1  }, // handles com folga dos 2 lados
+		{0.5,  5, 1,   2,   0  }, // cabeça curta
+		{95,   5, 1,   0,   2  }, // cauda no fim exato da fonte
+		{0,    5, 1,   1.5, 1.5}, // in-point no 0: nenhuma folga na cabeça
+		{10,   5, 2,   0,   0  }, // 2x
+		{10,   5, 0.5, 1,   1  }, // câmera lenta com handles
+		{0.25, 4, 1,   3,   3  }, // as duas pontas curtas ao mesmo tempo
+	}
+	for cs, k in casos {
+		t_reset()
+		si := add_seg(0, 0, cs.in_off, cs.dur)
+		segs[si].speed = cs.speed
+		t0, t1, fh, tl := seg_src_span(si, cs.hd, cs.tl)
+		pedido := cs.dur*cs.speed + cs.hd + cs.tl
+		entregue := (t1 - t0) + fh + tl
+		testing.expectf(t, t_feq(entregue, pedido),
+			"caso %d: fonte %.3f..%.3f + congelado %.3f/%.3f = %.3f, mas o segmento pede %.3f",
+			k, t0, t1, fh, tl, entregue, pedido)
+		// e nunca sai dos limites da fonte (ffmpeg não erra por isso — só entrega menos)
+		testing.expectf(t, t0 >= -0.001, "caso %d: trecho começa antes do 0 da fonte (%.3f)", k, t0)
+		testing.expectf(t, t1 <= clips[0].dur + 0.001, "caso %d: trecho passa do fim da fonte (%.3f)", k, t1)
+	}
+}
+
+// ---------- montagem do comando (export_build_args em modo dry) ----------
+// dry = sem disco e sem GL; o comando montado é o MESMO do export de verdade, então dá
+// p/ conferir o texto do grafo aqui. As fontes são falsas (path/dur/has_audio), o que
+// basta: nada nesta montagem abre os arquivos.
+// Nestes cenários (sem texto nem distorção) o índice do input do ffmpeg coincide com o
+// índice do segmento, então "[1:v]" é o segundo add_seg.
+
+// 3 fontes de vídeo com áudio, 100s cada, saída 1920x1080
+t_export_reset :: proc() {
+	t_reset()
+	nclips = 3
+	for i in 0 ..< 3 {
+		clips[i] = Clip{}
+		clips[i].probed = true
+		clips[i].dur = 100
+		clips[i].has_audio = true
+		clips[i].vw = 1920; clips[i].vh = 1080
+	}
+	clips[0].path = "A.mp4"; clips[1].path = "B.mp4"; clips[2].path = "C.mp4"
+	for i in 0 ..< MAXTRACKS do track_hidden[i] = false
+	proj_w = 1920; proj_h = 1080
+	export_fmt = .MP4
+	export_qual = .Medium // NÃO usar .Auto aqui: ela roda ffprobe nas fontes
+}
+
+// monta e devolve (args, grafo); falha o teste se a montagem for recusada
+t_build :: proc(t: ^testing.T) -> (args: [dynamic]string, graph: string) {
+	ok: bool
+	args, ok = export_build_args("saida.mp4", false, true)
+	if !testing.expect(t, ok, "a montagem do comando foi recusada") do return
+	for a, i in args {
+		if a == "-filter_complex" && i+1 < len(args) do return args, args[i+1]
+	}
+	testing.expect(t, false, "comando sem -filter_complex")
+	return
+}
+
+// valor do argumento seguinte a `flag` (primeira ocorrência)
+t_arg_after :: proc(args: [dynamic]string, flag: string) -> (string, bool) {
+	for a, i in args do if a == flag && i+1 < len(args) do return args[i+1], true
+	return "", false
+}
+
+t_joined :: proc(args: [dynamic]string) -> string {
+	return strings.join(args[:], " ", context.temp_allocator)
+}
+
+// lê um número no começo de `s`; devolve o valor e quantos bytes consumiu
+t_num_head :: proc(s: string) -> (v: f32, n: int, ok: bool) {
+	for n < len(s) && (s[n] == '.' || s[n] == '-' || (s[n] >= '0' && s[n] <= '9')) do n += 1
+	v, ok = strconv.parse_f32(s[:n])
+	return
+}
+
+// intervalo "A:B" logo depois de `prefix` — t_range(g, "[0:v]trim=") -> (60, 70)
+t_range :: proc(s, prefix: string) -> (a, b: f32, ok: bool) {
+	i := strings.index(s, prefix)
+	if i < 0 do return
+	p := i + len(prefix)
+	na, n1, ok1 := t_num_head(s[p:])
+	if !ok1 || p+n1 >= len(s) || s[p+n1] != ':' do return
+	nb, _, ok2 := t_num_head(s[p+n1+1:])
+	if !ok2 do return
+	return na, nb, true
+}
+
+// O ACOPLAMENTO CENTRAL: o `-ss` do input e o `trim` do filtro saem os DOIS do
+// seg_src_span. O -ss pula direto pro trecho (sem ele o ffmpeg decodifica desde o
+// segundo zero — medido: >120s só p/ COMEÇAR num trecho aos 60min de um arquivo de 4h)
+// e o trim recorta em tempo ABSOLUTO da fonte. Divergir = vídeo deslocado, sem erro.
+@(test)
+graph_ss_casa_com_o_trim :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 60, 10) // trecho 60..70 da fonte
+	args, g := t_build(t)
+	ss, has := t_arg_after(args, "-ss")
+	testing.expect(t, has, "input sem -ss: o ffmpeg decodificaria desde o segundo zero")
+	v, _ := strconv.parse_f32(ss)
+	a, b, ok := t_range(g, "[0:v]trim=")
+	testing.expect(t, ok, "grafo sem trim de vídeo")
+	testing.expectf(t, t_feq(a, 60) && t_feq(b, 70), "trim deveria ser 60..70, veio %.3f..%.3f", a, b)
+	testing.expectf(t, t_feq(v, a - 2), "-ss (%.3f) tem de ser o início do trim (%.3f) menos o recuo de keyframe", v, a)
+}
+
+// -copyts PRESERVA os timestamps da fonte. Sem ele o seek rebaseia tudo p/ zero e CADA
+// trim/atrim do grafo (que fala em tempo absoluto) teria de ser deslocado à mão — foi
+// por aí que uma versão anterior passou no vídeo e dessincronizou o áudio.
+@(test)
+graph_todo_ss_vem_com_copyts :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 60, 10)
+	add_seg(1, 10, 30, 5)
+	args, _ := t_build(t)
+	n := 0
+	for a, i in args {
+		if a != "-ss" do continue
+		n += 1
+		testing.expectf(t, i+2 < len(args) && args[i+2] == "-copyts",
+			"-ss no índice %d sem -copyts logo depois: o grafo inteiro sairia deslocado", i)
+	}
+	testing.expect(t, n == 2, "os dois segmentos deveriam ter seek na entrada")
+}
+
+// O erro que falha CALADO: vídeo e áudio recortados em trechos diferentes da fonte.
+// Sai um arquivo válido, sem aviso nenhum, com o som fora do lugar.
+@(test)
+graph_audio_e_video_no_mesmo_trecho :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 60, 10)
+	add_seg(1, 10, 12.5, 8)
+	_, g := t_build(t)
+	for k in 0 ..< 2 {
+		va, vb, ok1 := t_range(g, fmt.tprintf("[%d:v]trim=", k))
+		aa, ab, ok2 := t_range(g, fmt.tprintf("[%d:a]atrim=", k))
+		testing.expectf(t, ok1 && ok2, "segmento %d: faltou trim de vídeo ou de áudio", k)
+		testing.expectf(t, t_feq(va, aa) && t_feq(vb, ab),
+			"segmento %d: vídeo em %.3f..%.3f mas áudio em %.3f..%.3f", k, va, vb, aa, ab)
+	}
+}
+
+@(test)
+graph_adelay_posiciona_na_timeline :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	add_seg(1, 10, 0, 8) // entra aos 10s da timeline
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "adelay=0:all=1"), "o 1º segmento entra sem atraso")
+	testing.expect(t, strings.contains(g, "adelay=10000:all=1"), "o 2º entra aos 10000ms")
+	testing.expect(t, strings.contains(g, "amix=inputs=2"), "os dois entram no mix")
+}
+
+@(test)
+graph_velocidade_consome_mais_fonte :: proc(t: ^testing.T) {
+	t_export_reset()
+	si := add_seg(0, 0, 10, 5)
+	segs[si].speed = 4 // 5s de timeline saem de 20s de fonte
+	_, g := t_build(t)
+	a, b, _ := t_range(g, "[0:v]trim=")
+	testing.expectf(t, t_feq(b-a, 20), "a 4x o trim consome 20s de fonte, veio %.3f", b-a)
+	aa, ab, _ := t_range(g, "[0:a]atrim=")
+	testing.expectf(t, t_feq(ab-aa, 20), "o áudio consome o mesmo trecho, veio %.3f", ab-aa)
+	// atempo aceita 0.5..2 por estágio: 4x tem de sair encadeado
+	testing.expect(t, strings.count(g, "atempo=") >= 2, "4x precisa de atempo encadeado (2.0 x 2.0)")
+}
+
+@(test)
+graph_mudo_fica_fora_do_mix :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	b := add_seg(1, 10, 0, 8)
+	segs[b].muted = true
+	_, g := t_build(t)
+	testing.expect(t, !strings.contains(g, "[1:a]"), "segmento mudo sai do grafo de áudio")
+	testing.expect(t, !strings.contains(g, "amix=inputs=2"), "sobra uma fonte de áudio só")
+	testing.expect(t, strings.contains(g, "[1:v]trim="), "mas o VÍDEO dele continua")
+
+	segs[b].muted = false
+	track_muted[segs[b].track] = true
+	_, g2 := t_build(t)
+	testing.expect(t, !strings.contains(g2, "[1:a]"), "trilha muda também tira o segmento do mix")
+	track_muted[segs[b].track] = false
+}
+
+@(test)
+graph_trilha_oculta_sai_do_video_mas_continua_no_audio :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	add_seg(1, 0, 0, 10, 1) // trilha 1, por cima
+	track_hidden[1] = true
+	_, g := t_build(t)
+	testing.expect(t, !strings.contains(g, "[1:v]trim="), "trilha oculta (olho) sai do vídeo exportado")
+	testing.expect(t, strings.contains(g, "[1:a]atrim="), "mas o áudio dela continua no mix")
+	track_hidden[1] = false
+}
+
+@(test)
+graph_mp3_e_so_audio :: proc(t: ^testing.T) {
+	t_export_reset()
+	export_fmt = .MP3
+	add_seg(0, 0, 60, 10)
+	args, g := t_build(t)
+	testing.expect(t, !strings.contains(g, "color=c=black"), "MP3 não monta o quadro de vídeo")
+	testing.expect(t, !strings.contains(g, "[0:v]"), "MP3 não usa o vídeo da fonte")
+	testing.expect(t, strings.contains(g, "[0:a]atrim="), "mas monta o áudio")
+	j := t_joined(args)
+	testing.expect(t, !strings.contains(j, "[vout]"), "MP3 não mapeia saída de vídeo")
+	testing.expect(t, strings.contains(j, "-vn"), "MP3 descarta o vídeo no codec")
+	export_fmt = .MP4
+}
+
+// Dissolver: a cabeça do clipe de entrada estica d/2 e o -ss tem de acompanhar, senão o
+// trim pede material que o input não entregou — a transição sai curta, sem erro nenhum.
+@(test)
+graph_dissolver_estica_a_cabeca_e_o_ss_acompanha :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 10, 10)       // A: timeline 0..10
+	b := add_seg(1, 10, 30, 10) // B: timeline 10..20, encostado em A
+	segs[b].trans = 2           // dissolver de 2s centrado no corte: B começa 1s antes
+	args, g := t_build(t)
+	a, _, ok := t_range(g, "[1:v]trim=")
+	testing.expect(t, ok, "grafo sem o trim de B")
+	testing.expectf(t, t_feq(a, 29), "B tem handle de sobra: o trim recua 1s (30->29), veio %.3f", a)
+	testing.expect(t, strings.contains(g, "fade=t=in"), "o clipe de entrada precisa do fade do dissolver")
+	testing.expect(t, strings.contains(g, "fade=t=out"), "e o de saída, do fade complementar")
+	// o input de B tem de ter recuado junto (senão o trim pede o que não veio)
+	ssb := ""
+	n := 0
+	for s, i in args {
+		if s == "-ss" { n += 1; if n == 2 do ssb = args[i+1] }
+	}
+	v, _ := strconv.parse_f32(ssb)
+	testing.expectf(t, t_feq(v, a - 2), "o -ss de B (%.3f) tem de sair do mesmo trecho do trim (%.3f)", v, a)
+}
+
+@(test)
+graph_timeline_vazia_nao_monta :: proc(t: ^testing.T) {
+	t_export_reset()
+	_, ok := export_build_args("saida.mp4", false, true)
+	testing.expect(t, !ok, "sem segmentos não há o que exportar")
+}

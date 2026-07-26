@@ -1376,25 +1376,29 @@ seg_src_span :: proc(i: int, hd, tl: f32) -> (t0, t1, freeze_hd, freeze_tl: f32)
 	return sg.in_off - real_hd, sg.in_off + sg.dur*sp + real_tl, hd - real_hd, tl - real_tl
 }
 
-// monta o -filter_complex e dispara o ffmpeg. Respeita trilhas/transform/proporção/
-// cortes/volume/fades/mixagem. Renderiza a partir dos ARQUIVOS-fonte (resolução cheia).
-start_export :: proc(out: string, gpu: bool) {
-	if intrinsics.atomic_load(&export_run) { set_toast("Exportação já em andamento"); return }
+// monta a LINHA DE COMANDO inteira do ffmpeg (inputs + -filter_complex + codecs + saída)
+// e devolve sem executar nada. Separada do start_export para poder ser TESTADA como texto:
+// erro aqui não aborta coisa nenhuma — o ffmpeg aceita um grafo com o trim deslocado, sai
+// com código 0 e entrega um arquivo válido com o áudio fora do lugar. Ver export_test.odin.
+//
+// dry=true: não toca disco nem GPU — pula o render dos PNGs de texto (que precisa de GL) e
+// a escrita dos mapas do remap, seguindo como se os dois tivessem dado certo. O comando
+// montado é o MESMO, então dá p/ conferir o grafo sem janela de raylib nem temporários.
+export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynamic]string, ok: bool) {
 	total := timeline_dur()
-	if total <= 0 { set_toast("Nada na timeline para exportar"); return }
+	if total <= 0 { set_toast("Nada na timeline para exportar"); return nil, false }
 	W, H := export_dims()
 	want_video := export_fmt != .MP3 // MP3 = só áudio: pula todo o ramo de vídeo do filtro
 
-	if export_out != "" do delete(export_out)
-	export_out = strings.clone(out)
-
-	args := make([dynamic]string, context.temp_allocator)
+	args = make([dynamic]string, context.temp_allocator)
 	append(&args, "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:2", "-nostats") // progresso no stderr; stdout = frames da prévia
 
 	// clipes de TEXTO: renderiza cada um num PNG RGBA do tamanho do canvas (já
 	// posicionado/estilizado) p/ virar overlay. Feito ANTES de montar os inputs.
-	for f in export_tmp_files do delete(f)
-	clear(&export_tmp_files)
+	if !dry {
+		for f in export_tmp_files do delete(f)
+		clear(&export_tmp_files)
+	}
 	text_png: [MAX_SEGS]string
 	for i in 0 ..< nsegs {
 		if !want_video do break // MP3: sem overlay de texto
@@ -1402,9 +1406,9 @@ start_export :: proc(out: string, gpu: bool) {
 		c := &clips[segs[i].src]
 		if !c.is_text do continue
 		p := fmt.tprintf("%s_%d_%d_txt%d.png", AUDIO_BASE, u32(win.GetCurrentProcessId()), c.aid, i)
-		if render_text_png(c, segs[i], p) {
+		if dry || render_text_png(c, segs[i], p) { // dry: sem GL, finge que o PNG saiu
 			text_png[i] = p
-			append(&export_tmp_files, strings.clone(p))
+			if !dry do append(&export_tmp_files, strings.clone(p))
 		}
 	}
 
@@ -1471,10 +1475,10 @@ start_export :: proc(out: string, gpu: bool) {
 			if abs(sg.wobble) < 0.001 { // ESTÁTICO: 1 par de mapas
 				xp := fmt.tprintf("%s_%d_%d_bx%d.pgm", AUDIO_BASE, pid, c.aid, i)
 				yp := fmt.tprintf("%s_%d_%d_by%d.pgm", AUDIO_BASE, pid, c.aid, i)
-				if write_bulge_maps(sg.bulge, cx, cy, rad, segW, segH, xp, yp) {
+				if dry || write_bulge_maps(sg.bulge, cx, cy, rad, segW, segH, xp, yp) {
 					append(&args, "-i", xp); bulge_xin[i] = inp; inp += 1
 					append(&args, "-i", yp); bulge_yin[i] = inp; inp += 1
-					append(&export_tmp_files, strings.clone(xp)); append(&export_tmp_files, strings.clone(yp))
+					if !dry { append(&export_tmp_files, strings.clone(xp)); append(&export_tmp_files, strings.clone(yp)) }
 				}
 			} else { // WOBBLE: N pares (1 período) numerados _%03d.pgm
 				hz := sg.wobble_speed <= 0 ? WOBBLE_HZ_DEF : sg.wobble_speed
@@ -1484,8 +1488,8 @@ start_export :: proc(out: string, gpu: bool) {
 					s := bulge_at(sg, f32(k)/30)
 					xk := fmt.tprintf("%s_%d_%d_bx%d_%03d.pgm", AUDIO_BASE, pid, c.aid, i, k)
 					yk := fmt.tprintf("%s_%d_%d_by%d_%03d.pgm", AUDIO_BASE, pid, c.aid, i, k)
-					if !write_bulge_maps(s, cx, cy, rad, segW, segH, xk, yk) { okall = false; break }
-					append(&export_tmp_files, strings.clone(xk)); append(&export_tmp_files, strings.clone(yk))
+					if !(dry || write_bulge_maps(s, cx, cy, rad, segW, segH, xk, yk)) { okall = false; break }
+					if !dry { append(&export_tmp_files, strings.clone(xk)); append(&export_tmp_files, strings.clone(yk)) }
 				}
 				if okall {
 					segsec := sg.dur + thead[i] + ttail[i] + 0.3
@@ -1511,13 +1515,13 @@ start_export :: proc(out: string, gpu: bool) {
 		pid := u32(win.GetCurrentProcessId())
 		xp := fmt.tprintf("%s_%d_fxbx%d.pgm", AUDIO_BASE, pid, k)
 		yp := fmt.tprintf("%s_%d_fxby%d.pgm", AUDIO_BASE, pid, k)
-		if write_bulge_maps(e.amount, cx, cy, rad, W, H, xp, yp) {
+		if dry || write_bulge_maps(e.amount, cx, cy, rad, W, H, xp, yp) {
 			append(&args, "-i", xp); fx_xin[k] = inp; inp += 1
 			append(&args, "-i", yp); fx_yin[k] = inp; inp += 1
-			append(&export_tmp_files, strings.clone(xp)); append(&export_tmp_files, strings.clone(yp))
+			if !dry { append(&export_tmp_files, strings.clone(xp)); append(&export_tmp_files, strings.clone(yp)) }
 		}
 	}
-	if inp == 0 { set_toast("Nada para exportar"); return }
+	if inp == 0 { set_toast("Nada para exportar"); return nil, false }
 
 	fb := strings.builder_make(context.temp_allocator)
 	if want_video {
@@ -1691,7 +1695,7 @@ start_export :: proc(out: string, gpu: bool) {
 		fmt.sbprintf(&fb, "amix=inputs=%d:normalize=0:dropout_transition=0[aout]", ac)
 	}
 
-	if !want_video && ac == 0 { set_toast("Nada de áudio para exportar"); return } // MP3 sem áudio
+	if !want_video && ac == 0 { set_toast("Nada de áudio para exportar"); return nil, false } // MP3 sem áudio
 
 	append(&args, "-filter_complex", strings.to_string(fb))
 	if want_video do append(&args, "-map", "[vout]")
@@ -1735,9 +1739,25 @@ start_export :: proc(out: string, gpu: bool) {
 		case .MP4, .HEVC: append(&args, "-c:a", "aac", "-b:a", "192k")
 		}
 	}
-	append(&args, export_out)
+	append(&args, out)
 	// 2ª saída (só formatos de vídeo): frames rgb24 da prévia ao vivo pelo stdout (pipe:1)
 	if want_video do append(&args, "-map", "[vpout]", "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1")
+	return args, true
+}
+
+// monta o comando e dispara o ffmpeg. Respeita trilhas/transform/proporção/cortes/
+// volume/fades/mixagem. Renderiza a partir dos ARQUIVOS-fonte (resolução cheia).
+start_export :: proc(out: string, gpu: bool) {
+	if intrinsics.atomic_load(&export_run) { set_toast("Exportação já em andamento"); return }
+	args, built := export_build_args(out, gpu)
+	if !built do return // o motivo já foi ao toast lá dentro
+	// só agora publica a saída: se a montagem falhasse, export_out (usado pelo "Abrir
+	// pasta" da conclusão) ficaria apontando p/ um arquivo que nunca foi criado
+	if export_out != "" do delete(export_out)
+	export_out = strings.clone(out)
+	total := timeline_dur()
+	W, H := export_dims()
+	want_video := export_fmt != .MP3
 
 	pr, pw, e := os.pipe() // prévia (stdout)
 	if e != nil { set_toast("Falha ao criar pipe"); return }
