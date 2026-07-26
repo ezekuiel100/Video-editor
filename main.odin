@@ -4104,7 +4104,10 @@ clip_close :: proc(c: ^Clip) {
 	// liberados -> use-after-free. (No shutdown é inofensivo: o app está saindo.)
 	c.has_audio = false; c.streaming = false; c.tex_ok = false; c.live_on = false; c.chunk_busy = false
 	intrinsics.atomic_store(&c.probed, false)
-	c.cache = nil; c.fbuf = nil; c.wave = nil; c.thumbs = nil; c.thumb_px = nil
+	// wave_rms JUNTO com wave: as guardas de wave_peak/wave_rms_at são por LEN, então um
+	// slice liberado mas não zerado passa direto e lê memória morta. Hoje só não estoura
+	// porque o desenho consulta wave_peak antes (wave=nil -> -1) e nunca chega no RMS.
+	c.cache = nil; c.fbuf = nil; c.wave = nil; c.wave_rms = nil; c.thumbs = nil; c.thumb_px = nil
 	c.path = ""; c.name = ""; c.name_el = nil; c.vcodec = ""
 	c.aud_path = ""; c.aud_head = ""; c.aud_ck[0] = ""; c.aud_ck[1] = ""
 	c.is_text = false; c.text = ""
@@ -5192,6 +5195,22 @@ spv_worker :: proc() {
 	if pe == nil {
 		job := make_kill_job() // morre junto com o editor se fechar no meio
 		if job != nil do AssignProcessToJobObject(job, win.HANDLE(p.handle))
+		// drena o stderr ATÉ O EOF **antes** de esperar o processo. A ordem importa: o
+		// buffer do pipe é finito, então um stderr gordo bloquearia o ffmpeg no write —
+		// ele nunca sairia e o poll abaixo giraria p/ sempre. Drenar depois do wait (como
+		// era) não previne nada: é o wait que trava primeiro. O EOF só chega quando o
+		// filho fecha a ponta dele, ou seja, ao terminar — então isto já serve de espera
+		// e o poll seguinte retorna de imediato. `app_closing` é visto ENTRE leituras,
+		// mesmo idioma do compute_waveform.
+		if epe == nil {
+			buf: [4096]u8
+			for {
+				if intrinsics.atomic_load(&app_closing) { _ = os.process_kill(p); break }
+				n, rerr := os.read(er, buf[:])
+				when DBG_SPV do if n > 0 do fmt.eprintfln("[spv] FFMPEG: %s", string(buf[:n]))
+				if n <= 0 || rerr != nil do break
+			}
+		}
 		for { // poll: se o app fechar, mata o render em voo em vez de esperar terminar
 			if intrinsics.atomic_load(&app_closing) { _ = os.process_kill(p); _, _ = os.process_wait(p); break }
 			state, we := os.process_wait(p, 50 * time.Millisecond)
@@ -5200,12 +5219,7 @@ spv_worker :: proc() {
 		}
 		if job != nil do win.CloseHandle(job)
 	}
-	if epe == nil { // drena o pipe (sempre: se ninguém lesse, um stderr gordo travaria o ffmpeg)
-		buf: [4096]u8
-		n, _ := os.read(er, buf[:])
-		when DBG_SPV do if n > 0 do fmt.eprintfln("[spv] FFMPEG: %s", string(buf[:n]))
-		os.close(er)
-	}
+	if epe == nil do os.close(er)
 	intrinsics.atomic_store(&spv_ok, ok)
 	intrinsics.atomic_store(&spv_done, true)
 }
@@ -5858,7 +5872,8 @@ update :: proc() {
 	// exportando: intercepta os cliques nos botões do overlay (pausar/cancelar) ANTES
 	// do resto — os rects vêm do draw. Não congela o resto da UI.
 	if intrinsics.atomic_load(&export_run) && rl.IsMouseButtonPressed(.LEFT) {
-		m := rl.GetMousePosition()
+		// usa o `m` do topo do frame: re-buscar aqui dava o MESMO valor (nada move o mouse
+		// no meio do update), só sombreava a variável de fora.
 		if rl.CheckCollisionPointRec(m, g_exp_pause_btn)  { export_toggle_pause(); return }
 		if rl.CheckCollisionPointRec(m, g_exp_cancel_btn) { export_do_cancel();   return }
 	}
@@ -9126,13 +9141,13 @@ draw_preview :: proc(r: rl.Rectangle) {
 	}
 	if vol_popup { // painel com slider VERTICAL acima do alto-falante
 		pw := f32(34); ph := f32(108)
-		pr := rl.Rectangle{ spr.x + spr.width/2 - pw/2, cy - 14 - ph, pw, ph }
-		rl.DrawRectangleRounded(pr, 0.2, 8, rl.Color{ 28, 31, 38, 250 })
-		rl.DrawRectangleRoundedLinesEx(pr, 0.2, 8, 1, LINE)
-		ui_vslider(10, { pr.x + pw/2 - 8, pr.y + 12, 16, ph - 42 }, &player_vol, 0, 1)
-		txt_c(rl.TextFormat("%d", i32(player_vol*100 + 0.5)), pr.x + pw/2, pr.y + ph - 22, 12, TEXT)
+		vpr := rl.Rectangle{ spr.x + spr.width/2 - pw/2, cy - 14 - ph, pw, ph } // `vpr`: o `pr` de fora é o botão de play
+		rl.DrawRectangleRounded(vpr, 0.2, 8, rl.Color{ 28, 31, 38, 250 })
+		rl.DrawRectangleRoundedLinesEx(vpr, 0.2, 8, 1, LINE)
+		ui_vslider(10, { vpr.x + pw/2 - 8, vpr.y + 12, 16, ph - 42 }, &player_vol, 0, 1)
+		txt_c(rl.TextFormat("%d", i32(player_vol*100 + 0.5)), vpr.x + pw/2, vpr.y + ph - 22, 12, TEXT)
 		// clicar fora (sem ser no botão nem arrastando o slider) fecha
-		if rl.IsMouseButtonPressed(.LEFT) && !hovered(pr) && !hovered(spr) && ui_slider_active != 10 do vol_popup = false
+		if rl.IsMouseButtonPressed(.LEFT) && !hovered(vpr) && !hovered(spr) && ui_slider_active != 10 do vol_popup = false
 	}
 
 	// --- formato do projeto: botão + dropdown rápido de presets ("Personalizar…" abre o modal) ---
@@ -9631,8 +9646,8 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		}
 		rl.DrawRectangleRounded({vr.x, vr.y, vr.width, 15}, 0.15, 4, CLIP_HDR) // barra do título por cima
 		if w > 40 { // nome cortado (…) p/ CABER no clipe, sem vazar pro vizinho
-			avail := w - 12 - (i == selected && w > 26 ? 18 : 0) // reserva p/ o botão x
-			txt(elide(c.name, 11, avail), vr.x + 6, vr.y + 1, 11, rl.WHITE)
+			name_w := w - 12 - (i == selected && w > 26 ? 18 : 0) // reserva p/ o botão x (`avail` de fora é ALTURA)
+			txt(elide(c.name, 11, name_w), vr.x + 6, vr.y + 1, 11, rl.WHITE)
 		}
 		sel := i == selected
 		mk := seg_marked[i] // parte de uma seleção múltipla
