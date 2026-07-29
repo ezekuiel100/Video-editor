@@ -62,7 +62,11 @@ odin test . -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
 - `ODIN_TEST_THREADS=1` é **obrigatório** — os testes compartilham os globais (`segs`/`clips`/`st`).
 - `INVARIANTS=true` liga o verificador durante os testes.
 - Cobre parsing do ffprobe, multi-seleção de arquivos, mapa NVDEC, forma de onda (inclusive `compute_waveform` de ponta a ponta com um tom gerado pelo ffmpeg), a lógica de segmentos (corte, ripple, paredes, cadeia contígua, ganho de áudio) e a **montagem do comando de exportação**.
-- O export é testado como **texto**: `export_build_args(out, gpu, dry = true)` monta a linha de comando inteira sem tocar disco, GPU nem ffmpeg, e os testes conferem o `-filter_complex` resultante. Isso existe porque erro no export falha em silêncio — o ffmpeg aceita um grafo com o `trim` deslocado, sai com código 0 e entrega um arquivo válido com o áudio fora do lugar.
+- O export é testado como **texto**: `export_build_args(out, gpu, dry = true)` monta a linha de comando inteira sem tocar disco, GPU nem ffmpeg, e os testes conferem o filtergraph resultante (que vem pelo **segundo retorno**, não de dentro de `args` — ver abaixo). Isso existe porque erro no export falha em silêncio — o ffmpeg aceita um grafo com o `trim` deslocado, sai com código 0 e entrega um arquivo válido com o áudio fora do lugar.
+- O **filtergraph vai num arquivo** (`-filter_complex_script`), não na linha de comando: ele é a maior parte do comando (~254 chars por segmento de vídeo) e o `CreateProcessW` do Windows corta em 32767 chars — com a timeline cheia o export morria com um "Falha ao iniciar ffmpeg" sem causa. Sobra o `cmdline_len`/`CMDLINE_MAX` como rede para os inputs, que dizem a causa real em vez de falhar mudo. A opção está marcada como *deprecated* no ffmpeg novo; a alternativa (`-/filter_complex`) só existe do ffmpeg 7 em diante e o binário vem do PATH, então trocar quebraria instalações antigas.
+- O **salvar projeto** segue a mesma ideia: `save_project_text()` monta o `.ovp` inteiro sem escrever em disco, e o teste confere que a contagem do cabeçalho `seg N` bate com as linhas emitidas. Perder segmento ao salvar também falha em silêncio — o arquivo sai bem-formado, só que menor.
+- **Mídia ainda importando** é barrada no export e preservada no save (`segs_importing()`), e isso tem teste: o import é assíncrono, então dava para exportar um projeto recém-aberto e receber preto no lugar dos clipes que não tinham terminado o probe.
+- A **janela de áudio** (qual arquivo está aberto em `c.music` — head, chunk ou OGG completo — e se ele cobre a posição pedida) é testada pelo mesmo motivo: erro ali deixa o clipe mudo ou tocando da posição errada, sem erro nenhum. Os testes montam um `rl.Music` **falso** (só `frameCount`/`sampleRate`) e por isso só exercitam os caminhos que retornam **antes** da primeira chamada ao raylib — o cabeçalho do `audio_test.odin` diz exatamente quais são, leia antes de adicionar caso novo.
 
 ### Benchmark
 
@@ -153,6 +157,8 @@ Também dá pra arrastar arquivos de vídeo pra dentro da janela (vão pro bin).
 main.odin           # o editor inteiro
 parse_test.odin     # testes de parsing (ffprobe, multi-seleção, waveform…)
 segs_test.odin      # testes da lógica de segmentos/timeline
+export_test.odin    # testes da montagem do comando de exportação (grafo como texto)
+audio_test.odin     # testes da janela de áudio (head/chunk/OGG completo)
 bench.odin          # modo -bench (perfil da main thread)
 editor.exe          # build release
 editor_debug.exe    # build debug (invariantes ligados)

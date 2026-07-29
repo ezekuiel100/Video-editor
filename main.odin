@@ -1376,7 +1376,18 @@ seg_src_span :: proc(i: int, hd, tl: f32) -> (t0, t1, freeze_hd, freeze_tl: f32)
 	return sg.in_off - real_hd, sg.in_off + sg.dur*sp + real_tl, hd - real_hd, tl - real_tl
 }
 
-// monta a LINHA DE COMANDO inteira do ffmpeg (inputs + -filter_complex + codecs + saída)
+// CreateProcessW (que o os.process_start usa passando tudo em lpCommandLine) trunca a linha
+// de comando em 32767 wchars. CMDLINE_MAX deixa margem para o quoting que o Odin aplica.
+CMDLINE_MAX :: 30000
+// comprimento aproximado da linha que o Windows vai montar: cada argumento entra entre
+// aspas e separado por espaço, daí os 3 chars de sobrecarga por argumento.
+cmdline_len :: proc(args: [dynamic]string) -> int {
+	n := 0
+	for a in args do n += len(a) + 3
+	return n
+}
+
+// monta a LINHA DE COMANDO inteira do ffmpeg (inputs + filtergraph + codecs + saída)
 // e devolve sem executar nada. Separada do start_export para poder ser TESTADA como texto:
 // erro aqui não aborta coisa nenhuma — o ffmpeg aceita um grafo com o trim deslocado, sai
 // com código 0 e entrega um arquivo válido com o áudio fora do lugar. Ver export_test.odin.
@@ -1384,9 +1395,20 @@ seg_src_span :: proc(i: int, hd, tl: f32) -> (t0, t1, freeze_hd, freeze_tl: f32)
 // dry=true: não toca disco nem GPU — pula o render dos PNGs de texto (que precisa de GL) e
 // a escrita dos mapas do remap, seguindo como se os dois tivessem dado certo. O comando
 // montado é o MESMO, então dá p/ conferir o grafo sem janela de raylib nem temporários.
-export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynamic]string, ok: bool) {
+//
+// O grafo sai TAMBÉM como segundo retorno porque ele não viaja mais dentro de `args`: vai
+// num arquivo, passado por -filter_complex_script (ver lá embaixo). Sem isso os testes não
+// teriam como inspecionar o filtergraph.
+export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynamic]string, graph: string, ok: bool) {
 	total := timeline_dur()
-	if total <= 0 { set_toast("Nada na timeline para exportar"); return nil, false }
+	if total <= 0 { set_toast("Nada na timeline para exportar"); return nil, "", false }
+	// MÍDIA AINDA IMPORTANDO: recusa em vez de exportar um buraco preto. A guarda mora aqui
+	// (e não só no botão) porque este é o ponto por onde TODA exportação passa — e é o que os
+	// testes exercitam. Rota real: abrir um .ovp e apertar Exportar antes do bin terminar.
+	if imp := segs_importing(); imp > 0 {
+		set_toast(rl.TextFormat("%d clipe(s) ainda importando — espere terminar", i32(imp)))
+		return nil, "", false
+	}
 	W, H := export_dims()
 	want_video := export_fmt != .MP3 // MP3 = só áudio: pula todo o ramo de vídeo do filtro
 
@@ -1396,7 +1418,10 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	// clipes de TEXTO: renderiza cada um num PNG RGBA do tamanho do canvas (já
 	// posicionado/estilizado) p/ virar overlay. Feito ANTES de montar os inputs.
 	if !dry {
-		for f in export_tmp_files do delete(f)
+		// os.remove junto: `delete` solta só a string. O bloco de conclusão do export apaga
+		// os arquivos, mas quando a tentativa anterior morreu antes dele (ffmpeg fora do PATH,
+		// comando recusado) os temporários ficavam no %TEMP% até o sweep do próximo lançamento.
+		for f in export_tmp_files { os.remove(f); delete(f) }
 		clear(&export_tmp_files)
 	}
 	text_png: [MAX_SEGS]string
@@ -1521,7 +1546,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			if !dry { append(&export_tmp_files, strings.clone(xp)); append(&export_tmp_files, strings.clone(yp)) }
 		}
 	}
-	if inp == 0 { set_toast("Nada para exportar"); return nil, false }
+	if inp == 0 { set_toast("Nada para exportar"); return nil, "", false }
 
 	fb := strings.builder_make(context.temp_allocator)
 	if want_video {
@@ -1695,9 +1720,29 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		fmt.sbprintf(&fb, "amix=inputs=%d:normalize=0:dropout_transition=0[aout]", ac)
 	}
 
-	if !want_video && ac == 0 { set_toast("Nada de áudio para exportar"); return nil, false } // MP3 sem áudio
+	if !want_video && ac == 0 { set_toast("Nada de áudio para exportar"); return nil, "", false } // MP3 sem áudio
 
-	append(&args, "-filter_complex", strings.to_string(fb))
+	// FILTERGRAPH POR ARQUIVO, não por argumento. O grafo é de longe a maior coisa da linha
+	// de comando (~254 chars por segmento de vídeo, ~134 por faixa de áudio) e o Windows
+	// limita a linha inteira a 32767 chars no CreateProcessW: com ~50-64 segmentos e efeitos
+	// o comando estourava e o export morria com um "Falha ao iniciar ffmpeg" sem causa.
+	// -filter_complex_script lê o mesmo texto de um arquivo, então o tamanho do grafo deixa
+	// de contar. O arquivo entra em export_tmp_files e some junto com os PNGs no fim.
+	//
+	// ffmpeg novo marca esta opção como "deprecated, use -/filter_complex" — e ela fica MESMO
+	// assim: -/opt (ler o valor de um arquivo) só existe do ffmpeg 7 p/ cima, e o binário é
+	// resolvido pelo PATH, então trocar quebraria em qualquer instalação mais antiga. O aviso
+	// de deprecação sai em nível warning e o -loglevel error acima já o silencia.
+	graph = strings.to_string(fb)
+	fg_path := fmt.tprintf("%s_%d_fgraph.txt", AUDIO_BASE, u32(win.GetCurrentProcessId()))
+	if !dry {
+		if os.write_entire_file(fg_path, transmute([]u8)graph) != nil {
+			set_toast("Falha ao gravar o filtro do export")
+			return nil, "", false
+		}
+		append(&export_tmp_files, strings.clone(fg_path))
+	}
+	append(&args, "-filter_complex_script", fg_path)
 	if want_video do append(&args, "-map", "[vout]")
 	if ac > 0     do append(&args, "-map", "[aout]")
 
@@ -1742,14 +1787,21 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	append(&args, out)
 	// 2ª saída (só formatos de vídeo): frames rgb24 da prévia ao vivo pelo stdout (pipe:1)
 	if want_video do append(&args, "-map", "[vpout]", "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1")
-	return args, true
+	// REDE DE SEGURANÇA: com o grafo fora da linha, sobram os inputs (um -i por segmento, com
+	// o caminho inteiro). Ainda dá p/ estourar com muitos clipes de caminho longo, e o erro do
+	// os.process_start seria de novo um "Falha ao iniciar ffmpeg" mudo. Melhor dizer a causa.
+	if n := cmdline_len(args); n > CMDLINE_MAX {
+		set_toast(rl.TextFormat("Comando longo demais (%d chars, máx %d): use caminhos mais curtos ou menos clipes", i32(n), i32(CMDLINE_MAX)))
+		return nil, "", false
+	}
+	return args, graph, true
 }
 
 // monta o comando e dispara o ffmpeg. Respeita trilhas/transform/proporção/cortes/
 // volume/fades/mixagem. Renderiza a partir dos ARQUIVOS-fonte (resolução cheia).
 start_export :: proc(out: string, gpu: bool) {
 	if intrinsics.atomic_load(&export_run) { set_toast("Exportação já em andamento"); return }
-	args, built := export_build_args(out, gpu)
+	args, _, built := export_build_args(out, gpu)
 	if !built do return // o motivo já foi ao toast lá dentro
 	// só agora publica a saída: se a montagem falhasse, export_out (usado pelo "Abrir
 	// pasta" da conclusão) ficaria apontando p/ um arquivo que nunca foi criado
@@ -1854,7 +1906,10 @@ request_open  :: proc() { guard_unsaved(.Open) }
 request_close :: proc() { if modal != .Confirm do guard_unsaved(.Close) }
 
 // salva o projeto (.ovp): proporção + mídias (caminhos) + segmentos (com transform/áudio)
-save_project :: proc(path: string) {
+// monta o TEXTO do .ovp (no temp_allocator), sem tocar disco. Separado de save_project
+// pelo mesmo motivo do export: perder segmento ao salvar falha em SILÊNCIO — o arquivo sai
+// bem-formado, só que menor — então o que precisa de teste é o texto, não a escrita.
+save_project_text :: proc() -> string {
 	idx: [MAX_CLIPS]int; for i in 0 ..< MAX_CLIPS do idx[i] = -1
 	medias := make([dynamic]string, context.temp_allocator)
 	for i in 0 ..< nclips {
@@ -1870,11 +1925,18 @@ save_project :: proc(path: string) {
 	b := strings.builder_make(context.temp_allocator)
 	fmt.sbprintf(&b, "OVP1\nar %.6f\nres %d %d\ntracks %d %d\nmedia %d\n", proj_ar, proj_w, proj_h, g_nv, g_na, len(medias))
 	for p in medias do fmt.sbprintf(&b, "%s\n", p)
+	// SÓ o índice decide: `idx` já exclui mídia falha e removida (tombstone) — que é tudo o
+	// que não deve ser salvo. Filtrar também por `seg_ready` descartava, EM SILÊNCIO, todo
+	// segmento cuja mídia ainda estava no probe: o .ovp saía internamente coerente (a contagem
+	// usava o mesmo filtro), só que com menos clipes do que a timeline mostrava. Bastava abrir
+	// um projeto com muitos vídeos e dar Ctrl+S por cima antes do bin terminar de importar.
+	// Salvar um segmento com a mídia em probe é seguro: os campos do Seg já estão todos
+	// definidos desde o add_seg, e o load reimporta a mídia pelo caminho de qualquer jeito.
 	nv := 0
-	for i in 0 ..< nsegs do if seg_ready(i) && idx[segs[i].src] >= 0 do nv += 1
+	for i in 0 ..< nsegs do if idx[segs[i].src] >= 0 do nv += 1
 	fmt.sbprintf(&b, "seg %d\n", nv)
 	for i in 0 ..< nsegs {
-		if !seg_ready(i) || idx[segs[i].src] < 0 do continue
+		if idx[segs[i].src] < 0 do continue
 		s := segs[i]
 		fmt.sbprintf(&b, "%d %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f\n",
 			idx[s.src], s.track, s.start, s.in_off, s.dur, s.vol, s.muted ? 1 : 0, s.fade_in, s.fade_out, s.scale, s.px, s.py, s.rot, s.opacity, s.speed <= 0 ? 1 : s.speed, s.trans, s.vfin, s.vfout, s.crop_x, s.crop_y, s.crop_w, s.crop_h, s.zoom_anim ? 1 : 0, s.crop2_x, s.crop2_y, s.crop2_w, s.crop2_h, s.aonly ? 1 : 0, s.fx_bright, s.fx_contrast, s.fx_satur, s.fx_look, s.fx_vignette, s.fx_temp)
@@ -1894,7 +1956,12 @@ save_project :: proc(path: string) {
 		e := fxsegs[i]
 		fmt.sbprintf(&b, "%d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d\n", e.kind, e.start, e.dur, e.amount, e.radius, e.cx, e.cy, e.wobble, e.speed, e.angle, e.track)
 	}
-	if os.write_entire_file(path, b.buf[:]) == nil { dirty = false; set_toast(rl.TextFormat("Projeto salvo: %s", cs(path))) }
+	return strings.to_string(b)
+}
+
+save_project :: proc(path: string) {
+	txt := save_project_text()
+	if os.write_entire_file(path, transmute([]u8)txt) == nil { dirty = false; set_toast(rl.TextFormat("Projeto salvo: %s", cs(path))) }
 	else do set_toast("Falha ao salvar o projeto")
 }
 
@@ -2036,6 +2103,9 @@ save_dialog :: proc(default_name: string) -> (string, bool) {
 		lpstrFile   = win.wstring(&buf[0]),
 		nMaxFile    = u32(len(buf)),
 		lpstrTitle  = win.utf8_to_wstring("Salvar como"),
+		// sem Flags o Windows sobrescrevia SEM perguntar — salvar por cima de um projeto
+		// (ou de um vídeo já exportado) era irreversível e sem aviso nenhum
+		Flags       = win.SAVE_FLAGS, // OFN_OVERWRITEPROMPT | OFN_EXPLORER
 	}
 	if !bool(win.GetSaveFileNameW(&ofn)) do return "", false
 	name, _ := win.utf16_to_utf8(buf[:])
@@ -2061,6 +2131,12 @@ name_str :: proc() -> string { return string(tf_name.buf[:tf_name.len]) }
 open_export_modal :: proc() {
 	if intrinsics.atomic_load(&export_run) { set_toast("Exportação já em andamento"); return }
 	if timeline_dur() <= 0 { set_toast("Nada na timeline para exportar"); return }
+	// avisa ANTES de abrir o modal: melhor que deixar escolher nome/pasta e recusar no fim
+	// (export_build_args barra de novo — esta checagem é só para o usuário não perder o passo)
+	if imp := segs_importing(); imp > 0 {
+		set_toast(rl.TextFormat("%d clipe(s) ainda importando — espere terminar", i32(imp)))
+		return
+	}
 	modal = .Export; set_name("Meu Video")
 	if save_dir != "" do delete(save_dir)
 	save_dir = default_save_dir()
@@ -2615,6 +2691,32 @@ cached_seconds :: proc() -> f32 {
 	return s
 }
 
+// RESERVA do orçamento de cache. `cached_seconds()` só enxerga clipes que já publicaram
+// `probed` — e `probed` é o ÚLTIMO passo do import, DEPOIS do make() do cache. Com N imports
+// simultâneos (arrastar vários arquivos de uma vez dispara uma thread por arquivo) todas
+// liam o mesmo total antigo e todas decidiam cachear: cada uma alocava até o teto que é
+// GLOBAL, e 5 clipes de 45s pediam ~18GB numa máquina de 15.8GB. `cache_inflight` guarda os
+// segundos já PROMETIDOS e ainda não publicados; decidir e prometer acontecem sob o mesmo
+// mutex, então duas threads nunca gastam o mesmo espaço.
+cache_mu:       sync.Mutex
+cache_inflight: f32
+
+// cabe `w` segundos (já ponderados por fps)? Se couber, RESERVA e devolve true.
+cache_claim :: proc(w: f32) -> bool {
+	sync.mutex_lock(&cache_mu); defer sync.mutex_unlock(&cache_mu)
+	if cached_seconds() + cache_inflight + w > CACHE_BUDGET do return false
+	cache_inflight += w
+	return true
+}
+// devolve a reserva. publish=true entrega o custo para `cached_seconds()` no MESMO lock em
+// que solta o inflight — sem isso existiria uma janela em que o clipe não conta em lugar
+// nenhum e outra thread reservaria o espaço dele. publish=false = desistiu de cachear.
+cache_unclaim :: proc(c: ^Clip, w: f32, publish: bool) {
+	sync.mutex_lock(&cache_mu); defer sync.mutex_unlock(&cache_mu)
+	if publish do intrinsics.atomic_store(&c.probed, true)
+	cache_inflight = max(0, cache_inflight - w)
+}
+
 // slot de uma mídia JÁ importada com o mesmo caminho (viva: não fechada/falha), ou -1.
 // Case-insensitive (caminhos do Windows). Ignora clipes de texto (sem arquivo).
 find_media_by_path :: proc(path: string) -> int {
@@ -2900,6 +3002,20 @@ image_decode :: proc(c: ^Clip) -> bool {
 	return total == FRAME
 }
 
+// prepara o clipe para decodificar AO VIVO: buffer de 1 frame, 1º frame e head de áudio.
+// Extraído porque há DUAS entradas para o streaming — a decisão normal (clipe longo ou
+// orçamento de RAM cheio) e o fallback de quando o make() do cache falha.
+import_stream_setup :: proc(c: ^Clip) {
+	c.dw = stream_dw(); c.dh = stream_dh() // qualidade atual (Alta/Baixa); dims de decode do clipe
+	c.fbuf = make([]u8, STREAM_FBYTES_MAX) // max (720p): trocar de qualidade não realoca
+	stream_seek(c, 0, false) // lê o 1º frame para fbuf (sem GL)
+	intrinsics.atomic_store(&c.probed, true)
+	// head de áudio: 30s de WAV ficam prontos em ~1s -> o clipe já toca com som
+	c.head_dur = min(HEAD_SECS, c.dur)
+	if audio_extract(c, c.aud_head, true) do intrinsics.atomic_store(&c.head_ok, true)
+	intrinsics.atomic_store(&c.head_done, true)
+}
+
 // roda em thread de fundo: NÃO toca em GL (textura/áudio ficam para a main thread)
 import_worker :: proc(c: ^Clip) {
 	// IMAGEM: 1 frame estático, sem áudio, duração padrão (extensível na timeline)
@@ -2909,6 +3025,8 @@ import_worker :: proc(c: ^Clip) {
 		c.streaming = false
 		c.total = 1
 		c.cache = make([]u8, FRAME)
+		// sem RAM nem para 1 frame: falha limpa (image_decode escreveria num slice vazio)
+		if c.cache == nil { intrinsics.atomic_store(&c.failed, true); intrinsics.atomic_store(&c.probed, true); return }
 		if !image_decode(c) { intrinsics.atomic_store(&c.failed, true); intrinsics.atomic_store(&c.probed, true); return }
 		if _, _, iw, ih, _ := video_probe(c.path); iw > 0 { c.vw = iw; c.vh = ih } // dims p/ autodetectar proj_ar
 		intrinsics.atomic_store(&c.cached, 1)
@@ -2945,28 +3063,37 @@ import_worker :: proc(c: ^Clip) {
 	// (o cache forçava -r 30) e o movimento fino "tremia"/judder; agora toca nativo.
 	// 24/25/30 seguem como são (menos RAM). Probe falho -> DEC_FPS.
 	cf := sfps > 0 ? min(sfps, f32(60)) : DEC_FPS
-	// RAM ~ dur × fps: um clipe 60fps ocupa 2×/seg, então pesa 2× ao decidir streaming
-	c.streaming = dur > STREAM_OVER || cached_seconds() + dur * cf / DEC_FPS > CACHE_BUDGET
+	// RAM ~ dur × fps: um clipe 60fps ocupa 2×/seg, então pesa 2× ao decidir streaming.
+	// `cache_claim` decide E reserva sob o mesmo lock: imports simultâneos não gastam o
+	// mesmo espaço do orçamento (ver cache_inflight). cw = o que ESTE clipe tem reservado.
+	cw := dur * cf / DEC_FPS
+	c.streaming = dur > STREAM_OVER || !cache_claim(cw)
+	if c.streaming do cw = 0 // não reservou nada: nada a devolver
 
-	if c.streaming {
-		c.dw = stream_dw(); c.dh = stream_dh() // qualidade atual (Alta/Baixa); dims de decode do clipe
-		c.fbuf = make([]u8, STREAM_FBYTES_MAX) // max (720p): trocar de qualidade não realoca
-		stream_seek(c, 0, false) // lê o 1º frame para fbuf (sem GL)
-		intrinsics.atomic_store(&c.probed, true)
-		// head de áudio: 30s de WAV ficam prontos em ~1s -> o clipe já toca com som
-		c.head_dur = min(HEAD_SECS, c.dur)
-		if audio_extract(c, c.aud_head, true) do intrinsics.atomic_store(&c.head_ok, true)
-		intrinsics.atomic_store(&c.head_done, true)
-	} else {
+	if !c.streaming {
+		// aloca o cache ANTES de escolher o caminho: se o SO negar a RAM, cai para streaming
+		// em vez de seguir e estourar o bounds check em clip_read_into (slice vazio),
+		// derrubando o app com o projeto não salvo junto.
 		c.cfps = cf
 		c.total = int(dur * cf) + 2
 		c.cache = make([]u8, c.total * FRAME)
+		if c.cache == nil {
+			dbg("CACHE", "clip='%s' make(%d bytes) falhou -> streaming", c.name, c.total * FRAME)
+			cache_unclaim(c, cw, false); cw = 0
+			c.streaming = true
+			c.cfps = 0; c.total = 0
+		}
+	}
+
+	if c.streaming {
+		import_stream_setup(c)
+	} else {
 		// cache_dec_start é software (ver lá): sem retry de fallback de NVDEC — o decode do cache
 		// já é software puro, então uma falha aqui é falha real.
-		if !cache_dec_start(c) { intrinsics.atomic_store(&c.failed, true); intrinsics.atomic_store(&c.probed, true); return }
+		if !cache_dec_start(c) { intrinsics.atomic_store(&c.failed, true); cache_unclaim(c, cw, true); return }
 		ok0 := clip_read_into(c, 0)
 		if ok0 do intrinsics.atomic_store(&c.cached, 1)
-		intrinsics.atomic_store(&c.probed, true) // já aparece no bin
+		cache_unclaim(c, cw, true) // publica `probed` (já aparece no bin) e solta a reserva
 		for {
 			if intrinsics.atomic_load(&c.stop) do break
 			n := c.cached
@@ -4567,6 +4694,17 @@ detach_audio :: proc(si: int) {
 segs_ready :: proc() -> int {
 	n := 0
 	for i in 0 ..< nsegs do if seg_ready(i) do n += 1
+	return n
+}
+
+// segmentos cuja mídia ainda está IMPORTANDO (probe em curso). Mídia que FALHOU não conta:
+// ela nunca vai ficar pronta e o usuário já viu o erro no bin, então esperar seria eterno.
+// Usado para barrar o export: os laços de export_build_args pulam `!seg_ready(i)`, e o único
+// aborto é "nenhum input" — com um segmento pronto no meio de dez importando, o export ia
+// até 100% e entregava um arquivo com PRETO no lugar dos clipes que faltaram.
+segs_importing :: proc() -> int {
+	n := 0
+	for i in 0 ..< nsegs do if !seg_ready(i) && !intrinsics.atomic_load(&clips[segs[i].src].failed) do n += 1
 	return n
 }
 
@@ -9320,7 +9458,11 @@ fx_rect :: proc(i: int) -> rl.Rectangle {
 	return { tl_x(f.start), track_y(f.track) + 4, max(f32(8), f.dur * pps()), th(f.track) - 8 }
 }
 // clipe de efeito cujo retângulo contém o ponto m; -1 se nenhum. Do topo (último desenhado) p/ baixo.
+// O ponto precisa estar DENTRO do viewport rolável: `fx_rect` usa track_y, que com rolagem
+// vertical devolve posições fora da vista — sem este recorte uma barra rolada p/ fora ficava
+// por cima da régua e das bandas "+ trilha" e engolia o clique (o chamador marca `consumed`).
 fx_bar_at :: proc(m: rl.Vector2) -> int {
+	if !rl.CheckCollisionPointRec(m, g_vlane) do return -1
 	for i := nfx - 1; i >= 0; i -= 1 do if rl.CheckCollisionPointRec(m, fx_rect(i)) do return i
 	return -1
 }
@@ -9604,28 +9746,38 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	// bandas "criar trilha" PINADAS (topo=vídeo, base=áudio): escuras, com "+"; arraste mídia aqui OU clique no "+"
 	draw_new_track_zone(g_newv_zone, false)
 	draw_new_track_zone(g_newa_zone, true)
-	// barra de rolagem VERTICAL (aparece só quando as trilhas não cabem)
+	// barra de rolagem VERTICAL (aparece só quando as trilhas não cabem). A barra fica DENTRO
+	// da faixa das trilhas, então o mesmo press também caía no hit-test dos clipes e virava
+	// `st.drag = .Clip`: rolar arrastava junto o clipe que estava embaixo dela e, como a
+	// origem das trilhas muda a cada frame durante a rolagem, ele ainda trocava de trilha.
+	// `vbar_hit` entra em `consumed` (abaixo) p/ o clique ser só da barra.
+	// O HIT tem de ficar AQUI (antes do laço de segmentos), mas o DESENHO vai lá embaixo,
+	// junto da barra horizontal: desenhada neste ponto, os clipes vinham depois e tapavam a
+	// barra em toda trilha com clipe chegando à borda direita.
+	vbar_hit := false
+	vsb_track: rl.Rectangle // calha; width 0 = sem barra (não desenha)
+	vsb_thumb: rl.Rectangle
 	if max_vscroll > 0 {
 		vsb_w: f32 = 8
 		vsb_x := r.x + r.width - vsb_w - 3
-		vtrack := rl.Rectangle{ vsb_x, rows_top, vsb_w, rows_vh }
-		rl.DrawRectangleRounded(vtrack, 1, 4, rl.Color{20, 22, 27, 255})
+		vsb_track = rl.Rectangle{ vsb_x, rows_top, vsb_w, rows_vh }
 		thumb_h := max(30, rows_vh * rows_vh / content_h)
-		thumb := rl.Rectangle{ vsb_x, rows_top + (tl_vscroll / max_vscroll) * (rows_vh - thumb_h), vsb_w, thumb_h }
-		if clicked(thumb) do tl_vbar_drag = true
+		vsb_thumb = rl.Rectangle{ vsb_x, rows_top + (tl_vscroll / max_vscroll) * (rows_vh - thumb_h), vsb_w, thumb_h }
+		if clicked(vsb_thumb) do tl_vbar_drag = true
+		// a CALHA também é da barra: clicar ao lado do polegar não pode agarrar um clipe
+		vbar_hit = tl_vbar_drag || clicked(vsb_track)
 		if rl.IsMouseButtonReleased(.LEFT) do tl_vbar_drag = false
 		if tl_vbar_drag {
 			my := rl.GetMousePosition().y
-			rel := clamp((my - vtrack.y - thumb_h/2) / (rows_vh - thumb_h), 0, 1)
+			rel := clamp((my - vsb_track.y - thumb_h/2) / (rows_vh - thumb_h), 0, 1)
 			tl_vscroll = rel * max_vscroll
 		}
-		rl.DrawRectangleRounded(thumb, 1, 4, (tl_vbar_drag || hovered(thumb)) ? ACCENT : rl.Color{70, 76, 88, 255})
 	}
 	if segs_ready() == 0 do txt_c("arraste um clipe do bin para cá", vlane.x + vlane.width/2, track_y(0) + th(0)/2 - 8, 13, MUTED)
 
 	// segmentos de vídeo (e blocos de áudio) colocados na timeline
 	vc := view_seg()
-	consumed := ctx_open || ctx_ate // menu de contexto aberto/comendo o clique: timeline inerte
+	consumed := ctx_open || ctx_ate || vbar_hit // menu de contexto / barra de rolagem: timeline inerte
 	// clique sobre uma barra de EFEITO tem prioridade sobre o clipe embaixo: marca consumed p/
 	// o loop de segmentos ignorar; a seleção/arraste do efeito é tratada em draw_fx_on_tracks.
 	if !consumed && st.drag == .None && modal == .None && rl.IsMouseButtonPressed(.LEFT) && fx_bar_at(rl.GetMousePosition()) >= 0 do consumed = true
@@ -9723,7 +9875,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			wx1 := min(ar.x + ar.width - 3, clip_rect.x + clip_rect.width)
 			if wx0 < clip_rect.x do wx0 += math.ceil((clip_rect.x - wx0) / STEP) * STEP // preserva a fase da grade
 			// SINGLE-SIDED (não espelhada): a onda preenche a partir da BASE da faixa, como
-			// no Filmora/Premiere. Espelhar no centro gastava metade da altura desenhando a
+			// nos NLEs de mercado. Espelhar no centro gastava metade da altura desenhando a
 			// imagem refletida — de um lado só o mesmo espaço mostra o DOBRO de detalhe, que
 			// é o que importa pra achar o ponto do corte.
 			base := ar.y + ar.height - 2
@@ -9938,7 +10090,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	if px >= vlane.x && px <= r.x + r.width {
 		rl.DrawTriangle({px - 6, ruler.y}, {px + 6, ruler.y}, {px, ruler.y + 10}, PLAYHEAD)
 		rl.DrawLineEx({px, ruler.y}, {px, r.y + r.height}, 1.5, PLAYHEAD)
-		// TESOURA no playhead (estilo Filmora): corta tudo que estiver sob ele, sem precisar
+		// TESOURA no playhead (estilo NLE): corta tudo que estiver sob ele, sem precisar
 		// da tecla S nem de ligar a lâmina. Só aparece quando HÁ o que cortar (algum segmento
 		// destravado cruzando o playhead) — botão morto confunde mais do que ajuda.
 		if !blade_mode && st.drag == .None && modal == .None {
@@ -9974,6 +10126,14 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		rl.DrawCircleLinesV({bx + 4, ruler.y + 12}, 2.5, blade_col)
 	}
 	rl.EndScissorMode()
+
+	// barra de rolagem VERTICAL: só o DESENHO (o clique foi tratado lá em cima, antes do laço
+	// de segmentos). Aqui já não há scissor ativo e nada mais é desenhado sobre as trilhas,
+	// então a barra fica por cima dos clipes em vez de sumir debaixo deles.
+	if vsb_track.width > 0 {
+		rl.DrawRectangleRounded(vsb_track, 1, 4, rl.Color{20, 22, 27, 255})
+		rl.DrawRectangleRounded(vsb_thumb, 1, 4, (tl_vbar_drag || hovered(vsb_thumb)) ? ACCENT : rl.Color{70, 76, 88, 255})
+	}
 
 	// barra de rolagem horizontal (aparece só quando há conteúdo além da tela)
 	if max_scroll > 0 {
@@ -10034,11 +10194,16 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		mp := rl.GetMousePosition()
 		hit := -1
 		edge := 0
-		for i in 0 ..< nsegs {
+		// SÓ o que está VISÍVEL pode ser agarrado. Com rolagem vertical ativa, `track_y` devolve
+		// posições fora do viewport: sem o gate em `vlane` (e o mesmo culling do desenho), um
+		// clipe rolado p/ fora cobria a régua e as bandas "+ trilha" e roubava o clique — clicar
+		// na régua p/ mover o playhead começava a arrastar um bloco invisível.
+		if rl.CheckCollisionPointRec(mp, vlane) do for i in 0 ..< nsegs {
 			if !seg_ready(i) do continue
 			x := tl_x(segs[i].start)
 			w := segs[i].dur * pps()
 			cr := rl.Rectangle{ x, track_y(segs[i].track) + 4, w, th(segs[i].track) - 8 }
+			if cr.y + cr.height < rows_clip.y || cr.y > rows_clip.y + rows_clip.height do continue // fora da viewport
 			if rl.CheckCollisionPointRec(mp, cr) {
 				hit = i
 				// perto de uma borda (e o segmento largo o bastante) -> aparar
@@ -10104,6 +10269,9 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			for i in 0 ..< nsegs {
 				if !seg_ready(i) || track_locked[segs[i].track] do continue // trilha travada não entra na seleção
 				sr := rl.Rectangle{ tl_x(segs[i].start), track_y(segs[i].track) + 4, segs[i].dur*pps(), th(segs[i].track) - 8 }
+				// mesmo culling do hit-test: um segmento rolado p/ fora da vista não pode ser
+				// marcado por um retângulo que o usuário desenhou sobre a régua/bandas
+				if sr.y + sr.height < rows_clip.y || sr.y > rows_clip.y + rows_clip.height do continue
 				if rl.CheckCollisionRecs(sr, mq) do seg_marked[i] = true
 			}
 			if selected < 0 || !seg_marked[selected] { // mantém um foco válido p/ o inspector

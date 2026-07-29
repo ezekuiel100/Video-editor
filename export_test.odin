@@ -137,16 +137,21 @@ t_export_reset :: proc() {
 	export_qual = .Medium // NÃO usar .Auto aqui: ela roda ffprobe nas fontes
 }
 
-// monta e devolve (args, grafo); falha o teste se a montagem for recusada
+// monta e devolve (args, grafo); falha o teste se a montagem for recusada.
+// O grafo vem pelo RETORNO, não de dentro de args: ele viaja num arquivo
+// (-filter_complex_script) para não estourar o limite da linha de comando do Windows.
 t_build :: proc(t: ^testing.T) -> (args: [dynamic]string, graph: string) {
 	ok: bool
-	args, ok = export_build_args("saida.mp4", false, true)
+	args, graph, ok = export_build_args("saida.mp4", false, true)
 	if !testing.expect(t, ok, "a montagem do comando foi recusada") do return
-	for a, i in args {
-		if a == "-filter_complex" && i+1 < len(args) do return args, args[i+1]
-	}
-	testing.expect(t, false, "comando sem -filter_complex")
+	testing.expect(t, t_has(args, "-filter_complex_script"), "comando sem -filter_complex_script")
 	return
+}
+
+// o comando contém este argumento?
+t_has :: proc(args: [dynamic]string, flag: string) -> bool {
+	for a in args do if a == flag do return true
+	return false
 }
 
 // valor do argumento seguinte a `flag` (primeira ocorrência)
@@ -329,6 +334,95 @@ graph_dissolver_estica_a_cabeca_e_o_ss_acompanha :: proc(t: ^testing.T) {
 @(test)
 graph_timeline_vazia_nao_monta :: proc(t: ^testing.T) {
 	t_export_reset()
-	_, ok := export_build_args("saida.mp4", false, true)
+	_, _, ok := export_build_args("saida.mp4", false, true)
 	testing.expect(t, !ok, "sem segmentos não há o que exportar")
+}
+
+@(test)
+export_recusa_com_midia_importando :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	add_seg(1, 0, 0, 10) // encosta no primeiro (add_seg acha o vão)
+	if _, _, ok := export_build_args("saida.mp4", false, true); !ok {
+		testing.expect(t, false, "com as duas mídias prontas a montagem tinha de passar")
+		return
+	}
+	// a fonte de B volta a "importando" (probe em curso): o export NÃO pode seguir e
+	// entregar preto no lugar dela — tem de recusar e mandar esperar
+	clips[1].probed = false
+	testing.expect(t, segs_importing() == 1, "1 segmento com a mídia ainda em probe")
+	_, _, ok := export_build_args("saida.mp4", false, true)
+	testing.expect(t, !ok, "mídia importando tem de RECUSAR o export, não exportar um buraco preto")
+
+	// mídia que FALHOU é diferente: nunca vai ficar pronta, então não pode travar o export
+	clips[1].probed = true; clips[1].failed = true
+	testing.expect(t, segs_importing() == 0, "mídia falha não conta como 'importando'")
+	_, _, ok2 := export_build_args("saida.mp4", false, true)
+	testing.expect(t, ok2, "com a mídia marcada como falha o export segue (sem ela)")
+	clips[1].failed = false
+}
+
+@(test)
+salvar_nao_descarta_segmento_em_probe :: proc(t: ^testing.T) {
+	t_export_reset()
+	clips[0].path = "A.mp4"; clips[1].path = "B.mp4"; clips[2].path = "C.mp4"
+	add_seg(0, 0, 0, 10)
+	add_seg(1, 0, 0, 10)
+	add_seg(2, 0, 0, 10)
+	// a mídia do meio ainda está importando — o .ovp NÃO pode perdê-la em silêncio
+	clips[1].probed = false
+	txt := save_project_text()
+	testing.expect(t, strings.contains(txt, "\nseg 3\n"), "os 3 segmentos têm de ir para o arquivo")
+	// e a contagem tem de bater com as linhas realmente emitidas (senão o load lê lixo)
+	i := strings.index(txt, "\nseg 3\n")
+	body := txt[i + len("\nseg 3\n"):]
+	emitidos := 0
+	for ln in strings.split_lines_iterator(&body) {
+		if ln == "" || !(ln[0] >= '0' && ln[0] <= '9') do break
+		emitidos += 1
+	}
+	testing.expectf(t, emitidos == 3, "cabeçalho diz 3 segmentos, saíram %d", emitidos)
+
+	// mídia REMOVIDA (tombstone) continua fora: idx = -1
+	clips[1].probed = true; clips[1].closed = true
+	txt2 := save_project_text()
+	testing.expect(t, strings.contains(txt2, "\nseg 2\n"), "segmento de mídia removida não é salvo")
+	clips[1].closed = false
+}
+
+// O FILTERGRAPH NÃO PODE VIAJAR NA LINHA DE COMANDO. Ele é a maior coisa do comando e o
+// Windows corta em 32767 chars no CreateProcessW: com a timeline cheia o export morria com
+// um "Falha ao iniciar ffmpeg" que não dizia nada. Vai por -filter_complex_script.
+@(test)
+grafo_grande_fica_fora_da_linha_de_comando :: proc(t: ^testing.T) {
+	t_export_reset()
+	// timeline cheia de segmentos curtos e enfeitados: é o que engorda o grafo de verdade
+	// (crop + zoom animado + cor + rotação + fades somam centenas de chars por segmento)
+	for k in 0 ..< MAX_SEGS {
+		si := add_seg(k % 3, f32(k) * 2, 0, 2)
+		if si < 0 do break
+		s := &segs[si]
+		s.fade_in = 0.2; s.fade_out = 0.2
+		s.fx_bright = 0.1; s.fx_contrast = 0.1; s.fx_satur = 0.1; s.fx_temp = 0.1; s.fx_vignette = 0.3
+		s.crop_x = 0.1; s.crop_y = 0.1; s.crop_w = 0.8; s.crop_h = 0.8
+		s.zoom_anim = true
+		s.crop2_x = 0.2; s.crop2_y = 0.2; s.crop2_w = 0.5; s.crop2_h = 0.5
+		s.rot = 5; s.scale = 0.9; s.opacity = 0.9
+	}
+	testing.expectf(t, nsegs == MAX_SEGS, "cenário precisa da timeline cheia, tem %d", nsegs)
+	args, g := t_build(t)
+
+	// o grafo destes segmentos passa MUITO do que cabia numa linha de comando
+	testing.expectf(t, len(g) > 20000, "grafo de %d segmentos deveria ser enorme, veio com %d chars", nsegs, len(g))
+	// e mesmo assim nenhum argumento carrega o grafo: ele está no arquivo do script
+	maior := 0
+	for a in args do maior = max(maior, len(a))
+	testing.expectf(t, maior < len(g), "algum argumento (%d chars) ainda carrega o grafo inteiro", maior)
+	// o que sobra na linha de comando cabe folgado no teto do Windows
+	n := cmdline_len(args)
+	testing.expectf(t, n < CMDLINE_MAX, "linha de comando com %d chars passa do teto de %d", n, CMDLINE_MAX)
+	// e o script é passado por caminho de arquivo, não pelo conteúdo
+	p, ok := t_arg_after(args, "-filter_complex_script")
+	testing.expect(t, ok, "faltou o -filter_complex_script")
+	testing.expectf(t, len(p) < 260 && !strings.contains(p, ";"), "o argumento devia ser o caminho do script, veio %d chars", len(p))
 }
