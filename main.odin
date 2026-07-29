@@ -1158,7 +1158,7 @@ dbg :: proc(kind: string, format: string, args: ..any) {
 	if !intrinsics.atomic_load(&dbg_on) do return
 	ms := time.duration_milliseconds(time.tick_diff(dbg_t0, time.tick_now()))
 	hb: [64]u8;  hdr  := fmt.bprintf(hb[:], "[%10.1f] %-8s ", ms, kind)
-	bb: [256]u8; body := fmt.bprintf(bb[:], format, ..args)
+	bb: [512]u8; body := fmt.bprintf(bb[:], format, ..args) // 512: a linha AUDIO tem muitos campos
 	sync.mutex_lock(&dbg_mtx); defer sync.mutex_unlock(&dbg_mtx)
 	if dbg_f == nil do return
 	os.write_string(dbg_f, hdr)
@@ -2376,6 +2376,26 @@ main :: proc() {
 				c := seg_src(vs); lt := seg_local(vs, st.playhead)
 				dbg("STATE", "ph=%.1fs clip='%s' live=%v hw=%v no_hw=%v vfps=%.0f(need~30) present=%.0fms atraso=%.2fs miniatura_flashes=%d work=%.0fms",
 					st.playhead, c.name, c.live_on, c.live_hw, c.no_hw, vfps, ft_ms, lt - c.tex_t, thumbf, work_ms)
+			}
+			// ÁUDIO do master: por que sai (ou não sai) som. "fica mudo" é um ESTADO
+			// contínuo, não um evento — e o bloco do master só roda DENTRO de
+			// `has_audio && audio_clock_ok`, então JUSTAMENTE quando falha nada era
+			// registrado. Este fica fora de qualquer guarda: mudo por falta de master
+			// e mudo por janela de áudio errada são causas diferentes, e o log tem de
+			// saber distinguir uma da outra sem precisar de outra reprodução.
+			if play_clip >= 0 && play_clip < nsegs {
+				ac := seg_src(play_clip); al := seg_local(play_clip, st.playhead)
+				dbg("AUDIO", "seg=%d loc=%.1f has=%v clock=%v tocando=%v mbase=%.1f parts=%d head=%.0f mudo=%v | CK busy=%v done=%v ok=%v base=%.1f",
+					play_clip, al, ac.has_audio,
+					ac.has_audio ? audio_clock_ok(ac, al) : false,
+					ac.has_audio ? rl.IsMusicStreamPlaying(ac.music) : false,
+					ac.music_base, intrinsics.atomic_load(&ac.parts_done), ac.head_dur,
+					segs[play_clip].muted || track_muted[segs[play_clip].track],
+					ac.chunk_busy, intrinsics.atomic_load(&ac.chunk_done),
+					intrinsics.atomic_load(&ac.chunk_ok), ac.chunk_base)
+			} else {
+				dbg("AUDIO", "SEM MASTER (play_clip=%d) ph=%.1fs — vídeo anda pelo relógio de parede, sem som",
+					play_clip, st.playhead)
 			}
 		}
 		rl.EndDrawing() // sempre: é aqui que o raylib faz o poll de eventos
@@ -4953,6 +4973,21 @@ audio_clock_ok :: proc(c: ^Clip, local: f32) -> bool {
 	return local >= c.music_base && local < end - 0.25
 }
 
+// true = o stream aberto em `c.music` JÁ é o OGG completo (base 0, cobrindo ~toda a
+// duração) E esse arquivo existe no disco. Vive numa proc própria porque errar aqui
+// deixa o clipe MUDO em silêncio, e assim dá p/ testar sem dispositivo de áudio.
+// `parts_done >= 1` é OBRIGATÓRIO: sem ele o seek descarregava o stream que estava
+// funcionando (head/chunk) e o music_open falhava no _full.ogg que o parts_worker
+// AINDA estava gerando -> has_audio=false = clipe mudo. Aparecia com vários vídeos
+// porque os parts_worker rodam em prioridade baixa e brigam entre si, então o ogg do
+// clipe pra onde você pula costuma não estar pronto. Os outros pontos que abrem
+// part_path(c,0) já checavam isso (try_part_open e as duas cargas do audio_load_ready).
+audio_full_window_ready :: proc(c: ^Clip) -> bool {
+	if intrinsics.atomic_load(&c.parts_done) < 1 do return false
+	if !c.has_audio || c.music_base != 0 do return false
+	return f32(c.music.frameCount) / f32(c.music.stream.sampleRate) >= c.dur - 1.0
+}
+
 // define o segmento que fornece o áudio-relógio e o inicia em `local` (na FONTE)
 set_play_clip :: proc(si: int, local: f32) {
 	if play_clip >= 0 && play_clip != si && seg_src(play_clip).has_audio {
@@ -4966,16 +5001,11 @@ set_play_clip :: proc(si: int, local: f32) {
 	if c.has_audio && audio_clock_ok(c, local) {
 		msdur := f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
 		target := clamp(local - c.music_base, 0, msdur) // posição no ARQUIVO ativo
-		// recarrega o áudio completo a cada seek (stream novo, decoder novo) em vez
-		// de só reposicionar — foi o que estabilizou o playback do áudio longo.
-		// `parts_done >= 1` é OBRIGATÓRIO: sem ele o seek descarregava o stream que
-		// estava funcionando (head/chunk) e o music_open falhava no _full.ogg que o
-		// parts_worker AINDA estava gerando -> has_audio=false = clipe MUDO. Aparecia
-		// com vários vídeos porque os parts_worker rodam em prioridade baixa e brigam
-		// entre si, então o ogg do clipe pra onde você pula costuma não estar pronto.
-		// Os outros 3 pontos que abrem part_path(c,0) já checavam isso (3270/3374/3384).
-		is_full := intrinsics.atomic_load(&c.parts_done) >= 1 &&
-			c.music_base == 0 && f32(c.music.frameCount) / f32(c.music.stream.sampleRate) >= c.dur - 1.0
+		// recarrega o áudio completo a cada seek (stream novo, decoder novo) em vez de
+		// só reposicionar — foi o que estabilizou o playback do áudio longo. Só quando
+		// o OGG completo JÁ existe: ver audio_full_window_ready, cuja guarda parts_done
+		// é o que impede o clipe de mutar ao dar seek com vários vídeos na timeline.
+		is_full := audio_full_window_ready(c)
 		if is_full {
 			rl.UnloadMusicStream(c.music); c.has_audio = false
 			if music_open(c, part_path(c, 0)) {
