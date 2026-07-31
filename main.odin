@@ -5018,6 +5018,16 @@ view_src :: proc() -> int { a := seg_at(st.playhead); return a >= 0 ? segs[a].sr
 // velocidade efetiva do segmento (0 no zero-value = 1). dur é timeline; a fonte
 // consumida é dur*speed, então o mapa timeline->fonte multiplica o delta por speed.
 seg_speed :: proc(si: int) -> f32 { s := segs[si].speed; return s <= 0 ? 1 : s }
+// rótulo curto da velocidade p/ a timeline: 2x, 1.5x, 0.25x (sem zeros à toa)
+speed_label :: proc(sp: f32) -> cstring {
+	if abs(sp - math.round(sp))         < 0.005 do return fmt.ctprintf("%.0fx", f64(sp))
+	if abs(sp*10 - math.round(sp*10))   < 0.05  do return fmt.ctprintf("%.1fx", f64(sp))
+	return fmt.ctprintf("%.2fx", f64(sp))
+}
+// cor do indicador de velocidade: âmbar = acelerado, azul = câmera lenta
+speed_color :: proc(sp: f32) -> rl.Color {
+	return sp > 1 ? rl.Color{ 248, 176, 84, 255 } : rl.Color{ 122, 186, 248, 255 }
+}
 // região de recorte do segmento (frações [0,1] da fonte a MANTER). Sem recorte = quadro
 // inteiro (0,0,1,1). Clampa p/ ficar dentro do quadro e com tamanho mínimo.
 // normaliza uma região crua (frações) p/ valores válidos; zero-value = quadro inteiro
@@ -9833,10 +9843,59 @@ draw_timeline :: proc(r: rl.Rectangle) {
 				rl.DrawTexturePro(c.tex, {0,0,f32(cdw(c)),f32(cdh(c))}, {vr.x + 4, sy + 4, 68, sh - 8}, {0,0}, 0, rl.WHITE)
 			}
 		}
+		// VELOCIDADE ALTERADA: a marcação tem de pegar o clipe INTEIRO — uma pastilha na ponta
+		// não diz QUE TRECHO da timeline está acelerado/lento. Hachura diagonal (45°) sobre a
+		// tira de miniaturas, no comprimento todo, + a barra do título tingida na mesma cor.
+		spd := seg_speed(i)
+		spd_on := abs(spd - 1) > 0.001
+		if spd_on && !alike {
+			bx0 := max(vr.x, clip_rect.x)
+			bx1 := min(vr.x + vr.width, clip_rect.x + clip_rect.width)
+			by := vr.y + 15
+			bh := vr.height - 15 - wave_h
+			if bh > 6 && bx1 > bx0 {
+				hcol := fa(speed_color(spd), 0.2)
+				STRIPE :: f32(16) // grade ancorada em vr.x: a hachura anda junto com o clipe
+				// só o trecho VISÍVEL, como a onda: um clipe de 1h em zoom alto tem centenas de
+				// milhares de px e o scissor corta o desenho, não o custo das chamadas.
+				n0 := math.floor((bx0 - vr.x) / STRIPE)
+				for sx := vr.x + n0 * STRIPE; sx <= bx1 + bh; sx += STRIPE {
+					// risco de (sx, by) a (sx-bh, by+bh), cortado nas bordas visíveis em x
+					t0 := max(f32(0), sx - bx1)
+					t1 := min(bh, sx - bx0)
+					if t1 <= t0 do continue
+					rl.DrawLineEx({ sx - t0, by + t0 }, { sx - t1, by + t1 }, 3, hcol)
+				}
+			}
+		}
 		rl.DrawRectangleRounded({vr.x, vr.y, vr.width, 15}, 0.15, 4, CLIP_HDR) // barra do título por cima
+		if spd_on do rl.DrawRectangleRounded({vr.x, vr.y, vr.width, 15}, 0.15, 4, fa(speed_color(spd), 0.45))
+		// PASTILHA com o VALOR: fica na ENTRADA do clipe (antes do nome), que é onde o olho cai
+		// primeiro, e GRUDA na parte VISÍVEL: num clipe longo em zoom alto o começo fica muito
+		// fora da tela, e ancorada nele o número sumiria. Clipe estreito demais p/ a pastilha
+		// ganha um risco vertical da mesma cor — algum sinal sempre aparece.
+		xbtn_room := (i == selected && w > 26) ? f32(18) : 0 // espaço reservado ao botão x
+		name_x := vr.x + 6 // início do nome; a pastilha empurra pra direita
+		if spd_on {
+			scol := speed_color(spd)
+			lbl := speed_label(spd)
+			pw := txt_w(lbl, 10) + 8
+			vis0 := max(vr.x, clip_rect.x)
+			// à direita da área visível fica a barra de rolagem vertical, quando há uma
+			vis1 := min(vr.x + vr.width - xbtn_room, clip_rect.x + clip_rect.width - (max_vscroll > 0 ? 13 : 0))
+			px := vis0 + 5
+			if px + pw <= vis1 - 3 {
+				pr := rl.Rectangle{ px, vr.y + 1.5, pw, 12 }
+				rl.DrawRectangleRounded(pr, 0.5, 6, scol)
+				txt_c(lbl, px + pw/2, pr.y + 1, 10, rl.Color{ 24, 26, 32, 255 })
+				name_x = max(name_x, px + pw + 5)
+			} else if vis1 - vis0 > 5 { // estreito: só o risco na borda visível
+				rl.DrawRectangleRec({ vis0 + 1, vr.y + 2, 3, 11 }, scol)
+			}
+		}
 		if w > 40 { // nome cortado (…) p/ CABER no clipe, sem vazar pro vizinho
-			name_w := w - 12 - (i == selected && w > 26 ? 18 : 0) // reserva p/ o botão x (`avail` de fora é ALTURA)
-			txt(elide(c.name, 11, name_w), vr.x + 6, vr.y + 1, 11, rl.WHITE)
+			name_r := vr.x + w - 6 - xbtn_room // limite direito do nome (reserva p/ o botão x)
+			if name_r - name_x > 12 do txt(elide(c.name, 11, name_r - name_x), name_x, vr.y + 1, 11, rl.WHITE)
 		}
 		sel := i == selected
 		mk := seg_marked[i] // parte de uma seleção múltipla
