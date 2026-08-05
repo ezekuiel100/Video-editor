@@ -2722,8 +2722,14 @@ cfps_of :: proc(c: ^Clip) -> f32 { return c.cfps > 0 ? c.cfps : DEC_FPS }
 cached_seconds :: proc() -> f32 {
 	s: f32 = 0
 	for i in 0 ..< nclips {
+		c := &clips[i]
+		// só o que realmente ocupa RAM de frames: áudio (sem vídeo), imagem (1 frame) e texto
+		// (nenhum) publicam probed=true e streaming=false sem alocar cache, e antes entravam
+		// no orçamento — um MP3 de 4 min sozinho estourava o teto de 45s e mandava todo vídeo
+		// importado depois para streaming, com a RAM inteira livre.
+		if c.is_audio || c.is_img || c.is_text do continue
 		// pesa por fps: um clipe 60fps ocupa 2×/seg na RAM, então conta como 2× no orçamento
-		if intrinsics.atomic_load(&clips[i].probed) && !clips[i].streaming do s += clips[i].dur * cfps_of(&clips[i]) / DEC_FPS
+		if intrinsics.atomic_load(&c.probed) && !c.streaming do s += c.dur * cfps_of(c) / DEC_FPS
 	}
 	return s
 }
@@ -5415,6 +5421,22 @@ spv_trash_sweep :: proc() {
 	}
 }
 
+// algum slot de spv[i] guarda um render que NÃO pode pertencer ao segmento i de agora?
+// A chave é conteúdo puro (fonte+trecho+velocidade+janela), então isto só dá true quando o
+// índice passou a ser de outro segmento — nunca por o playhead ter saído de cima dele.
+// O slot s só recebe janelas com (ci & 1) == s (ver audio_speed_preview).
+spv_orphan :: proc(i: int) -> bool {
+	n := spv_nchunks(i)
+	for s in 0 ..< 2 {
+		e := &spv[i][s]
+		if !e.ok && e.path == "" do continue // slot vazio
+		hit := false
+		for ci := s; ci < n; ci += 2 do if e.key == spv_key(i, ci) { hit = true; break }
+		if !hit do return true
+	}
+	return false
+}
+
 spv_release :: proc(i: int) {
 	for s in 0 ..< 2 {
 		e := &spv[i][s]
@@ -5564,6 +5586,14 @@ audio_speed_preview :: proc() {
 		// usa o WAV por-segmento (spv) quando o áudio da fonte NÃO pode vir do c.music:
 		// velocidade != 1 (tom preservado) OU duplicado (mesma fonte já ocupa o c.music).
 		uses_spv := seg_ready(i) && seg_src(i).has_audio && (seg_speed(i) != 1 || seg_audio_dup(i))
+		// o slot guarda o render de OUTRO segmento? spv é indexado por segmento, mas segs[]
+		// é compactado em remove_seg/remove_media (sem deslocar spv, ao contrário de
+		// seg_marked) e trocado inteiro no undo/redo. O laço acima só varre i >= nsegs, então
+		// um índice reocupado ficava com a rl.Music e o WAV (~23MB) de um segmento que não
+		// existe mais, vazando até fechar o app. Comparar por CHAVE (que não depende do
+		// playhead) libera só o que ficou órfão — um render válido de segmento duplicado
+		// sobrevive ao playhead sair de cima dele.
+		if spv_orphan(i) do spv_release(i)
 		if !uses_spv {
 			for s in 0 ..< 2 do if spv[i][s].on { rl.PauseMusicStream(spv[i][s].music); spv[i][s].on = false }
 			continue
