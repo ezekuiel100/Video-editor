@@ -122,6 +122,9 @@ CLIP     :: rl.Color{ 48, 78, 98, 255 }
 CLIP_HDR :: rl.Color{ 62, 100, 122, 255 }
 AUDIOCLIP:: rl.Color{ 44, 66, 60, 255 }
 HOVER    :: rl.Color{ 48, 52, 62, 255 }
+PV_BACK  :: rl.Color{ 40, 43, 52, 255 } // fundo do painel de preview FORA do quadro de saída (não é preto:
+                                        // separa à vista o que é vídeo do que é só sobra do painel)
+PV_EDGE  :: rl.Color{ 96, 104, 120, 230 } // moldura do quadro de saída
 
 ui_font: rl.Font
 g_us: f32 = 1.3 // escala da UI (fontes/barras) — janelas grandes ficam mais legíveis
@@ -9141,7 +9144,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	pt := prof_beg(.Preview); defer prof_end(.Preview, pt)
 	transport_h: f32 = 66 // barra de progresso (topo) + linha de botões
 	video := rl.Rectangle{ r.x, r.y, r.width, r.height - transport_h }
-	rl.DrawRectangleRec(video, rl.BLACK)
+	rl.DrawRectangleRec(video, PV_BACK) // sobra do painel: cinza, NÃO entra no export
 
 	// CANVAS ajustado à área de preview: proporção do projeto — ou, na prévia de origem, a da fonte
 	par := preview_ar()
@@ -9149,6 +9152,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	fw := par*scaleC; fh := scaleC
 	fx := video.x + (video.width-fw)/2; fy := video.y + (video.height-fh)/2
 	g_frame = { fx, fy, fw, fh }
+	rl.DrawRectangleRec(g_frame, rl.BLACK) // o quadro de saída é preto de VERDADE (é o que sai no arquivo)
 
 	// recorta ao CANVAS: o que passa da moldura de saída não aparece (vídeo ampliado/movido)
 	rl.BeginScissorMode(i32(fx), i32(fy), i32(fw), i32(fh))
@@ -9174,7 +9178,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		if g_ph_y >= 0 do rl.DrawLineEx({ g_frame.x, g_ph_y }, { g_frame.x + g_frame.width, g_ph_y }, 1.2, gc)
 	}
 	rl.EndScissorMode()
-	rl.DrawRectangleLinesEx(g_frame, 1, rl.Color{ 70, 76, 88, 160 }) // moldura do canvas de saída
+	rl.DrawRectangleLinesEx(g_frame, 1, PV_EDGE) // moldura do canvas de saída
 
 	// barra do modo recorte: instrução + botão Concluir (sai do modo)
 	if crop_mode {
