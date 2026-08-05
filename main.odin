@@ -1941,6 +1941,9 @@ ensure_ext :: proc(path, ext: string) -> string {
 // limpa o projeto atual: fecha todas as mídias, zera timeline e histórico
 clear_project :: proc() {
 	st.playing = false; play_clip = -1; src_preview = -1
+	// zerar nclips faz o import_media voltar a distribuir os slots 0,1,2...: um pedido de
+	// prévia pendente do export abriria a prévia de OUTRA mídia, a que caísse no slot
+	preview_pending = -1
 	nsegs = 0; selected = -1; bin_sel = -1; drag_clip = -1; sel_trans = -1; st.drag = .None
 	nfx = 0; fx_sel = -1; fxlib_drag = -1
 	g_nv = 3; g_na = 2; tl_vscroll = 0 // volta à contagem de trilhas padrão
@@ -4174,13 +4177,28 @@ stream_read :: proc(c: ^Clip) -> bool {
 set_stream_quality :: proc(hi: bool) {
 	if hi == stream_hi do return
 	stream_hi = hi
+	stream_quality_sync()
+	set_toast(hi ? "Prévia streaming: Alta (720p)" : "Prévia streaming: Baixa (360p)")
+}
+
+// (main, todo frame) põe os clipes de streaming na qualidade de prévia ATUAL. Roda sempre, e
+// não só na troca, porque um clipe que ainda estava IMPORTANDO era pulado pelo `probed` e
+// nada relia stream_hi depois: o import_stream_setup fixa c.dw/c.dh ANTES de publicar
+// `probed` (o stream_seek do 1º frame leva centenas de ms num arquivo grande), então o clipe
+// ficava presa na resolução antiga até o usuário trocar a qualidade de novo.
+stream_quality_sync :: proc() {
 	ndw, ndh := stream_dw(), stream_dh()
-	intrinsics.atomic_store(&scrub_req_c, -1) // barra o worker de iniciar decode novo durante a troca
-	intrinsics.atomic_store(&dup_req_c, -1)
 	tmp: []u8
+	n := 0
 	for i in 0 ..< nclips {
 		c := &clips[i]
 		if c.closed || !c.streaming || !intrinsics.atomic_load(&c.probed) do continue
+		if c.dw == ndw && c.dh == ndh do continue // já está na qualidade certa
+		if n == 0 { // só ao encontrar trabalho: zerar isto todo frame mataria o scrub
+			intrinsics.atomic_store(&scrub_req_c, -1) // barra o worker de iniciar decode novo durante a troca
+			intrinsics.atomic_store(&dup_req_c, -1)
+		}
+		n += 1
 		if c.rsp_thr != nil { thread.join(c.rsp_thr); thread.destroy(c.rsp_thr); c.rsp_thr = nil }
 		intrinsics.atomic_store(&c.rsp_busy, false)
 		intrinsics.atomic_store(&c.rsp_done, false)
@@ -4195,8 +4213,7 @@ set_stream_quality :: proc(hi: bool) {
 		}
 	}
 	if tmp != nil do delete(tmp)
-	for i in 0 ..< nsegs do if seg_dup[i].ok || seg_dup[i].lon do dup_release(i) // recriam na nova res
-	set_toast(hi ? "Prévia streaming: Alta (720p)" : "Prévia streaming: Baixa (360p)")
+	if n > 0 do for i in 0 ..< nsegs do if seg_dup[i].ok || seg_dup[i].lon do dup_release(i) // recriam na nova res
 }
 
 clip_read_into :: proc(c: ^Clip, idx: int) -> bool {
@@ -4389,6 +4406,7 @@ remove_media :: proc(i: int) {
 	if bin_sel == i do bin_sel = -1
 	bin_marked[i] = false // não deixa marca presa num tombstone
 	if src_preview == i { src_preview = -1; st.playing = false } // saía da prévia dessa mídia
+	if preview_pending == i do preview_pending = -1 // prévia do export encomendada p/ este slot
 	// 3) libera tudo e vira tombstone (media_ready() passa a dar false p/ este slot)
 	clip_close(&clips[i])
 	intrinsics.atomic_store(&clips[i].failed, true)
@@ -6198,6 +6216,7 @@ update :: proc() {
 	audio_load_ready() // carrega áudios cuja extração terminou
 	adopt_respawns()   // sobe frames de respawns de vídeo concluídos (até pausado)
 	notify_imports()   // avisa "pronto"/"falhou"
+	stream_quality_sync() // pega os clipes que terminaram de importar depois de uma troca de qualidade
 
 	// prévia da exportação: quando o import do arquivo exportado fica pronto, toca-o
 	if preview_pending >= 0 && preview_pending < nclips && media_ready(preview_pending) {
