@@ -5128,6 +5128,11 @@ seg_cropped :: proc(si: int) -> bool { return segs[si].crop_w > 0.001 && segs[si
 crop_mode: bool     // modo de recorte ativo (mostra a moldura no preview p/ ajustar)
 crop_drag: int = -1 // alça de crop em arrasto: 0..7 cantos/bordas, 8 = mover a região (-1 = nenhum)
 crop_grab: rl.Vector2 // offset (frações) entre o mouse e o canto da região ao começar a mover
+// liga/desliga o modo recorte SEMPRE por aqui: o único ponto que soltava o crop_drag era o
+// IsMouseButtonReleased no fim do draw_crop_editor, que deixa de rodar assim que o modo cai.
+// Sair com o botão pressionado (ESC, "Concluir", seleção inválida) deixava a alça pendurada,
+// e na próxima entrada o editor continuava o arrasto de onde o cursor estivesse.
+set_crop_mode :: proc(on: bool) { crop_mode = on; crop_drag = -1; crop_grab = {} }
 // --- modal "Cortar e Ampliar" (estilo NLE): botão na toolbar da timeline abre um
 // modal com o frame do clipe + retângulo arrastável. Reaproveita os campos crop_* do Seg
 // (já renderizados no preview E no export). Aba "Cortar" = livre; "Aproximar e Ampliar" =
@@ -6289,7 +6294,7 @@ update :: proc() {
 	if rl.IsKeyPressed(.ESCAPE) {
 		if search_focus do search_focus = false // sai da busca primeiro
 		else if txt_edit do txt_edit = false // depois da edição de texto
-		else if crop_mode do crop_mode = false // sai do modo recorte
+		else if crop_mode do set_crop_mode(false) // sai do modo recorte
 		else if fullscreen_preview do toggle_fullscreen_preview()
 		else if src_preview >= 0 do exit_src_preview()
 		else if sel_trans >= 0 do sel_trans = -1 // Esc desseleciona a transição
@@ -7246,6 +7251,12 @@ prof_hud :: proc() {
 draw :: proc() {
 	sw := f32(rl.GetScreenWidth())
 	sh := f32(rl.GetScreenHeight())
+
+	// rects dos botões do overlay de exportação: zera aqui e só o próprio overlay os
+	// repõe. Em tela cheia o draw retorna antes dele, mas o update continuava testando a
+	// colisão (só olha export_run) — os rects do último frame em janela viravam uma faixa
+	// invisível no meio do vídeo que cancelava a exportação com um clique qualquer.
+	g_exp_pause_btn = {}; g_exp_cancel_btn = {}
 
 	if fullscreen_preview { // modo tela cheia: só o vídeo
 		draw_fullscreen_video(sw, sh)
@@ -8570,7 +8581,7 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 		}
 		// RECORTE espacial (crop): entra no modo de moldura no preview
 		if ui_btn({ x, y, cw - 2*pad, 26 }, seg_cropped(selected) ? "Recortar (ativo)" : "Recortar", seg_cropped(selected)) {
-			crop_mode = true
+			set_crop_mode(true)
 			if !seg_cropped(selected) { sg.crop_x = 0; sg.crop_y = 0; sg.crop_w = 1; sg.crop_h = 1 } // começa do quadro inteiro
 		}
 		y += 32
@@ -8966,6 +8977,11 @@ open_crop_modal :: proc() {
 	if selected < 0 || selected >= nsegs || !seg_ready(selected) do return
 	c := seg_src(selected)
 	if c.is_audio || c.is_text || segs[selected].aonly do return
+	// os dois editores de recorte (o inline do preview e o do modal) compartilham crop_drag
+	// e crop_grab, mas em geometrias diferentes. Rodando juntos, um press dentro do modal era
+	// pego primeiro pelo do preview e depois aplicado com a escala do modal — a região saltava
+	// para um canto e o OK gravava o recorte errado. O modal manda: desliga o modo inline.
+	set_crop_mode(false)
 	sg := &segs[selected]
 	if !seg_cropped(selected) && !sg.zoom_anim { sg.crop_x = 0; sg.crop_y = 0; sg.crop_w = 1; sg.crop_h = 1 }
 	crop_bk  = { sg.crop_x,  sg.crop_y,  sg.crop_w,  sg.crop_h }   // backup p/ Cancelar
@@ -9272,8 +9288,11 @@ draw_preview :: proc(r: rl.Rectangle) {
 		if c.tex_ok do rl.DrawTexturePro(c.tex, dec_content_rect(c), g_frame, {0,0}, 0, rl.WHITE)
 		txt(rl.TextFormat("Prévia: %s  (clique na timeline p/ sair)", cs(c.name)), video.x + 10, video.y + 8, 12, rl.Color{245,205,90,235})
 		txt(rl.TextFormat("Prévia: %s  (clique na timeline p/ sair)", cs(c.name)), video.x + 10, video.y + 8, 12, rl.Color{245,205,90,235})
-	} else if crop_mode && selected >= 0 && selected < nsegs && seg_ready(selected) && !seg_audio_like(selected) && !seg_src(selected).is_text {
-		// MODO RECORTE: mostra o quadro completo do clipe + moldura de recorte com alças
+	} else if crop_mode && modal == .None && selected >= 0 && selected < nsegs && seg_ready(selected) && !seg_audio_like(selected) && !seg_src(selected).is_text {
+		// MODO RECORTE: mostra o quadro completo do clipe + moldura de recorte com alças.
+		// `modal == .None` porque o editor lê rl.IsMouseButtonPressed CRU (não passa pelo
+		// `clicked`, que respeita o modal): com um modal por cima, um clique nele arrastava
+		// a moldura escondida atrás — e o draw_preview roda ANTES do draw_modal.
 		draw_crop_editor(fx, fy, fw, fh)
 	} else {
 		// COMPOSITING das trilhas de vídeo com transform (mesma função da tela cheia)
@@ -9293,7 +9312,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// barra do modo recorte: instrução + botão Concluir (sai do modo)
 	if crop_mode {
 		if selected < 0 || selected >= nsegs || !seg_ready(selected) || seg_audio_like(selected) || seg_src(selected).is_text {
-			crop_mode = false // seleção inválida p/ recorte
+			set_crop_mode(false) // seleção inválida p/ recorte
 		} else {
 			// faixa escura no topo p/ leitura + instrução
 			rl.DrawRectangleRec({ video.x, video.y, video.width, 44 }, rl.Color{ 0,0,0,140 })
@@ -9307,7 +9326,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 			rl.DrawLineEx({ck.x-7, ck.y+1}, {ck.x-2, ck.y+6}, 2.6, rl.WHITE)
 			rl.DrawLineEx({ck.x-2, ck.y+6}, {ck.x+8, ck.y-6}, 2.6, rl.WHITE)
 			txt("Concluir recorte", cb.x + 42, cb.y + bh2/2 - 8, 14, rl.WHITE)
-			if clicked(cb) do crop_mode = false
+			if clicked(cb) do set_crop_mode(false)
 		}
 	}
 
