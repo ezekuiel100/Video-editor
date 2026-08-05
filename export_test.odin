@@ -426,3 +426,18 @@ grafo_grande_fica_fora_da_linha_de_comando :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "faltou o -filter_complex_script")
 	testing.expectf(t, len(p) < 260 && !strings.contains(p, ";"), "o argumento devia ser o caminho do script, veio %d chars", len(p))
 }
+
+// o ffmpeg roda com `-progress pipe:2`, então progresso e ERRO saem no mesmo stderr. O
+// worker descartava tudo que não era progresso e a causa da falha se perdia — sem console,
+// o usuário só via "Falha na exportação". Este é o filtro que separa os dois.
+@(test)
+progress_line_separa_progresso_de_erro :: proc(t: ^testing.T) {
+	testing.expect(t, progress_line("frame=42"), "linha de -progress")
+	testing.expect(t, progress_line("out_time_us=1000000"), "chave com underscore também")
+	testing.expect(t, progress_line("progress=continue"), "valor não-numérico também")
+	testing.expect(t, !progress_line("[libx264 @ 000001] height not divisible by 2"), "erro do ffmpeg NÃO é progresso")
+	testing.expect(t, !progress_line("Conversion failed!"), "erro em texto corrido também não")
+	testing.expect(t, !progress_line("saida.mp4: Invalid argument"), "nem erro com caminho antes")
+	testing.expect(t, !progress_line(""), "linha vazia não é progresso")
+	testing.expect(t, !progress_line("=x"), "sem chave antes do = não é progresso")
+}

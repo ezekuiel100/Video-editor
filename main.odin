@@ -570,6 +570,17 @@ export_thr:   ^thread.Thread
 export_job:   win.HANDLE // mata o ffmpeg do export ao fechar o app
 export_r:     ^os.File   // ponta de leitura do -progress (stderr do ffmpeg)
 export_ps:    os.Process
+// o HANDLE de export_ps deixa de ser válido no process_wait (o core:os o fecha lá), mas
+// export_run só cai depois — pausar/cancelar nessa fresta operavam sobre um handle morto,
+// que o Windows pode ter reciclado para outro processo. O mutex fecha a janela: o worker
+// derruba `export_ps_ok` ANTES de esperar, e cancel/pause só tocam no handle segurando-o.
+export_ps_mu: sync.Mutex
+export_ps_ok: bool
+// última linha de ERRO do ffmpeg (stderr). O `-progress pipe:2` mistura progresso e erro no
+// mesmo fluxo e o worker descartava tudo que não era progresso: sem console, a causa real de
+// uma falha se perdia por completo e o usuário só via "Falha na exportação".
+export_err:   [240]u8
+export_err_n: int
 export_was_running: bool  // (main) p/ avisar quando terminar
 export_gpu:   bool = true // codificar com NVENC (GPU)
 // QUALIDADE da exportação: define o CQ (NVENC) / CRF (x264) — nº maior = arquivo menor.
@@ -1243,6 +1254,16 @@ LANE_X :: 128 // largura do cabeçalho das trilhas
 export_dims :: proc() -> (w, h: int) { return proj_w, proj_h } // resolução do projeto (Config. do Projeto)
 
 // thread de fundo: lê o -progress do ffmpeg e atualiza export_pct; espera o fim
+// a linha é do `-progress` (chave=valor em minúsculas, ex.: "frame=12", "speed=1.3x") e não
+// uma mensagem de erro? As do ffmpeg vêm como "[libx264 @ ...] ..." ou texto corrido.
+progress_line :: proc(s: string) -> bool {
+	for c, i in s {
+		if c == '=' do return i > 0
+		if !((c >= 'a' && c <= 'z') || c == '_') do return false
+	}
+	return false
+}
+
 export_worker :: proc() {
 	buf: [4096]u8
 	line: [512]u8
@@ -1258,6 +1279,11 @@ export_worker :: proc() {
 						if v, ok := strconv.parse_i64(s[len("out_time_us="):]); ok && export_total > 0 {
 							export_pct = clamp(f32(f64(v)/1e6) / export_total, 0, 1)
 						}
+					} else if !progress_line(s) {
+						// guarda a ÚLTIMA linha que não é progresso: é o erro do ffmpeg, a
+						// única pista da causa (o app não tem console p/ onde olhar)
+						n2 := min(len(s), len(export_err))
+						copy(export_err[:], s[:n2]); export_err_n = n2
 					}
 					ll = 0
 				} else if ll < len(line) { line[ll] = ch; ll += 1 }
@@ -1266,6 +1292,9 @@ export_worker :: proc() {
 		if n <= 0 || e != nil do break
 	}
 	os.close(export_r)
+	// o process_wait FECHA o handle: marca como inválido antes, para um cancelar/pausar
+	// concorrente não operar sobre ele (ou sobre um PID já reciclado pelo Windows)
+	sync.mutex_lock(&export_ps_mu); export_ps_ok = false; sync.mutex_unlock(&export_ps_mu)
 	state, _ := os.process_wait(export_ps)
 	export_ok = state.exited && state.exit_code == 0
 	export_pct = 1
@@ -1857,8 +1886,10 @@ start_export :: proc(out: string, gpu: bool) {
 	if pe != nil { os.close(pr); os.close(gr); set_toast("Falha ao iniciar ffmpeg"); return }
 	export_job = make_kill_job()
 	if export_job != nil do AssignProcessToJobObject(export_job, win.HANDLE(p.handle))
-	export_ps = p; export_r = gr; export_prev_r = pr
+	sync.mutex_lock(&export_ps_mu); export_ps = p; export_ps_ok = true; sync.mutex_unlock(&export_ps_mu)
+	export_r = gr; export_prev_r = pr
 	export_total = total; export_pct = 0; export_ok = false
+	export_err_n = 0 // erro da exportação ANTERIOR não vale para esta
 	// prepara os buffers e a textura da prévia (uma vez; reusa nas próximas exportações)
 	if export_prev_a == nil { export_prev_a = make([]u8, PREV_BYTES); export_prev_b = make([]u8, PREV_BYTES) }
 	if !export_prev_tex_ok {
@@ -1884,6 +1915,8 @@ start_export :: proc(out: string, gpu: bool) {
 // ficam esperando os pipes — sem dado, sem deadlock; retoma e o ffmpeg continua).
 export_toggle_pause :: proc() {
 	if !intrinsics.atomic_load(&export_run) do return
+	sync.mutex_lock(&export_ps_mu); defer sync.mutex_unlock(&export_ps_mu)
+	if !export_ps_ok do return // o worker já entrou no process_wait: o handle morreu
 	if export_paused { NtResumeProcess(win.HANDLE(export_ps.handle)); export_paused = false }
 	else            { NtSuspendProcess(win.HANDLE(export_ps.handle)); export_paused = true }
 }
@@ -1893,6 +1926,8 @@ export_toggle_pause :: proc() {
 export_do_cancel :: proc() {
 	if !intrinsics.atomic_load(&export_run) do return
 	export_cancel = true
+	sync.mutex_lock(&export_ps_mu); defer sync.mutex_unlock(&export_ps_mu)
+	if !export_ps_ok do return // já terminou sozinho: nada a matar (e o handle já foi fechado)
 	if export_paused { NtResumeProcess(win.HANDLE(export_ps.handle)); export_paused = false } // retoma p/ matar limpo
 	_ = os.process_kill(export_ps)
 }
@@ -5820,10 +5855,17 @@ take_screenshot :: proc(out: string) {
 			"-ss", fmt.tprintf("%.3f", clamp(src_t, 0, clips[src_preview].dur)),
 			"-i", clips[src_preview].path, "-frames:v", "1", "-update", "1", out,
 		}
+		// `e == nil` só diz que o ffmpeg FOI LANÇADO — fonte sem stream de vídeo, caminho
+		// inválido ou arquivo em uso saem no código de saída, e sem olhá-lo o toast dizia
+		// "salvo" (e contava o shot_n) sem nenhum arquivo no disco
 		if p, e := os.process_start(os.Process_Desc{ command = cmd }); e == nil {
-			_, _ = os.process_wait(p) // 1 frame: rápido
-			set_toast(rl.TextFormat("Screenshot salvo: %s", cs(out)))
-			shot_n += 1
+			state, _ := os.process_wait(p) // 1 frame: rápido
+			if state.exited && state.exit_code == 0 {
+				set_toast(rl.TextFormat("Screenshot salvo: %s", cs(out)))
+				shot_n += 1
+			} else {
+				set_toast("Falha ao salvar screenshot")
+			}
 		} else {
 			set_toast("Falha ao salvar screenshot")
 		}
@@ -6826,7 +6868,10 @@ update :: proc() {
 			modal = .Done
 			if g_done_snd_ok do rl.PlaySound(g_done_snd) // aviso sonoro: exportação concluída
 		} else {
-			set_toast("Falha na exportação")
+			// mostra a CAUSA (última linha de stderr do ffmpeg) em vez do genérico: sem
+			// console, era a única informação e ela ia direto para o lixo
+			if export_err_n > 0 do set_toast(rl.TextFormat("Falha na exportação: %s", cs(string(export_err[:export_err_n]))))
+			else                do set_toast("Falha na exportação")
 		}
 		export_cancel = false; export_paused = false
 		for f in export_tmp_files { os.remove(f); delete(f) } // remove os PNGs de texto
