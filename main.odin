@@ -1615,19 +1615,44 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				// fonte) e a escala p/ o box segW×segH (região travada no aspecto de saída = preenche).
 				// Espelha seg_crop_at do preview: smoothstep S no tempo local (on = frame de saída).
 				// crop não serve aqui (fixa w/h na init); zoompan avalia z/x/y por frame.
-				ax, ay, aw, _  := crop_norm(sg.crop_x,  sg.crop_y,  sg.crop_w,  sg.crop_h)
-				bx, by, bw, _  := crop_norm(sg.crop2_x, sg.crop2_y, sg.crop2_w, sg.crop2_h)
+				ax, ay, aw, ah := crop_norm(sg.crop_x,  sg.crop_y,  sg.crop_w,  sg.crop_h)
+				bx, by, bw, bh := crop_norm(sg.crop2_x, sg.crop2_y, sg.crop2_w, sg.crop2_h)
+				// O zoompan amostra iw/z × ih/z: a MESMA fração nos dois eixos. Mas a região do
+				// Pan & Zoom está travada no aspecto de SAÍDA (crop_conform_lock_q: h = w*kh, com
+				// kh = aspecto_fonte/proj_ar), então com fonte e projeto de aspectos DIFERENTES a
+				// fração de altura não é a de largura — usar só `aw` amostrava uma região com a
+				// forma da FONTE e o scale final a esticava (o preview mostrava certo, o arquivo
+				// saía deformado). Correção: um `pad` estático antes do zoompan muda só o
+				// DENOMINADOR das frações e iguala as duas; a área acrescentada nunca é amostrada
+				// (a região cabe inteira no quadro original), serve só de espaço morto.
+				//   kh >= 1: altura vira ih*kh  -> fração de altura = ah/kh = aw  (z = 1/aw)
+				//   kh <  1: largura vira iw/kh -> fração de largura = aw*kh = ah (z = 1/ah)
+				// O `pad` nunca encolhe (kh>=1 só cresce em altura, kh<1 só em largura), e o
+				// aspecto real da região continua batendo com segW×segH — logo, sem distorção.
+				kh := aw > 0.0001 ? ah/aw : f32(1)
+				padf := ""
+				za, zb := aw, bw // frações que viram o zoom (o eixo que ficou "comum")
+				xa, xb := ax, bx
+				ya, yb := ay, by
+				if kh > 1.002 {
+					padf = fmt.tprintf(",pad=w=iw:h=ih*%.6f:x=0:y=0", kh)
+					ya = ay/kh; yb = by/kh // y agora é fração da altura JÁ esticada
+				} else if kh < 0.998 {
+					padf = fmt.tprintf(",pad=w=iw/%.6f:h=ih:x=0:y=0", kh)
+					za = ah; zb = bh       // o eixo comum passou a ser a ALTURA
+					xa = ax*kh; xb = bx*kh // x agora é fração da largura JÁ esticada
+				}
 				N := max((t1 - t0)/sp * 30, 1) // frames de saída (30fps) deste segmento
 				Ls := fmt.tprintf("(on/%.3f)", f64(N))
 				Ss := fmt.tprintf("(%s*%s*(3-2*%s))", Ls, Ls, Ls) // smoothstep (sem vírgulas: seguro no filtergraph)
-				zexpr := fmt.tprintf("1/(%.6f+(%.6f)*%s)", aw, bw-aw, Ss)   // zoom = 1/largura da região
-				xexpr := fmt.tprintf("(%.6f+(%.6f)*%s)*iw", ax, bx-ax, Ss)  // canto sup-esq X (px da fonte)
-				yexpr := fmt.tprintf("(%.6f+(%.6f)*%s)*ih", ay, by-ay, Ss)  // canto sup-esq Y
+				zexpr := fmt.tprintf("1/(%.6f+(%.6f)*%s)", za, zb-za, Ss) // zoom = 1/fração da região
+				xexpr := fmt.tprintf("(%.6f+(%.6f)*%s)*iw", xa, xb-xa, Ss)  // canto sup-esq X (px da entrada do zoompan)
+				yexpr := fmt.tprintf("(%.6f+(%.6f)*%s)*ih", ya, yb-ya, Ss)  // canto sup-esq Y
 				// fps=30 ANTES do zoompan: com d=1 ele emite 1 frame de saída por frame de
 				// ENTRADA; sem normalizar, fonte !=30fps (ex.: 60fps de stream) muda a duração
 				// do vídeo e DESSINCRONIZA do áudio. Normaliza p/ 30fps -> dur*30 frames exatos.
-				fmt.sbprintf(&fb, ",fps=30,zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,setpts=PTS+%.3f/TB,format=rgba",
-					zexpr, xexpr, yexpr, segW, segH, start2)
+				fmt.sbprintf(&fb, ",fps=30%s,zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,setpts=PTS+%.3f/TB,format=rgba",
+					padf, zexpr, xexpr, yexpr, segW, segH, start2)
 			} else {
 				// RECORTE estático: mantém só a sub-região (frações da fonte) antes de escalar
 				if seg_cropped(i) do fmt.sbprintf(&fb, ",crop=iw*%.5f:ih*%.5f:iw*%.5f:ih*%.5f", crw, crh, crx, cry)
@@ -5589,6 +5614,11 @@ history_baseline :: proc() { committed = snap_now(); committed_ok = true }
 history_tick :: proc() {
 	if !committed_ok { history_baseline(); return }
 	if st.drag != .None || ui_slider_active != -1 || player_seek_drag || bin_drag >= 0 do return
+	// o recorte do preview (crop_mode) NÃO passa por st.drag: escreve sg.crop_* direto, todo
+	// frame do arrasto. Sem esta guarda, 2s de arrasto empilham ~120 snapshots e o MAX_UNDO
+	// descarta o histórico real. Espelha a condição de escrita do draw_crop_editor — se
+	// crop_drag ficar pendurado, o botão solto já libera a gravação.
+	if crop_drag >= 0 && rl.IsMouseButtonDown(.LEFT) do return
 	if !snap_eq(committed) {
 		push_stack(&undo_stack, &undo_top, committed) // guarda o estado ANTERIOR
 		redo_top = 0                                   // nova edição invalida o redo
@@ -6055,7 +6085,14 @@ update :: proc() {
 	}
 
 	// modal aberto: congela as interações de fundo (o draw_modal cuida do modal)
-	if modal != .None { st.drag = .None; ui_slider_active = -1; player_seek_drag = false; return }
+	if modal != .None {
+		// em TELA CHEIA o modal ficava inalcançável: o draw retorna antes do draw_modal (nada
+		// é desenhado e o `clicked` do botão de sair exige g_modal_draw) e este return corta o
+		// ESC — sem saída a não ser matar o processo. Acontecia sozinho ao terminar uma
+		// exportação (.Done) ou no Alt+F4 com projeto sujo (.Confirm). Volta pra janela.
+		if fullscreen_preview do toggle_fullscreen_preview()
+		st.drag = .None; ui_slider_active = -1; player_seek_drag = false; return
+	}
 
 	// exportando: intercepta os cliques nos botões do overlay (pausar/cancelar) ANTES
 	// do resto — os rects vêm do draw. Não congela o resto da UI.
