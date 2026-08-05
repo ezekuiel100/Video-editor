@@ -4674,11 +4674,18 @@ paste_segs :: proc(at: f32) {
 		it := seg_clipbrd[k]
 		// a mídia-fonte pode ter sido removida do bin depois do copiar
 		if it.src < 0 || it.src >= nclips || clips[it.src].closed || intrinsics.atomic_load(&clips[it.src].failed) { dead += 1; continue }
-		if track_locked[it.track] { locked += 1; continue }
-		ni := add_seg(it.src, 0, it.in_off, it.dur, it.track)
+		// a trilha guardada no clipboard pode ter sido REMOVIDA depois do copiar (o clipboard
+		// não entra no Snapshot de undo). Sem clampar, o segmento nascia com track >= g_nv:
+		// track_row virava negativo (desenhado por cima da trilha do topo), o preview e o
+		// export de VÍDEO iteram 0..<g_nv e o ignoravam, mas o laço de áudio pega todos —
+		// o clipe saía do arquivo final só com o som.
+		tr := is_audio_track(it.track) ? clamp(it.track, MAXV, MAXV + g_na - 1) : clamp(it.track, 0, g_nv - 1)
+		if track_locked[tr] { locked += 1; continue }
+		ni := add_seg(it.src, 0, it.in_off, it.dur, tr)
 		if ni < 0 do break // timeline lotada (add_seg já avisou)
 		s := it
-		s.start = free_start(it.track, ni, max(0, it.start + delta), it.dur)
+		s.track = tr
+		s.start = free_start(tr, ni, max(0, it.start + delta), it.dur)
 		segs[ni] = s
 		if first < 0 do first = ni
 		pasted += 1

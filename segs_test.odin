@@ -266,6 +266,41 @@ copiar_e_colar_sem_sobrepor :: proc(t: ^testing.T) {
 	testing.expect(t, t_feq(segs[2].start, 35), "empurrado p/ a direita do que já estava lá")
 }
 
+// o clipboard NÃO entra no Snapshot de undo, então ele sobrevive à remoção da trilha de
+// onde veio. Sem clampar, o segmento colado nascia com track >= g_nv: track_row ficava
+// negativo (desenhado por cima da trilha do topo), o preview e o laço de vídeo do export
+// iteram 0..<g_nv e o ignoravam, mas o laço de ÁUDIO percorre todos os segmentos — o
+// clipe saía do arquivo exportado só com o som, sem imagem.
+@(test)
+colar_em_trilha_removida_cai_na_ultima_visivel :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 10, 0, 5, 2) // V3 (a trilha do topo com g_nv = 3)
+	selected = a
+	testing.expect(t, copy_segs() == 1, "copia o clipe da trilha do topo")
+	remove_seg(a)
+	g_nv = 2 // usuário removeu V3 (o × do cabeçalho só aparece com a trilha vazia)
+	paste_segs(30)
+	testing.expect(t, nsegs == 1, "colou")
+	testing.expect(t, segs[0].track < g_nv, "a trilha do clipe colado EXISTE")
+	testing.expect(t, segs[0].track == 1, "e é a última visível (V2), não a que sumiu")
+}
+
+// mesma proteção do lado do áudio: a trilha do clipboard é clampada dentro da faixa de
+// áudio, nunca para uma trilha de vídeo
+@(test)
+colar_audio_em_trilha_removida_continua_no_audio :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 10, 0, 5, MAXV + 1) // A2
+	selected = a
+	testing.expect(t, copy_segs() == 1, "copia o clipe de áudio")
+	remove_seg(a)
+	g_na = 1 // usuário removeu A2
+	paste_segs(30)
+	testing.expect(t, nsegs == 1, "colou")
+	testing.expect(t, is_audio_track(segs[0].track), "continua numa trilha de ÁUDIO")
+	testing.expect(t, segs[0].track == MAXV, "clampado para A1, a última visível")
+}
+
 // estado "sujo" de edição pesada (2 cortes, ripple, colar, corte no playhead) tem
 // que passar limpo pelo verificador de invariantes — se ele disparar aqui, ou uma
 // operação corrompeu o estado ou a invariante está forte demais (falso positivo)
