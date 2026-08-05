@@ -894,7 +894,16 @@ Clip :: struct {
 	chunk_done: bool, // atômico: extração do chunk terminou
 	chunk_ok:   bool, // atômico: extração do chunk deu certo
 	chunk_busy: bool, // (main) worker no ar
+	chunk_meas: bool, // a cobertura abaixo já foi MEDIDA? (false = usa o nominal CHUNK_SECS)
+	chunk_cov:  f32,  // segundos REAIS cobertos pelo chunk no bolso, medidos ao abri-lo. O
+	                  // ffmpeg entrega menos que -t quando o áudio acaba antes; sem isto o
+	                  // intervalo nominal dizia "coberto" e o chunk era reaberto a cada
+	                  // frame. Os dois campos separados porque 0 é cobertura VÁLIDA (arquivo
+	                  // vazio = não cobre nada) e também o valor zero de um Clip novo.
 	music_base: f32,  // offset (na fonte) do stream ATIVO em c.music (0 = head/completo)
+	music_full: bool, // o stream ATIVO é o part_path(c,0) completo? Distingue do head sem
+	                  // comparar durações — áudio mais curto que o vídeo faz o completo
+	                  // PARECER head e o código o trocava por ele mesmo, todo frame
 	// --- forma de onda (calculada do áudio em thread de fundo) ---
 	// DOIS envelopes por bucket, como nos NLEs: o PICO vira o contorno claro e o RMS (energia
 	// média) o corpo sólido. Só pico não serve: música moderna é comprimida e o pico fica ~1.0
@@ -3443,18 +3452,16 @@ parts_worker :: proc(c: ^Clip) {
 try_part_open :: proc(c: ^Clip, local: f32) -> bool {
 	if audio_clock_ok(c, local) do return true
 	if intrinsics.atomic_load(&c.parts_done) < 1 do return false // FLAC ainda não pronto
-	// cache/áudio (não-streaming, sem head): QUALQUER música base-0 aberta já é a parte 0
-	// completa — não há janela melhor. Sem este guard, áudio mais curto que o vídeo caía no
-	// caso abaixo (end < dur-0.5) e descarregava/reabria o MESMO arquivo a cada frame da cauda.
-	if !c.streaming && c.has_audio && c.music_base == 0 do return false
-	// já é o FLAC completo (base 0, cobre ~c.dur)? então não há o que trocar
-	if c.has_audio && c.music_base == 0 {
-		end := f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
-		if end >= c.dur - 0.5 do return false // é o completo; a margem de 0.25s no fim é normal
-	}
+	// o stream ativo JÁ é o arquivo completo? então não existe janela melhor — sair sem
+	// descarregar. Antes isto era deduzido da duração (end >= dur-0.5), e um áudio mais
+	// curto que o vídeo (mic que para antes do fim) reprovava no teste: o completo era
+	// confundido com o head e trocado por ele MESMO a cada frame da cauda (Unload+Load de
+	// um OGG de ~90MB por frame). O guard antigo por !c.streaming só cobria o cache.
+	if c.has_audio && c.music_full do return false
 	if c.has_audio { rl.UnloadMusicStream(c.music); c.has_audio = false }
 	if !music_open(c, part_path(c, 0)) do return false
 	c.music_base = 0
+	c.music_full = true
 	return audio_clock_ok(c, local)
 }
 
@@ -3485,13 +3492,23 @@ try_chunk_open :: proc(c: ^Clip, local: f32) -> bool {
 	if audio_clock_ok(c, local) do return true
 	if c.chunk_busy do return false // ainda extraindo
 	if !intrinsics.atomic_load(&c.chunk_done) || !intrinsics.atomic_load(&c.chunk_ok) do return false
-	if local < c.chunk_base || local >= c.chunk_base + CHUNK_SECS - 0.5 do return false
+	// cobertura REAL do chunk (medida na 1ª abertura), não a nominal: o ffmpeg entrega menos
+	// que -t quando o áudio da fonte acaba antes. Com a nominal, um ponto fora do arquivo
+	// caía aqui como "coberto", reabria o mesmo WAV todo frame e o chamador nunca pedia outro.
+	if local < c.chunk_base || local >= c.chunk_base + chunk_cov_of(c) - 0.5 do return false
 	if c.has_audio { rl.UnloadMusicStream(c.music); c.has_audio = false }
-	if !music_open(c, c.aud_ck[c.chunk_slot]) do return false
+	c.chunk_meas = true
+	if !music_open(c, c.aud_ck[c.chunk_slot]) { c.chunk_cov = 0; return false } // vazio: não cobre nada
+	c.chunk_cov = f32(c.music.frameCount) / f32(max(c.music.stream.sampleRate, 1))
 	c.music_base = c.chunk_base
 	c.music_slot = c.chunk_slot // este slot agora está preso pelo dr_wav
-	return true
+	// só confirma se o relógio realmente cobre o ponto (o try_part_open já fazia assim):
+	// um `true` sem cobertura suprimia o chunk_request do chamador para sempre
+	return audio_clock_ok(c, local)
 }
+
+// cobertura do chunk no bolso: a medida real quando já conhecida, senão a nominal
+chunk_cov_of :: proc(c: ^Clip) -> f32 { return c.chunk_meas ? c.chunk_cov : CHUNK_SECS }
 
 // (main) pede um chunk cobrindo `local`. Ignora se já há um worker no ar (quando
 // ele terminar, se o playhead saiu da área, pede-se outro) ou se o chunk no bolso
@@ -3499,8 +3516,8 @@ try_chunk_open :: proc(c: ^Clip, local: f32) -> bool {
 chunk_request :: proc(c: ^Clip, local: f32) {
 	if c.chunk_busy do return
 	if intrinsics.atomic_load(&c.chunk_done) && intrinsics.atomic_load(&c.chunk_ok) &&
-	   local >= c.chunk_base && local < c.chunk_base + CHUNK_SECS - 0.5 {
-		return // já no bolso
+	   local >= c.chunk_base && local < c.chunk_base + chunk_cov_of(c) - 0.5 {
+		return // já no bolso (pela cobertura REAL, não pela nominal)
 	}
 	if c.chunk_thr != nil { thread.join(c.chunk_thr); thread.destroy(c.chunk_thr); c.chunk_thr = nil }
 	// NUNCA escreve no slot aberto em c.music: o ffmpeg (-y) trunca o arquivo na
@@ -3509,6 +3526,7 @@ chunk_request :: proc(c: ^Clip, local: f32) {
 	// não era adotado (usuário adiantou de novo antes de ele ficar pronto).
 	c.chunk_slot = c.music_slot >= 0 ? c.music_slot ~ 1 : c.chunk_slot ~ 1
 	c.chunk_req = clamp(local - 1, 0, c.dur) // margem de 1s antes do pedido
+	c.chunk_meas = false; c.chunk_cov = 0 // cobertura do chunk NOVO só é conhecida ao abrir
 	intrinsics.atomic_store(&c.chunk_done, false)
 	intrinsics.atomic_store(&c.chunk_ok, false)
 	c.chunk_busy = true
@@ -3518,8 +3536,17 @@ chunk_request :: proc(c: ^Clip, local: f32) {
 // abre um WAV como rl.Music do clipe, pausado no início; false se inválido
 music_open :: proc(c: ^Clip, path: string) -> bool {
 	c.music = rl.LoadMusicStream(strings.clone_to_cstring(path, context.temp_allocator))
-	if c.music.frameCount == 0 do return false
+	if c.music.frameCount == 0 {
+		// arquivo VÁLIDO mas sem amostras (o ffmpeg grava só o header quando o trecho
+		// pedido está além do fim do áudio): o raylib já alocou o decoder e registrou o
+		// AudioStream no mixer. Sair sem descarregar vazava um buffer por tentativa — e
+		// este caminho é retentado a cada frame. ctxData nil = a carga falhou de vez.
+		if c.music.ctxData != nil do rl.UnloadMusicStream(c.music)
+		c.music = {}
+		return false
+	}
 	c.music_base = 0 // head/completo começam na origem; quem abre chunk sobrescreve
+	c.music_full = false // quem abre o part_path(c,0) completo marca depois
 	c.music_slot = -1 // não é um slot de chunk; try_chunk_open sobrescreve ao abrir chunk
 	c.music.looping = false
 	rl.PlayMusicStream(c.music)
@@ -3547,7 +3574,7 @@ audio_load_ready :: proc() {
 		if !c.has_audio {
 			// 1ª carga: WAV completo se já existe, senão o head
 			if intrinsics.atomic_load(&c.parts_done) >= 1 {
-				_ = music_open(c, part_path(c, 0)) // music_base = 0
+				if music_open(c, part_path(c, 0)) do c.music_full = true // music_base = 0
 			} else if intrinsics.atomic_load(&c.head_done) && intrinsics.atomic_load(&c.head_ok) {
 				if !music_open(c, c.aud_head) do intrinsics.atomic_store(&c.head_ok, false)
 			}
@@ -3557,7 +3584,10 @@ audio_load_ready :: proc() {
 		// feita cedo, quando o usuário nem começou a tocar, o gap da troca é inaudível
 		// — e evita o gap acontecer no minuto 1 (fim do head) durante o playback.
 		full_ready := intrinsics.atomic_load(&c.parts_done) >= 1
-		is_head := c.music_base == 0 && f32(c.music.frameCount) / f32(c.music.stream.sampleRate) < c.dur - 0.5
+		// "é o head?" pela IDENTIDADE do stream, não pela duração: com áudio mais curto que o
+		// vídeo o completo também mede < dur-0.5, e a troca abaixo o substituía por ele mesmo
+		// a cada frame (Unload+Load do OGG inteiro, com o playback picotando junto).
+		is_head := c.music_base == 0 && !c.music_full
 		if full_ready && is_head && st.drag == .None {
 			pos := play_clip >= 0 && segs[play_clip].src == i ? rl.GetMusicTimePlayed(c.music) : -1
 			resume := st.playing && play_clip >= 0 && segs[play_clip].src == i
@@ -3567,6 +3597,7 @@ audio_load_ready :: proc() {
 			// (blip do começo do arquivo). Com false, ele re-adquire na posição certa.
 			c.mix_on = false
 			if music_open(c, part_path(c, 0)) {
+				c.music_full = true
 				if pos >= 0 { rl.SeekMusicStream(c.music, pos); if resume do rl.ResumeMusicStream(c.music) }
 			}
 		}
@@ -5185,6 +5216,7 @@ set_play_clip :: proc(si: int, local: f32) {
 		if is_full {
 			rl.UnloadMusicStream(c.music); c.has_audio = false
 			if music_open(c, part_path(c, 0)) {
+				c.music_full = true
 				rl.SeekMusicStream(c.music, target)
 				rl.ResumeMusicStream(c.music)
 			}
@@ -5667,7 +5699,11 @@ seek_global :: proc(t: f32) {
 	// mesmo pausado, já garante o áudio da região: adota a parte pronta ou o chunk
 	// no bolso, senão encomenda um chunk — quando der play, o som está lá
 	if src.has_audio && !try_part_open(src, local) && !try_chunk_open(src, local) do chunk_request(src, local)
-	if st.playing && src.has_audio do set_play_clip(a, local)
+	// velocidade != 1 NÃO pode ser relógio: o som vem do WAV pré-renderizado (spv, tom
+	// preservado) e o laço de playback já força play_clip = -1 nesse caso. Adquirir aqui
+	// recarregava o OGG e dava Resume no tom ORIGINAL — um estalo a cada seek, pausado só
+	// no frame seguinte.
+	if st.playing && src.has_audio && seg_speed(a) == 1 do set_play_clip(a, local)
 }
 
 // ---------- prévia de origem (duplo-clique no bin: toca a mídia crua no player,

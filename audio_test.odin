@@ -164,9 +164,42 @@ part_open_cache_base_zero_nao_reabre_o_mesmo_arquivo :: proc(t: ^testing.T) {
 	// try_part_open descarregava e reabria o MESMO arquivo a cada frame.
 	c := t_aud(100, 0, 90)
 	c.streaming = false
+	c.music_full = true // o que está aberto É o _full.ogg (só ele cobre 90s de um head de 30)
 	intrinsics.atomic_store(&c.parts_done, 1)
 	testing.expect(t, !try_part_open(c, 95), "na cauda não há o que trocar: já é a única janela")
 	testing.expect(t, c.has_audio, "e o stream segue aberto (não foi descarregado)")
+}
+
+@(test)
+part_open_streaming_audio_curto_nao_reabre :: proc(t: ^testing.T) {
+	t_reset()
+	// o mesmo caso do teste acima, mas STREAMING: vídeo de 100s cujo áudio acaba aos 60
+	// (o mic parou antes do fim). O completo mede 60 < dur-0.5, então o teste por DURAÇÃO
+	// o confundia com o head e trocava o arquivo por ele mesmo — Unload+Load de um OGG de
+	// ~90MB a cada frame da cauda, com o preview picotando junto. Quem responde agora é a
+	// identidade do stream (music_full), não o tamanho.
+	c := t_aud(100, 0, 60)
+	c.streaming = true
+	c.music_full = true
+	intrinsics.atomic_store(&c.parts_done, 1)
+	testing.expect(t, !try_part_open(c, 80), "já é o completo: não há janela melhor, mesmo sem cobrir 80s")
+	testing.expect(t, c.has_audio, "e o stream NÃO é descarregado")
+}
+
+@(test)
+part_open_head_aberto_sobe_para_o_completo :: proc(t: ^testing.T) {
+	t_reset()
+	// contraprova do teste acima: com o HEAD aberto (music_full=false) e o ogg pronto, a
+	// troca DEVE acontecer. O guard antigo por !c.streaming barrava esta subida nos clipes
+	// de cache — ficavam presos no head de 30s com o completo pronto no disco.
+	c := t_aud(100, 0, 30)
+	c.streaming = false
+	c.music_full = false
+	intrinsics.atomic_store(&c.parts_done, 1)
+	// não dá p/ ir além (o music_open real toca o disco); basta constatar que NÃO houve o
+	// retorno antecipado: o stream foi descarregado para dar lugar ao completo
+	_ = try_part_open(c, 80)
+	testing.expect(t, !c.has_audio, "o head saiu de cena p/ o completo entrar")
 }
 
 @(test)
@@ -174,6 +207,7 @@ part_open_streaming_ja_no_completo_desiste :: proc(t: ^testing.T) {
 	t_reset()
 	c := t_aud(100, 0, 100) // streaming, já com o OGG completo aberto
 	c.streaming = true
+	c.music_full = true
 	intrinsics.atomic_store(&c.parts_done, 1)
 	// 99.9 cai na margem morta de 0.25s, então o relógio não vale — mas a janela
 	// aberta JÁ é a completa: trocar não melhoraria nada
@@ -243,5 +277,27 @@ chunk_request_nao_repete_o_que_ja_esta_no_bolso :: proc(t: ^testing.T) {
 	c.chunk_req = 599
 	chunk_request(c, 700) // 700 está dentro de 600..900
 	testing.expect(t, c.chunk_req == 599, "o chunk no bolso já cobre: não pede de novo")
+	testing.expect(t, !c.chunk_busy, "e não marca worker no ar")
+}
+
+@(test)
+chunk_cobertura_real_manda_no_lugar_da_nominal :: proc(t: ^testing.T) {
+	t_reset()
+	// chunk pedido em 600 com `-t 300`, mas o áudio da fonte acaba em 631: o ffmpeg grava
+	// só 31s. Pela faixa NOMINAL (600..900) o ponto 700 parecia coberto, e o try_chunk_open
+	// devolvia true sem cobrir nada — o chamador nunca pedia outro chunk e o trecho ficava
+	// mudo, reabrindo o mesmo WAV a cada frame. Quem manda agora é a cobertura MEDIDA.
+	// (só os retornos antecipados: passar deles abre o arquivo / sobe um ffmpeg)
+	c := t_aud(3600, 0, 60)
+	c.chunk_busy = false
+	intrinsics.atomic_store(&c.chunk_done, true)
+	intrinsics.atomic_store(&c.chunk_ok, true)
+	c.chunk_base = 600
+	c.chunk_meas = true; c.chunk_cov = 31 // medido ao abrir: cobre 600..631, não 600..900
+	testing.expect(t, !try_chunk_open(c, 700), "700 está fora da cobertura REAL: não adota")
+	testing.expect(t, c.has_audio, "e não descarrega o stream aberto para reabrir o mesmo arquivo")
+	c.chunk_req = 599
+	chunk_request(c, 610) // 610 está dentro da cobertura real: segue valendo o atalho
+	testing.expect(t, c.chunk_req == 599, "dentro da cobertura real continua sendo 'já no bolso'")
 	testing.expect(t, !c.chunk_busy, "e não marca worker no ar")
 }
