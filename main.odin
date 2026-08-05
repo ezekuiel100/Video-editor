@@ -2887,7 +2887,8 @@ set_text_clip :: proc(c: ^Clip, s: string) {
 add_text :: proc() {
 	slot := new_text_clip("Texto", 0.10, rl.WHITE)
 	if slot < 0 do return
-	tr := g_nv - 1 // trilha de vídeo mais alta = vence no compositing (fica por cima)
+	tr := free_track_from(g_nv - 1) // trilha de vídeo mais alta = vence no compositing (fica por cima)
+	if tr < 0 { set_toast("Trilha bloqueada"); return }
 	start := free_start(tr, -1, st.playhead, clips[slot].dur)
 	si := add_seg(slot, start, 0, clips[slot].dur, tr)
 	if si < 0 { set_toast("Timeline cheia"); return }
@@ -4459,7 +4460,8 @@ bin_add_to_timeline :: proc(i: int) {
 	if i < 0 || i >= nclips do return
 	c := &clips[i]
 	if !media_ready(i) do return
-	tr := track_for_media(i, 0)
+	tr := free_track_from(track_for_media(i, 0))
+	if tr < 0 { set_toast("Trilha bloqueada"); return }
 	start := free_start(tr, -1, st.playhead, c.dur)
 	si := add_seg(i, start, 0, c.dur, tr)
 	if si < 0 do return // add_seg já avisa (timeline cheia)
@@ -4476,6 +4478,28 @@ add_seg :: proc(src: int, start, in_off, dur: f32, track := 0) -> int {
 	nsegs += 1
 	if src >= 0 && src < nclips do maybe_adopt_aspect(&clips[src]) // 1º vídeo na timeline define proj_ar
 	return nsegs - 1
+}
+
+// reajusta os fades à duração ATUAL do segmento. Chame sempre que `dur` encolher: o clamp
+// só existia no arrasto das alças, então aparar/mudar a velocidade/cortar deixavam para trás
+// um fade maior que o clipe — a prévia (seg_gain, que divide por fade_in) e o export
+// (afade com st negativo) passavam a aplicar curvas DIFERENTES no mesmo trecho.
+clamp_fades :: proc(sg: ^Seg) {
+	sg.fade_in  = clamp(sg.fade_in,  0, sg.dur)
+	sg.fade_out = clamp(sg.fade_out, 0, sg.dur)
+	if sg.fade_in + sg.fade_out > sg.dur do sg.fade_out = max(0, sg.dur - sg.fade_in)
+}
+
+// primeira trilha NÃO travada a partir de `tr`, dentro do MESMO tipo (vídeo/áudio); procura
+// para cima e depois dá a volta. -1 = todas travadas. Sem isto, o "+" da miniatura do bin, o
+// botão Texto e a colocação automática do import furavam o cadeado que a timeline promete.
+free_track_from :: proc(tr: int) -> int {
+	lo, hi := 0, g_nv
+	if is_audio_track(tr) { lo, hi = MAXV, MAXV + g_na }
+	t := clamp(tr, lo, hi - 1)
+	for k := t; k < hi; k += 1 do if !track_locked[k] do return k
+	for k := lo; k < t; k += 1 do if !track_locked[k] do return k
+	return -1
 }
 
 // volume efetivo do segmento em `t` (tempo absoluto da timeline): vol × mudo × envelope
@@ -4908,6 +4932,8 @@ split_seg_at :: proc(a: int, t: f32) -> bool {
 		segs[ri].fx_vignette = segs[a].fx_vignette; segs[ri].fx_temp = segs[a].fx_temp
 	segs[a].dur = off
 	segs[a].fade_out = 0; segs[a].vfout = 0 // o fade preto de saída foi p/ a metade da direita
+	// as duas metades ficaram menores que o original: o fade herdado pode não caber mais
+	clamp_fades(&segs[a]); clamp_fades(&segs[ri])
 	return true
 }
 
@@ -5030,11 +5056,32 @@ trans_prev :: proc(bi: int) -> int {
 // em cada clipe). NÃO exige mais handle (folga na fonte): quando um lado não tem footage
 // além da borda, o preview/export CONGELAM o frame da borda durante a mistura (o efeito se
 // vira sozinho). Limitado só pela duração dos 2 clipes e um teto de 1.5s por lado (D=3s).
+// segmento colado à DIREITA de ai na mesma trilha (o dono da transição do outro corte de ai)
+trans_next :: proc(ai: int) -> int {
+	if ai < 0 || ai >= nsegs do return -1
+	for i in 0 ..< nsegs {
+		if i == ai || !seg_ready(i) || segs[i].track != segs[ai].track do continue
+		if math.abs(segs[i].start - (segs[ai].start + segs[ai].dur)) < 0.02 do return i
+	}
+	return -1
+}
+// metade da transição do corte de `i`, valor CRU. Não chama seg_trans de propósito: ele
+// chamaria trans_max de volta e um corte pediria o do outro em recursão infinita.
+trans_half_raw :: proc(i: int) -> f32 {
+	if i < 0 || i >= nsegs || segs[i].trans <= 0.001 || seg_speed(i) != 1 do return 0
+	return segs[i].trans / 2
+}
 trans_max :: proc(bi: int) -> f32 {
 	a := trans_prev(bi)
 	if a < 0 do return 0
 	if seg_speed(a) != 1 || seg_speed(bi) != 1 do return 0 // v1: dissolver não combina com velocidade alterada
 	half := min(segs[a].dur, segs[bi].dur, f32(1.5)) // teto de 1.5s por lado; cabe no clipe mais curto
+	// a janela é CENTRADA no corte, então a metade que entra em cada clipe divide espaço com
+	// a metade da transição do OUTRO corte dele. Sem descontar, dois cortes seguidos com
+	// dissolver (clipe do meio com menos de 1s, o padrão D=1s já basta) sobrepunham as
+	// janelas dentro dele — e o trans_overlap só devolve UMA janela por instante, então o
+	// clipe do meio sumia do preview.
+	half = min(half, segs[a].dur - trans_half_raw(a), segs[bi].dur - trans_half_raw(trans_next(bi)))
 	return max(0, half * 2)
 }
 // transição válida do segmento bi (clampada). 0 se speed!=1 (v1 não combina os dois).
@@ -5737,15 +5784,22 @@ push_stack :: proc(stack: ^[MAX_UNDO]Snapshot, top: ^int, s: Snapshot) {
 }
 // redefine o baseline SEM criar entrada de undo (ex.: remover mídia — não é desfazível)
 history_baseline :: proc() { committed = snap_now(); committed_ok = true }
+
+// há uma interação em curso cujo resultado ainda NÃO virou passo de undo? Enquanto for true
+// o histórico fica congelado: nem grava (senão um arrasto empilha um snapshot por frame e o
+// MAX_UNDO joga fora o histórico real) nem desfaz (o do_undo mandaria o estado do MEIO do
+// arrasto p/ o redo e o `committed` sumiria dos dois lados).
+// O recorte do preview entra aqui porque NÃO passa por st.drag: escreve sg.crop_* direto. A
+// condição espelha a de escrita do draw_crop_editor, então um crop_drag pendurado se resolve
+// no primeiro frame com o botão solto — nunca trava o histórico para sempre.
+edit_in_progress :: proc() -> bool {
+	if st.drag != .None || ui_slider_active != -1 || player_seek_drag || bin_drag >= 0 do return true
+	return crop_drag >= 0 && rl.IsMouseButtonDown(.LEFT)
+}
 // chamado todo frame (fim do update): se segs mudou E não há interação em curso, grava
 history_tick :: proc() {
 	if !committed_ok { history_baseline(); return }
-	if st.drag != .None || ui_slider_active != -1 || player_seek_drag || bin_drag >= 0 do return
-	// o recorte do preview (crop_mode) NÃO passa por st.drag: escreve sg.crop_* direto, todo
-	// frame do arrasto. Sem esta guarda, 2s de arrasto empilham ~120 snapshots e o MAX_UNDO
-	// descarta o histórico real. Espelha a condição de escrita do draw_crop_editor — se
-	// crop_drag ficar pendurado, o botão solto já libera a gravação.
-	if crop_drag >= 0 && rl.IsMouseButtonDown(.LEFT) do return
+	if edit_in_progress() do return
 	if !snap_eq(committed) {
 		push_stack(&undo_stack, &undo_top, committed) // guarda o estado ANTERIOR
 		redo_top = 0                                   // nova edição invalida o redo
@@ -5763,6 +5817,11 @@ restore_after :: proc() { // conserta índices e o preview após aplicar um snap
 	seek_global(clamp(st.playhead, 0, timeline_dur()))
 }
 do_undo :: proc() {
+	// no meio de um arrasto o `committed` (a última edição CONCLUÍDA) ainda não foi
+	// empilhado — o history_tick está congelado. Desfazer aqui mandava o estado do meio do
+	// arrasto p/ o redo e aplicava o passo ANTERIOR ao committed: a edição concluída sumia
+	// do undo e do redo. Ignora até a interação assentar.
+	if edit_in_progress() do return
 	if undo_top == 0 { set_toast("Nada para desfazer"); return }
 	push_stack(&redo_stack, &redo_top, snap_now()) // estado atual vai p/ o redo
 	undo_top -= 1
@@ -5771,6 +5830,7 @@ do_undo :: proc() {
 	set_toast("Desfazer")
 }
 do_redo :: proc() {
+	if edit_in_progress() do return // idem do_undo
 	if redo_top == 0 { set_toast("Nada para refazer"); return }
 	push_stack(&undo_stack, &undo_top, snap_now())
 	redo_top -= 1
@@ -6378,7 +6438,9 @@ update :: proc() {
 	for i in 0 ..< nclips {
 		c := &clips[i]
 		if c.autoplace && !c.seg_made && media_ready(i) {
-			if add_seg(i, timeline_dur(), 0, c.dur) >= 0 do c.seg_made = true
+			tr := free_track_from(track_for_media(i, 0)) // respeita o cadeado da trilha
+			if tr < 0 { c.autoplace = false; set_toast("Trilha bloqueada"); continue }
+			if add_seg(i, timeline_dur(), 0, c.dur, tr) >= 0 do c.seg_made = true
 			else do c.autoplace = false // timeline lotada: desiste (o add_seg já avisou)
 		}
 	}
@@ -6463,7 +6525,13 @@ update :: proc() {
 			spd := seg_speed(drag_clip)
 			// limites: in_off >= 0 (nada antes da fonte), fim do vizinho à esquerda, dur > 0.
 			// in_off zera quando o início recua sg.in_off/speed na timeline.
-			lo := max(sg.start - sg.in_off / spd, left_wall(sg.track, drag_clip, sg.start + 0.001))
+			// imagem/TEXTO não têm fonte com fim: in_off não representa nada neles (o
+			// seg_src_span ignora), então a borda esquerda também estica livremente — só o
+			// vizinho limita. Sem esta exceção, `lo` virava o próprio sg.start (in_off = 0 no
+			// nascimento) e a borda esquerda só ENCURTAVA, nunca esticava — ao contrário da
+			// direita, que já tinha o caso.
+			wall := left_wall(sg.track, drag_clip, sg.start + 0.001)
+			lo := (src.is_img || src.is_text) ? wall : max(sg.start - sg.in_off / spd, wall)
 			// encaixa a borda nas bordas dos outros clipes (inclusive de OUTRAS trilhas) e
 			// acende a guia; se o clamp (fonte/vizinho) tirar do ponto, apaga a guia — ela só
 			// aparece onde a borda REALMENTE parou
@@ -6473,6 +6541,7 @@ update :: proc() {
 			sg.in_off += (new_start - sg.start) * spd
 			sg.start = new_start
 			sg.dur = old_end - new_start
+			clamp_fades(sg)
 		} else { // aparar a borda direita (mantém o início fixo)
 			// limites: fim da fonte e início do vizinho à direita. Imagem/TEXTO = still sem
 			// fim real: pode esticar livremente (cap alto), só respeitando o vizinho.
@@ -6484,6 +6553,7 @@ update :: proc() {
 			new_end := clamp(snapped, sg.start + 0.05, max_end)
 			if abs(new_end - snapped) > 0.0001 do snap_line = -1
 			sg.dur = new_end - sg.start
+			clamp_fades(sg)
 		}
 	} else if st.drag == .FadeIn && drag_clip >= 0 && drag_clip < nsegs {
 		sg := &segs[drag_clip]
@@ -8693,6 +8763,7 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 			}
 			nd = min(nd, limit - sg.start, (c.dur - sg.in_off) / sg.speed)
 			sg.dur = max(0.05, nd)
+			clamp_fades(sg) // acelerar encurta o clipe: o fade não pode ficar maior que ele
 		}
 		txt("Duração", x, y, 13, TEXT); txt(timecode(sg.dur), vx - 10, y, 13, MUTED); y += 24
 		txt("Muda o tom do áudio.", x, y, 11, MUTED)
@@ -8905,15 +8976,21 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 // segmento B cuja transição CENTRADA no corte cobre `time` na trilha t. A janela é
 // [B.start - D/2, B.start + D/2] (metade em cada clipe). -1 se nenhum.
 trans_overlap :: proc(t: int, time: f32) -> int {
+	// o corte MAIS PRÓXIMO, não o primeiro do array: com duas janelas ainda se tocando (o
+	// trans_max já as separa, mas a ordem do array não é a da timeline) devolver a errada
+	// misturava os clipes do corte vizinho.
+	best := -1; bd := f32(1e30)
 	for i in 0 ..< nsegs {
 		if !seg_ready(i) || segs[i].track != t do continue
 		d := seg_trans(i)
 		if d > 0 {
 			half := d/2
-			if time >= segs[i].start - half && time < segs[i].start + half do return i
+			if time >= segs[i].start - half && time < segs[i].start + half {
+				if dd := abs(time - segs[i].start); dd < bd { bd = dd; best = i }
+			}
 		}
 	}
-	return -1
+	return best
 }
 
 composite_video :: proc(fx, fy, fw, fh: f32, sel_box: bool) -> bool {

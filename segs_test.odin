@@ -421,3 +421,54 @@ tracks_content_h_soma_tudo :: proc(t: ^testing.T) {
 	testing.expect(t, t_feq(track_y(last) + th(last) + g_track_gap, tracks_content_h()),
 		"fim da última trilha == altura total do conteúdo (scroll depende disso)")
 }
+
+// as janelas de dissolver são CENTRADAS no corte, então dois cortes seguidos disputam o
+// espaço do clipe do meio. Sem descontar a transição do corte vizinho, o padrão de 1s em
+// ambos ja sobrepunha as duas janelas num clipe curto — e o trans_overlap só devolve UMA
+// janela por instante, então o clipe do meio sumia do preview.
+@(test)
+transicoes_vizinhas_nao_dividem_o_mesmo_espaco :: proc(t: ^testing.T) {
+	t_reset()
+	_ = add_seg(0, 0, 0, 2)      // A
+	b := add_seg(0, 2, 0, 0.8)   // B, o clipe curto do meio
+	c := add_seg(0, 2.8, 0, 2.2) // C
+	segs[b].trans = 1; segs[c].trans = 1 // 1s em cada corte = 0.5s por lado
+	hb := seg_trans(b) / 2
+	hc := seg_trans(c) / 2
+	testing.expect(t, hb > 0 && hc > 0, "os dois cortes continuam com dissolver")
+	testing.expect(t, hb + hc <= segs[b].dur + 0.001, "as duas metades cabem no clipe do meio")
+	// e o corte da esquerda também não pode invadir o clipe A alem do que sobra nele
+	testing.expect(t, hb <= segs[0].dur + 0.001, "a metade que entra em A cabe em A")
+}
+
+// o cadeado da trilha era furado pelo "+" da miniatura do bin, pelo botão Texto e pela
+// colocação automática do import — todos escolhiam a trilha sem consultar track_locked
+@(test)
+escolha_de_trilha_pula_as_bloqueadas :: proc(t: ^testing.T) {
+	t_reset()
+	track_locked[2] = true
+	testing.expect(t, free_track_from(2) == 0, "V3 travada: cai na primeira de vídeo livre")
+	track_locked[MAXV] = true
+	testing.expect(t, free_track_from(MAXV) == MAXV + 1, "áudio travado procura em OUTRA de áudio")
+	track_locked[0] = true; track_locked[1] = true
+	testing.expect(t, free_track_from(2) == -1, "todas as de vídeo travadas: sem destino")
+	nsegs = 0
+	bin_add_to_timeline(0)
+	testing.expect(t, nsegs == 0, "e o + do bin desiste em vez de furar o cadeado")
+}
+
+// o clamp fade_in+fade_out <= dur só existia no arrasto das alças: aparar, mudar a
+// velocidade e cortar encolhiam dur deixando o fade maior que o clipe, e aí a prévia
+// (seg_gain) e o export (afade) aplicavam curvas diferentes no mesmo trecho
+@(test)
+fades_reclampados_quando_o_clipe_encolhe :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10)
+	segs[a].fade_in = 3; segs[a].fade_out = 4
+	testing.expect(t, split_seg_at(a, 2), "corta em 2s")
+	for k in 0 ..< nsegs {
+		testing.expect(t, segs[k].fade_in <= segs[k].dur + 0.001, "fade_in cabe no pedaço")
+		testing.expect(t, segs[k].fade_out <= segs[k].dur + 0.001, "fade_out cabe no pedaço")
+		testing.expect(t, segs[k].fade_in + segs[k].fade_out <= segs[k].dur + 0.001, "e a soma dos dois também")
+	}
+}
