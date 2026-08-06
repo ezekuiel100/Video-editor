@@ -1361,10 +1361,20 @@ export_preview_worker :: proc() {
 // mesmo clipe os dois caminhos divergiam muito (no instante do corte a prévia mostrava preto
 // e o arquivo mostrava 50%). Dois `fade:alpha=1` em sequência multiplicam os fatores —
 // conferido rodando o ffmpeg —, logo isto reproduz a composição do preview.
+// O `enable` do fade preto de ENTRADA não é decoração: `fade=t=in:st=S` zera tudo que vem
+// ANTES de S, e o lead-in do dissolver (o clipe aparece meio segundo antes do próprio start)
+// cai justamente aí. Sem ele, um clipe com dissolver E fade de entrada sumia por completo na
+// primeira metade do dissolver no arquivo, enquanto a prévia o mostrava surgindo — ela isenta
+// o lead-in do fade preto (`if vt >= sg.start` no draw_seg_composited). Com `enable=gte(t,S)`
+// o filtro fica em passagem antes de S, que é exatamente a isenção da prévia. Só faz sentido
+// quando existe lead-in, daí o par com `din`.
 export_trans_fades :: proc(fb: ^strings.Builder, start2, tend, din, dout: f32, sstart, send, vin, vout: f32) {
 	if din  > 0.01 do fmt.sbprintf(fb, ",fade=t=in:st=%.3f:d=%.3f:alpha=1", start2, din)
 	if dout > 0.01 do fmt.sbprintf(fb, ",fade=t=out:st=%.3f:d=%.3f:alpha=1", tend-dout, dout)
-	if vin  > 0.01 do fmt.sbprintf(fb, ",fade=t=in:st=%.3f:d=%.3f:alpha=1", sstart, vin)
+	if vin  > 0.01 {
+		fmt.sbprintf(fb, ",fade=t=in:st=%.3f:d=%.3f:alpha=1", sstart, vin)
+		if din > 0.01 do fmt.sbprintf(fb, ":enable='gte(t\\,%.3f)'", sstart)
+	}
 	if vout > 0.01 do fmt.sbprintf(fb, ",fade=t=out:st=%.3f:d=%.3f:alpha=1", send-vout, vout)
 }
 
@@ -2184,6 +2194,7 @@ load_project :: proc(path: string) {
 	}
 	for s in segd {
 		f := s.fields
+		if !seg_line_ok(f[0], f[2], f[3], f[4]) do continue
 		// trilha clampada DENTRO da faixa do seu tipo (o valor do arquivo decide qual): vira
 		// índice de track_h/track_locked/... e nada adiante o valida — ver o fx acima
 		ltr := int(f[1])
@@ -2192,7 +2203,7 @@ load_project :: proc(path: string) {
 		if si < 0 do continue
 		sg := &segs[si]
 		sg.vol = f[5]; sg.muted = f[6] > 0.5; sg.fade_in = f[7]; sg.fade_out = f[8]
-		sg.scale = f[9]; sg.px = f[10]; sg.py = f[11]; sg.rot = f[12]; sg.opacity = f[13]; sg.speed = f[14] <= 0 ? 1 : f[14]; sg.trans = f[15]; sg.vfin = f[16]; sg.vfout = f[17]
+		sg.scale = f[9]; sg.px = f[10]; sg.py = f[11]; sg.rot = f[12]; sg.opacity = f[13]; sg.speed = (inv_bad(f[14]) || f[14] <= 0) ? 1 : f[14]; sg.trans = f[15]; sg.vfin = f[16]; sg.vfout = f[17]
 		sg.crop_x = f[18]; sg.crop_y = f[19]; sg.crop_w = f[20]; sg.crop_h = f[21]
 		sg.zoom_anim = f[22] > 0.5; sg.crop2_x = f[23]; sg.crop2_y = f[24]; sg.crop2_w = f[25]; sg.crop2_h = f[26] // zoom animado
 		sg.aonly = f[27] > 0.5 // áudio separado do vídeo (projetos antigos: 0 = normal)
@@ -3990,6 +4001,23 @@ dup_release :: proc(si: int) {
 	d^ = SegDup{}
 }
 
+// solta o canal da vista dup quando o pedido em voo foi CANCELADO antes de o worker olhar.
+// Os dois cancelamentos (troca de qualidade da prévia, remoção da mídia) zeram `dup_req_c` à
+// força; se isso pegar o pedido antes do worker, ele não entra no ramo e nunca sinaliza
+// `dup_ready` — o único ponto que baixava `dup_inflight`. A flag ficava presa em true e o
+// `dup_request` passava a retornar cedo PARA SEMPRE: nenhuma vista duplicada ganhava decoder
+// pelo resto da sessão. Se o worker JÁ tinha pegado o pedido, o spawn ainda chega, mas com o
+// carimbo velho — o `dup_sp_seq != dup_req_seq` do dup_poll o descarta e mata o órfão, então
+// soltar a flag aqui não faz nada ser adotado errado.
+dup_cancel_settle :: proc() -> bool {
+	if !intrinsics.atomic_load(&dup_inflight) do return false
+	if intrinsics.atomic_load(&dup_ready) do return false      // spawn pronto: quem resolve é o ramo de cima
+	if intrinsics.atomic_load(&dup_req_c) >= 0 do return false // pedido ainda de pé
+	dup_req_si = -1
+	intrinsics.atomic_store(&dup_inflight, false)
+	return true
+}
+
 // pede ao worker um decoder novo p/ a vista do seg si em `l` (1 spawn em voo por vez)
 dup_request :: proc(si: int, l: f32) {
 	if intrinsics.atomic_load(&dup_ready) do return       // spawn por adotar
@@ -4110,6 +4138,7 @@ dup_poll :: proc() {
 		intrinsics.atomic_store(&dup_inflight, false) // o canal volta a aceitar pedidos
 		intrinsics.atomic_store(&dup_ready, false) // por último: worker só reusa dup_buf depois daqui
 	}
+	_ = dup_cancel_settle()
 	for i in nsegs ..< MAX_SEGS do if seg_dup[i].ok || seg_dup[i].lon do dup_release(i)
 	// mata o decoder de vistas FORA DE USO (playhead saiu do trecho, ou o dono foi
 	// removido e a cópia virou dona) — senão ffmpeg ocioso acumula preso no pipe.
@@ -4668,6 +4697,37 @@ fx_wall_r :: proc(tr, mv: int, x: f32) -> f32 { // menor início > x (seg ou fx)
 	for k in 0 ..< nfx do if k != mv && fxsegs[k].track == tr && fxsegs[k].start >= x - 0.001 && fxsegs[k].start < w do w = fxsegs[k].start
 	return w
 }
+// menor início de EFEITO ≥ x na trilha. Igual ao fx_wall_r, mas SEM o laço de segmentos —
+// para quem já tem o próprio laço de segs e precisa excluir um deles: o `mv` do fx_wall_r
+// só filtra efeitos, então não existe forma de pedir "ignore este segmento" por lá.
+fx_wall_after :: proc(tr: int, x: f32) -> f32 {
+	w: f32 = 1e30
+	for k in 0 ..< nfx do if fxsegs[k].track == tr && fxsegs[k].start >= x && fxsegs[k].start < w do w = fxsegs[k].start
+	return w
+}
+
+// duração que o seg `si` pode assumir sem invadir o vizinho da direita, o clipe de efeito da
+// trilha, ou o fim da fonte (`src_left`). `want` é a duração pedida.
+// Isto mora fora do draw porque a versão inline chamava `fx_wall_r(track, -1, start+0.001)`:
+// o `x - 0.001` de dentro dele cancela o épsilon do chamador, a condição vira
+// `segs[i].start >= sg.start` e o PRÓPRIO segmento selecionado entrava como parede. O limite
+// dava `start`, a duração dava zero, e qualquer mexida no controle de velocidade encolhia o
+// clipe para o piso de 0,05 s — perdendo o trecho editado.
+speed_fit_dur :: proc(si: int, want, src_left: f32) -> f32 {
+	sg := segs[si]
+	limit := f32(1e9)
+	for j in 0 ..< nsegs {
+		if j == si || segs[j].track != sg.track do continue
+		if segs[j].start >= sg.start + 0.001 do limit = min(limit, segs[j].start)
+	}
+	// os clipes de EFEITO da trilha também são parede: todo o resto do código os trata como
+	// ocupantes exclusivos (overlaps_any, fx_free_start, o arrasto) e o check_invariants cobra
+	// isso ("efeito sobrepõe o seg"). Sem eles no limite, desacelerar esticava o clipe por
+	// cima de um efeito e o build de debug panicava.
+	limit = min(limit, fx_wall_after(sg.track, sg.start + 0.001))
+	return max(0.05, min(want, limit - sg.start, src_left))
+}
+
 fx_free_start :: proc(tr, mv: int, proposed, dur: f32) -> f32 { // empurra p/ a direita até um vão livre
 	s := max(0, proposed)
 	for _ in 0 ..< nsegs + nfx + 1 {
@@ -4761,6 +4821,20 @@ timeline_dur :: proc() -> f32 {
 INVARIANTS :: #config(INVARIANTS, ODIN_DEBUG)
 
 inv_bad :: proc(v: f32) -> bool { return v != v || abs(v) > 1e18 } // NaN ou ±inf
+
+// a linha de segmento do .ovp descreve um seg que o resto do programa aguenta?
+// O `.ovp` é texto: pode vir truncado, editado à mão, ou de uma sessão com mais mídias do que
+// MAX_CLIPS (import_media devolve -1 e nclips para de crescer, mas as linhas de seg continuam
+// citando os índices antigos). E `src` vira índice de `clips` dentro de seg_ready/seg_src sem
+// nenhuma checagem adiante — um valor fora da faixa derrubava o processo no primeiro frame,
+// levando junto o projeto que ainda não tinha sido salvo. As condições são as mesmas que o
+// check_invariants cobra de um seg vivo; recusar a linha inteira é melhor que inventar uma
+// fonte e cair depois, longe daqui.
+seg_line_ok :: proc(src, start, in_off, dur: f32) -> bool {
+	if inv_bad(src) || int(src) < 0 || int(src) >= nclips do return false
+	if inv_bad(start) || inv_bad(in_off) || inv_bad(dur) do return false
+	return dur > 0.01 && in_off >= -0.001
+}
 
 inv_fail :: proc(msg: string, args: ..any) -> ! {
 	fmt.eprintfln("---- INVARIANTE VIOLADA ----")
@@ -6474,7 +6548,12 @@ update :: proc() {
 		// .Done da exportação abre sozinho, podendo cair no meio de um arrasto do recorte:
 		// a alça ficava presa e o próximo clique-e-arraste em qualquer lugar reescrevia a
 		// região do segmento. Só solta a alça; o modo em si continua ligado.
-		crop_drag = -1; crop_grab = {}
+		// MENOS sob o modal de recorte: lá o crop_rect_editor roda DENTRO do draw_crop_modal e
+		// é o dono legítimo do crop_drag. Como o update roda antes do draw, zerar aqui todo
+		// frame matava o arrasto do próprio modal — a alça era armada no frame do clique
+		// (IsMouseButtonPressed) e já chegava zerada no seguinte, então o retângulo não se
+		// movia e o enquadramento só dava para desistir.
+		if modal != .Crop { crop_drag = -1; crop_grab = {} }
 		st.drag = .None; ui_slider_active = -1; player_seek_drag = false; return
 	}
 
@@ -8945,19 +9024,8 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 		// limitada pelo próximo clipe da trilha e pelo fim da fonte.
 		if changed {
 			span := sg.dur * old_speed
-			nd := span / sg.speed
-			limit := f32(1e9)
-			for j in 0 ..< nsegs {
-				if j == selected || segs[j].track != sg.track do continue
-				if segs[j].start >= sg.start + 0.001 do limit = min(limit, segs[j].start)
-			}
-			// os clipes de EFEITO da trilha também são parede: todo o resto do código os trata
-			// como ocupantes exclusivos (overlaps_any, fx_free_start, o arrasto) e o
-			// check_invariants cobra isso ("efeito sobrepõe o seg"). Sem eles no limite,
-			// desacelerar esticava o clipe por cima de um efeito e o build de debug panicava.
-			limit = min(limit, fx_wall_r(sg.track, -1, sg.start + 0.001))
-			nd = min(nd, limit - sg.start, (c.dur - sg.in_off) / sg.speed)
-			sg.dur = max(0.05, nd) // o fade é reajustado quando o arrasto assentar (fades_settle)
+			// o fade é reajustado quando o arrasto assentar (fades_settle)
+			sg.dur = speed_fit_dur(selected, span / sg.speed, (c.dur - sg.in_off) / sg.speed)
 		}
 		txt("Duração", x, y, 13, TEXT); txt(timecode(sg.dur), vx - 10, y, 13, MUTED); y += 24
 		txt("Muda o tom do áudio.", x, y, 11, MUTED)

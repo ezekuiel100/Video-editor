@@ -521,3 +521,34 @@ export_emite_dissolver_E_fade_preto_encadeados :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(g, "fade=t=in:st=3.500:d=1.000:alpha=1"), "rampa do DISSOLVER, centrada no corte")
 	testing.expect(t, strings.contains(g, "fade=t=in:st=4.000:d=1.000:alpha=1"), "rampa do FADE PRETO, na borda do clipe")
 }
+
+// `fade=t=in:st=S` zera TUDO que vem antes de S. Com dissolver + fade preto de entrada no
+// mesmo clipe, a rampa do fade preto (st = start do clipe) apagava o lead-in do dissolver —
+// o clipe que entra ficava 100% invisível na primeira metade do dissolver no arquivo, enquanto
+// a prévia o mostrava surgindo até 50% (ela isenta o lead-in: `if vt >= sg.start`). O `enable`
+// põe o filtro em passagem antes de S, que é exatamente a isenção da prévia.
+@(test)
+fade_preto_de_entrada_nao_apaga_o_lead_in_do_dissolver :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)  // A
+	b := add_seg(1, 4, 0, 3) // B, encostado em A
+	segs[b].trans = 1        // dissolver de 1s -> rampa em 3.5, o lead-in é [3.5, 4)
+	segs[b].vfin  = 1        // fade preto de 1s -> rampa em 4.0
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "fade=t=in:st=4.000:d=1.000:alpha=1:enable='gte(t\\,4.000)'"),
+		"a rampa do fade preto fica em passagem durante o lead-in")
+	testing.expect(t, strings.contains(g, "fade=t=in:st=3.500:d=1.000:alpha=1,"),
+		"e a do dissolver continua sem enable (não há nada antes dela)")
+}
+
+// sem dissolver não existe lead-in, e aí o enable seria ruído no grafo.
+@(test)
+fade_preto_sozinho_nao_ganha_enable :: proc(t: ^testing.T) {
+	t_export_reset()
+	b := add_seg(0, 0, 0, 5)
+	segs[b].vfin = 1
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "fade=t=in:st=0.000:d=1.000:alpha=1"), "a rampa sai")
+	// (o `enable` do overlay sai em todo seg — aqui só interessa o do fade)
+	testing.expect(t, !strings.contains(g, "alpha=1:enable="), "mas sem enable")
+}

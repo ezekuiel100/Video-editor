@@ -533,3 +533,78 @@ deslocamento_vertical_e_em_linhas_nao_em_indices :: proc(t: ^testing.T) {
 	testing.expect(t, !is_audio_track(track_shift_rows(0, -5)), "vídeo continua vídeo")
 	testing.expect(t, is_audio_track(track_shift_rows(MAXV, 5)), "áudio continua áudio")
 }
+
+// O controle de velocidade do inspetor procurava a parede da direita com
+// `fx_wall_r(track, -1, start+0.001)`. O `x - 0.001` de dentro do fx_wall_r cancela o épsilon
+// do chamador, a condição do laço de SEGMENTOS vira `segs[i].start >= sg.start`, e o próprio
+// segmento selecionado entrava como parede — o `mv` do fx_wall_r só filtra efeitos, não há
+// como pedir "ignore este seg" por lá. Resultado: limite = start, duração = 0, e QUALQUER
+// mexida no slider ou nos presets encolhia o clipe para o piso de 0,05 s.
+@(test)
+velocidade_nao_deixa_o_clipe_ser_parede_de_si_mesmo :: proc(t: ^testing.T) {
+	for start in ([]f32{ 0, 1, 7.3, 123.456, 3599.5 }) {
+		t_reset()
+		si := add_seg(0, start, 0, 10) // sozinho na trilha: nada à direita para barrar
+		d := speed_fit_dur(si, 5, 100) // 2x: 10s de timeline viram 5s
+		testing.expectf(t, t_feq(d, 5), "start=%.3f: a duração pedida passa inteira (deu %.4f)", start, d)
+	}
+}
+
+// ...e o que a chamada original queria de fato continua valendo.
+@(test)
+velocidade_para_no_efeito_no_vizinho_e_no_fim_da_fonte :: proc(t: ^testing.T) {
+	t_reset()
+	si := add_seg(0, 0, 0, 10)
+	fxsegs[0] = FxSeg{ track = 0, start = 6, dur = 2 }; nfx = 1
+	testing.expect(t, t_feq(speed_fit_dur(si, 20, 100), 6), "o clipe de efeito da trilha é parede")
+	nfx = 0
+	_ = add_seg(1, 8, 0, 5)
+	testing.expect(t, t_feq(speed_fit_dur(si, 20, 100), 8), "o segmento vizinho é parede")
+	testing.expect(t, t_feq(speed_fit_dur(si, 20, 3), 3), "e o que resta da fonte também")
+	testing.expect(t, t_feq(speed_fit_dur(si, 20, 0), 0.05), "o piso de 0,05s continua sendo o piso")
+}
+
+// `dup_req_c` é zerado à força pela troca de qualidade da prévia e pela remoção de mídia.
+// Se isso pegar um pedido ANTES de o worker olhar, ele nunca sinaliza `dup_ready` — o único
+// ponto que baixava `dup_inflight`. A flag ficava presa e o dup_request retornava cedo pelo
+// RESTO DA SESSÃO: nenhuma vista duplicada ganhava decoder de novo.
+@(test)
+canal_da_vista_dup_se_solta_quando_o_pedido_e_cancelado :: proc(t: ^testing.T) {
+	t_reset()
+	_ = add_seg(0, 0, 0, 10)
+	dup_ready = false; dup_inflight = false; dup_req_c = -1; dup_req_si = -1
+	dup_request(0, 1)
+	testing.expect(t, dup_inflight && dup_req_c == 0, "o pedido subiu e ocupou o canal")
+	testing.expect(t, !dup_cancel_settle(), "com o pedido de pé, nada é solto")
+	dup_req_c = -1 // o cancelamento (stream_quality_sync / remove_media) chega aqui
+	testing.expect(t, dup_cancel_settle(), "pedido cancelado: o canal se solta")
+	testing.expect(t, !dup_inflight && dup_req_si == -1, "e volta a aceitar pedidos")
+	dup_request(0, 1)
+	testing.expect(t, dup_inflight && dup_req_c == 0, "o pedido seguinte passa (era isto que morria)")
+	// spawn pronto por adotar: quem resolve é o dup_poll, não isto
+	dup_req_c = -1; dup_ready = true
+	testing.expect(t, !dup_cancel_settle(), "com dup_ready em pé, não rouba o trabalho do dup_poll")
+	dup_ready = false; dup_inflight = false; dup_req_c = -1; dup_req_si = -1
+}
+
+// o .ovp é texto e pode vir truncado, editado à mão, ou de uma sessão com mais mídias do que
+// MAX_CLIPS. `src` vira índice de `clips` dentro de seg_ready/seg_src sem checagem nenhuma
+// adiante: fora da faixa, o processo caía no primeiro frame levando o projeto não salvo.
+@(test)
+linha_de_seg_do_projeto_recusa_o_que_derruba_o_programa :: proc(t: ^testing.T) {
+	t_reset() // nclips = 2
+	testing.expect(t, seg_line_ok(0, 0, 0, 5), "linha normal passa")
+	testing.expect(t, seg_line_ok(1, 12.5, 3, 0.5), "outra linha normal passa")
+	testing.expect(t, !seg_line_ok(-1, 0, 0, 5), "fonte negativa é recusada")
+	testing.expect(t, !seg_line_ok(2, 0, 0, 5), "fonte >= nclips é recusada")
+	testing.expect(t, !seg_line_ok(f32(MAX_CLIPS + 7), 0, 0, 5), "muito além do fim também")
+	testing.expect(t, !seg_line_ok(0, 0, 0, 0), "duração zero é recusada (check_invariants cobra dur > 0.01)")
+	testing.expect(t, !seg_line_ok(0, 0, 0, -3), "duração negativa também")
+	testing.expect(t, !seg_line_ok(0, 0, -1, 5), "in_off negativo também")
+	nan := f32(0); nan = nan / nan
+	testing.expect(t, !seg_line_ok(nan, 0, 0, 5), "NaN na fonte")
+	testing.expect(t, !seg_line_ok(0, nan, 0, 5), "NaN no start")
+	testing.expect(t, !seg_line_ok(0, 0, nan, 5), "NaN no in_off")
+	testing.expect(t, !seg_line_ok(0, 0, 0, nan), "NaN na duração")
+	testing.expect(t, !seg_line_ok(0, 1e30, 0, 5), "infinito no start")
+}
