@@ -114,7 +114,7 @@ span_conserva_a_duracao :: proc(t: ^testing.T) {
 
 // ---------- montagem do comando (export_build_args em modo dry) ----------
 // dry = sem disco e sem GL; o comando montado é o MESMO do export de verdade, então dá
-// p/ conferir o texto do grafo aqui. As fontes são falsas (path/dur/has_audio), o que
+// p/ conferir o texto do grafo aqui. As fontes são falsas (path/dur/src_audio), o que
 // basta: nada nesta montagem abre os arquivos.
 // Nestes cenários (sem texto nem distorção) o índice do input do ffmpeg coincide com o
 // índice do segmento, então "[1:v]" é o segundo add_seg.
@@ -127,7 +127,7 @@ t_export_reset :: proc() {
 		clips[i] = Clip{}
 		clips[i].probed = true
 		clips[i].dur = 100
-		clips[i].has_audio = true
+		clips[i].src_audio = true // a FONTE tem faixa de áudio — é o que o export consulta
 		clips[i].vw = 1920; clips[i].vh = 1080
 	}
 	clips[0].path = "A.mp4"; clips[1].path = "B.mp4"; clips[2].path = "C.mp4"
@@ -444,4 +444,32 @@ progress_line_separa_progresso_de_erro :: proc(t: ^testing.T) {
 	testing.expect(t, !progress_line("saida.mp4: Invalid argument"), "nem erro com caminho antes")
 	testing.expect(t, !progress_line(""), "linha vazia não é progresso")
 	testing.expect(t, !progress_line("=x"), "sem chave antes do = não é progresso")
+}
+
+// O export monta [N:a] a partir da FONTE ORIGINAL, então nunca dependeu da extração de áudio
+// do player — mas consultava c.has_audio, que é "existe um rl.Music carregado agora". Esse
+// campo é false durante toda a extração (que no caminho de cache só começa depois de o clipe
+// já aparecer PRONTO no bin, e pode levar dezenas de segundos) e para sempre se ela falhar.
+// Exportar nesse intervalo entregava um arquivo válido e MUDO, sem erro nem toast — e a
+// guarda de recusa não pega, porque segs_importing() olha `probed`, que já é true.
+@(test)
+export_monta_audio_mesmo_com_a_extracao_pendente :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	clips[0].has_audio = false // player ainda sem rl.Music: a extração não terminou
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "[0:a]"), "a cadeia de áudio da fonte entra no grafo")
+	testing.expect(t, strings.contains(g, "[aout]"), "e o amix produz a saída de áudio")
+}
+
+// e o contrário continua valendo: fonte SEM faixa de áudio não vira cadeia nenhuma
+@(test)
+export_nao_inventa_audio_para_fonte_muda :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	clips[0].src_audio = false // arquivo sem stream de áudio (o probe respondeu isso)
+	clips[0].has_audio = true  // e o estado do player não pode mandar aqui
+	_, g := t_build(t)
+	testing.expect(t, !strings.contains(g, "[0:a]"), "sem faixa de áudio na fonte, sem cadeia")
+	testing.expect(t, !strings.contains(g, "[aout]"), "e sem saída de áudio")
 }

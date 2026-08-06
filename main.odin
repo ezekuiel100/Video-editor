@@ -975,7 +975,12 @@ Clip :: struct {
 	rsp_done: bool, // atômico: novo decoder pronto, 1º frame em fbuf
 	// áudio (WAV em disco; funciona p/ qualquer duração)
 	music:     rl.Music,
-	has_audio: bool,
+	has_audio: bool, // existe um rl.Music CARREGADO AGORA. É estado do player: oscila a cada
+	                 // troca de janela (head -> chunk -> completo) e nasce false. NÃO use p/
+	                 // decidir se a mídia tem som — use src_audio.
+	src_audio: bool, // a FONTE tem faixa de áudio. Vem do probe, publicado antes de `probed`,
+	                 // e não muda mais. É o que o export precisa: ele monta [N:a] a partir do
+	                 // arquivo ORIGINAL e não depende de extração nenhuma.
 	is_img:    bool, // imagem estática (1 frame, sem áudio, duração livre na timeline)
 	is_audio:  bool, // mídia só-áudio (mp3/wav/...): sem vídeo, vai p/ trilha de áudio
 	mix_on:    bool, // (main) o music deste clipe está tocando como SECUNDÁRIO (mix)
@@ -1507,7 +1512,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	for i in 0 ..< nsegs {
 		if !seg_ready(i) do continue
 		c := &clips[segs[i].src]
-		if !want_video && !c.has_audio do continue // MP3: só fontes com áudio viram input
+		if !want_video && !c.src_audio do continue // MP3: só fontes com áudio viram input
 		if c.is_text { // overlay de texto = PNG estático (como imagem); pula se o render falhou
 			if text_png[i] == "" do continue
 			append(&args, "-loop", "1", "-framerate", "30", "-t", fmt.tprintf("%.3f", segs[i].dur + thead[i] + ttail[i]))
@@ -1765,7 +1770,13 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	for i in 0 ..< nsegs {
 		if seg_inp[i] < 0 do continue
 		c := &clips[segs[i].src]
-		if !c.has_audio || segs[i].muted || track_muted[segs[i].track] do continue
+		// src_audio (o arquivo tem faixa de áudio), NÃO has_audio (existe um rl.Music
+		// carregado agora): este último é estado do PLAYER e é false durante toda a extração,
+		// que só termina dezenas de segundos depois de o clipe aparecer pronto no bin — e
+		// para sempre, se a extração falhar. Exportar nesse intervalo entregava um arquivo
+		// válido e MUDO, sem erro nem aviso. O ffmpeg do export lê a fonte original, então
+		// não depende da extração para nada.
+		if !c.src_audio || segs[i].muted || track_muted[segs[i].track] do continue
 		sg := segs[i]
 		vv := sg.vol <= 0 ? 1 : sg.vol
 		sp := sg.speed <= 0 ? 1 : sg.speed
@@ -2680,6 +2691,21 @@ video_probe :: proc(path: string) -> (dur: f32, codec: string, vw, vh: i32, fps:
 	return probe_parse(string(out))
 }
 
+// a fonte tem faixa de áudio? Uma pergunta sobre o ARQUIVO, respondida uma vez no import e
+// guardada em c.src_audio. Saída vazia = sem stream de áudio (o -select_streams a:0 não casa
+// nada). Erro do ffprobe também devolve false: o export apenas não emite a cadeia de áudio,
+// que é o mesmo que acontecia antes deste campo existir.
+probe_has_audio :: proc(path: string) -> bool {
+	_, out, _, e := os.process_exec(os.Process_Desc{
+		command = []string{
+			"ffprobe", "-v", "error", "-select_streams", "a:0",
+			"-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", path,
+		},
+	}, context.temp_allocator)
+	if e != nil do return false
+	return len(strings.trim_space(string(out))) > 0
+}
+
 // fps a partir de "num/den" (avg_frame_rate/r_frame_rate do ffprobe) ou de um número solto.
 // "0/0" (VFR sem info) e denominador zero devolvem 0.
 parse_fps :: proc(s: string) -> f32 {
@@ -3131,6 +3157,7 @@ import_worker :: proc(c: ^Clip) {
 		c.is_audio = true
 		c.dur = d
 		c.streaming = false
+		c.src_audio = true // mídia só-áudio: por definição (antes de `probed`, que a main lê)
 		intrinsics.atomic_store(&c.probed, true) // já aparece no bin
 		if intrinsics.atomic_load(&c.stop) do return // fechando: não dispara mais ffmpeg (escaparia do job)
 		c.nparts = 1
@@ -3148,6 +3175,11 @@ import_worker :: proc(c: ^Clip) {
 	c.dur = dur
 	c.vcodec = strings.clone(codec)
 	c.vw = vw; c.vh = vh // publicado antes do store de `probed`: a main thread lê p/ autodetectar proj_ar
+	// AQUI, antes dos dois caminhos (cache e streaming) publicarem `probed`: quando o clipe
+	// aparece pronto para o resto do app, o export já sabe se ele tem som. Ligar isso ao
+	// c.has_audio (que só vira true quando a extração termina, dezenas de segundos depois no
+	// caminho de cache) deixava exportar um MP4 válido e MUDO nesse intervalo.
+	c.src_audio = probe_has_audio(c.path)
 	// fps que o cache usaria: SEGUE a fonte, teto 60. Uma gravação 60fps tocava a 30
 	// (o cache forçava -r 30) e o movimento fino "tremia"/judder; agora toca nativo.
 	// 24/25/30 seguem como são (menos RAM). Probe falho -> DEC_FPS.
