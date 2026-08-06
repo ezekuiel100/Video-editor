@@ -1354,9 +1354,18 @@ export_preview_worker :: proc() {
 }
 
 // acrescenta os fades de alpha da transição (dissolver) ao fim da cadeia do clip no export
-export_trans_fades :: proc(fb: ^strings.Builder, start2, tend, din, dout: f32) {
-	if din > 0.01  do fmt.sbprintf(fb, ",fade=t=in:st=%.3f:d=%.3f:alpha=1", start2, din)
+// As DUAS rampas, encadeadas — não a maior das duas. O dissolver e o fade preto têm origens
+// diferentes: o dissolver é CENTRADO no corte (começa em start2 = start - d/2) e o fade preto
+// começa na borda do CLIPE. A prévia aplica os dois e MULTIPLICA (op = opacity × p × bfade);
+// o export escolhia um `max` e emitia uma rampa só, então com dissolver + fade de entrada no
+// mesmo clipe os dois caminhos divergiam muito (no instante do corte a prévia mostrava preto
+// e o arquivo mostrava 50%). Dois `fade:alpha=1` em sequência multiplicam os fatores —
+// conferido rodando o ffmpeg —, logo isto reproduz a composição do preview.
+export_trans_fades :: proc(fb: ^strings.Builder, start2, tend, din, dout: f32, sstart, send, vin, vout: f32) {
+	if din  > 0.01 do fmt.sbprintf(fb, ",fade=t=in:st=%.3f:d=%.3f:alpha=1", start2, din)
 	if dout > 0.01 do fmt.sbprintf(fb, ",fade=t=out:st=%.3f:d=%.3f:alpha=1", tend-dout, dout)
+	if vin  > 0.01 do fmt.sbprintf(fb, ",fade=t=in:st=%.3f:d=%.3f:alpha=1", sstart, vin)
+	if vout > 0.01 do fmt.sbprintf(fb, ",fade=t=out:st=%.3f:d=%.3f:alpha=1", send-vout, vout)
 }
 
 // EFEITOS DE COR no export: espelha o BULGE_FS (brilho/contraste/saturação -> eq; visual
@@ -1623,13 +1632,14 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			sg := segs[i]
 			cc := &clips[sg.src]
 			hd := thead[i]; tl := ttail[i]                        // esticões da transição (cabeça/cauda)
-			fin := max(tfin[i], sg.vfin); fout := max(tfout[i], sg.vfout) // fades (dissolver OU fade preto)
+			fin := tfin[i]; fout := tfout[i] // dissolver; o fade PRETO (vfin/vfout) vai à parte —
+			                                 // são rampas independentes, com origens diferentes
 			start2 := sg.start - hd              // começa `hd` s antes (metade do dissolver de entrada)
 			tend := sg.start + sg.dur + tl       // termina `tl` s depois (metade do dissolver de saída)
 			if cc.is_text { // PNG full-canvas já posicionado: overlay em 0:0
 				fmt.sbprintf(&fb, "[%d:v]trim=0:%.3f,setpts=PTS-STARTPTS+%.3f/TB,scale=%d:%d,format=rgba",
 					seg_inp[i], sg.dur+hd+tl, start2, W, H)
-				export_trans_fades(&fb, start2, tend, fin, fout)
+				export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
 				fmt.sbprintf(&fb, "[v%d];", vc)
 				nb := fmt.tprintf("c%d", vc)
 				fmt.sbprintf(&fb, "[%s][v%d]overlay=0:0:enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
@@ -1743,7 +1753,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				fmt.sbprintf(&fb, ",rotate=%.5f:c=none:ow=rotw(%.5f):oh=roth(%.5f)", rad, rad, rad)
 			}
 			if op < 0.999 do fmt.sbprintf(&fb, ",colorchannelmixer=aa=%.3f", op)
-			export_trans_fades(&fb, start2, tend, fin, fout)
+			export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
 			fmt.sbprintf(&fb, "[v%d];", vc)
 			nb := fmt.tprintf("c%d", vc)
 			fmt.sbprintf(&fb, "[%s][v%d]overlay=x='(main_w-overlay_w)/2+(%.4f)*main_w':y='(main_h-overlay_h)/2+(%.4f)*main_h':enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
@@ -2140,7 +2150,13 @@ load_project :: proc(path: string) {
 				e := FxSeg{ kind = int(g(ft,0)), start = g(ft,1), dur = g(ft,2) }
 				if len(ft) >= 10 { e.amount=g(ft,3); e.radius=g(ft,4); e.cx=g(ft,5); e.cy=g(ft,6); e.wobble=g(ft,7); e.speed=g(ft,8); e.angle=g(ft,9) }
 				else do fx_defaults(&e) // formato antigo (só kind/start/dur): usa padrões
-				e.track = len(ft) >= 11 ? int(g(ft,10)) : -1 // sem track no arquivo: sentinela; vira o topo depois de restaurar g_nv
+				// sem track no arquivo: sentinela (-1), vira o topo depois de restaurar g_nv.
+				// COM track, clampa: este é o único campo do .ovp que vira ÍNDICE DE ARRAY
+				// (track_h/track_locked/track_muted/track_hidden, todos [MAXTRACKS]), e o
+				// conserto lá embaixo só trata o caso < 0 — um valor fora da faixa, de arquivo
+				// editado à mão ou corrompido, matava o editor no primeiro draw com bounds
+				// check. O layout/trackh/res ao lado já são validados pelo mesmo motivo.
+				e.track = len(ft) >= 11 ? clamp(int(g(ft,10)), 0, MAXV-1) : -1
 				append(&fxd, e)
 			}
 		}
@@ -2168,7 +2184,11 @@ load_project :: proc(path: string) {
 	}
 	for s in segd {
 		f := s.fields
-		si := add_seg(int(f[0]), f[2], f[3], f[4], int(f[1]))
+		// trilha clampada DENTRO da faixa do seu tipo (o valor do arquivo decide qual): vira
+		// índice de track_h/track_locked/... e nada adiante o valida — ver o fx acima
+		ltr := int(f[1])
+		ltr = is_audio_track(ltr) ? clamp(ltr, MAXV, MAXV+MAXA-1) : clamp(ltr, 0, MAXV-1)
+		si := add_seg(int(f[0]), f[2], f[3], f[4], ltr)
 		if si < 0 do continue
 		sg := &segs[si]
 		sg.vol = f[5]; sg.muted = f[6] > 0.5; sg.fade_in = f[7]; sg.fade_out = f[8]
@@ -6108,7 +6128,22 @@ take_screenshot :: proc(out: string) {
 	}
 }
 
+// estado da janela ao ENTRAR na tela cheia, p/ devolvê-lo na saída. O código antigo
+// re-maximizava sempre, com a premissa (falsa) de que a janela é "SEMPRE maximizada": o botão
+// de restaurar da barra de topo e o arrasto da barra deixam a janela em tamanho reduzido, e
+// uma ida e volta à tela cheia jogava fora o tamanho e a posição escolhidos pelo usuário.
+fs_was_max: bool = true // sem registro (não deveria acontecer), mantém o comportamento antigo
+fs_prev_pos: rl.Vector2
+fs_prev_w, fs_prev_h: i32
+
 toggle_fullscreen_preview :: proc() {
+	if !fullscreen_preview { // ENTRANDO: guarda o que a janela era, ANTES do toggle mexer nela
+		fs_was_max = rl.IsWindowMaximized()
+		if !fs_was_max {
+			fs_prev_pos = rl.GetWindowPosition()
+			fs_prev_w = i32(rl.GetScreenWidth()); fs_prev_h = i32(rl.GetScreenHeight())
+		}
+	}
 	fullscreen_preview = !fullscreen_preview
 	// tela cheia SEM borda que cobre o monitor INTEIRO (inclusive a barra de tarefas do
 	// Windows). O ToggleFullscreen deixava a barra de tarefas aparecer no rodapé.
@@ -6118,11 +6153,18 @@ toggle_fullscreen_preview :: proc() {
 	} else {
 		// ao voltar pro modo janela, o ToggleBorderlessWindowed devolve a borda/barra de
 		// título NATIVAS do Windows E restaura um tamanho errado (menor que a tela, sobra
-		// desktop embaixo). A janela foi criada SEM decoração e SEMPRE maximizada, então:
-		// re-aplica "sem decoração" e re-maximiza limpo p/ voltar a preencher a tela.
+		// desktop embaixo). A janela nasce SEM decoração, então: re-aplica "sem decoração",
+		// limpa o estado inconsistente e devolve o que ela ERA antes da tela cheia.
 		rl.SetWindowState({ .WINDOW_UNDECORATED })
-		rl.RestoreWindow()  // limpa estado maximizado inconsistente deixado pelo toggle
-		rl.MaximizeWindow() // re-maximiza (estado padrão do app), preenchendo a tela
+		rl.RestoreWindow() // limpa estado maximizado inconsistente deixado pelo toggle
+		if fs_was_max {
+			rl.MaximizeWindow()
+		} else if fs_prev_w > 0 && fs_prev_h > 0 { // devolve tamanho E posição escolhidos
+			rl.SetWindowSize(fs_prev_w, fs_prev_h)
+			rl.SetWindowPosition(i32(fs_prev_pos.x), i32(fs_prev_pos.y))
+		} else {
+			rl.MaximizeWindow()
+		}
 		rl.ShowCursor(); fs_vol_drag = false; player_seek_drag = false // garante o cursor de volta
 	}
 }
@@ -9535,8 +9577,13 @@ draw_crop_modal :: proc(sw, sh: f32) {
 	tc :: proc(s: f32) -> cstring { v := int(s + 0.001); return rl.TextFormat("%d:%02d", v/60, v%60) }
 	tcw := f32(96)
 	sb := rl.Rectangle{ pb.x + 42, tp_y + 10, cw - 44 - 42 - tcw, 5 }
-	if rl.IsMouseButtonPressed(.LEFT) && hovered({ sb.x-4, tp_y, sb.width+8, 24 }) do crop_play = false // scrub pausa
-	if !crop_play && rl.IsMouseButtonDown(.LEFT) && hovered({ sb.x-4, tp_y, sb.width+8, 24 }) {
+	// `crop_drag < 0`: com uma alça do recorte agarrada o cursor pode sair do quadro (o
+	// crop_rect_editor clampa o mouse, não solta o arrasto) e cruzar esta faixa, que começa
+	// 8px abaixo da borda de baixo. Sem a guarda, arrastar a alça inferior para fora saltava
+	// a reprodução do modal para outro ponto do clipe no meio do enquadramento — e com zoom
+	// animado isso troca o quadro de referência que está sendo editado.
+	if crop_drag < 0 && rl.IsMouseButtonPressed(.LEFT) && hovered({ sb.x-4, tp_y, sb.width+8, 24 }) do crop_play = false // scrub pausa
+	if crop_drag < 0 && !crop_play && rl.IsMouseButtonDown(.LEFT) && hovered({ sb.x-4, tp_y, sb.width+8, 24 }) {
 		crop_play_t = clamp((rl.GetMousePosition().x - sb.x)/sb.width, 0, 1) * dur
 	}
 	rl.DrawRectangleRounded(sb, 1, 4, LINE)

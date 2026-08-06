@@ -482,7 +482,7 @@ export_nao_inventa_audio_para_fonte_muda :: proc(t: ^testing.T) {
 @(test)
 zoompan_anima_sobre_o_clipe_nao_sobre_o_stream :: proc(t: ^testing.T) {
 	t_export_reset()
-	a := add_seg(0, 0, 0, 4)  // A
+	_ = add_seg(0, 0, 0, 4)   // A
 	b := add_seg(1, 4, 0, 3)  // B, encostado em A
 	segs[b].trans = 1         // dissolver de 1s no corte A|B -> hd = 0.5 em B
 	segs[b].zoom_anim = true
@@ -502,4 +502,22 @@ zoompan_anima_sobre_o_clipe_nao_sobre_o_stream :: proc(t: ^testing.T) {
 	segs[c].crop2_x = 0.3; segs[c].crop2_y = 0.3; segs[c].crop2_w = 0.3; segs[c].crop2_h = 0.3
 	_, g2 := t_build(t)
 	testing.expect(t, strings.contains(g2, "clip((on/30-0.0000)/4.0000"), "sem transição: sem deslocamento, divisor = dur")
+}
+
+// Dissolver e fade preto são rampas INDEPENDENTES e com origens diferentes: o dissolver é
+// centrado no corte (começa em start - d/2) e o fade preto começa na borda do clipe. A prévia
+// aplica os dois e multiplica; o export escolhia `max(tfin, vfin)` e emitia UMA rampa só, e
+// aí os dois caminhos divergiam (no instante do corte a prévia mostrava preto e o arquivo,
+// 50%). Dois fade:alpha=1 encadeados multiplicam os fatores, então emitir os dois casa.
+@(test)
+export_emite_dissolver_E_fade_preto_encadeados :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)  // A
+	b := add_seg(1, 4, 0, 3) // B, encostado em A
+	segs[b].trans = 1        // dissolver de 1s no corte -> rampa em start-0.5, dur 1
+	segs[b].vfin  = 1        // fade preto de 1s        -> rampa em start,     dur 1
+	testing.expect(t, t_feq(seg_trans(b), 1), "o dissolver de 1s vale (senão o teste não exercita nada)")
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "fade=t=in:st=3.500:d=1.000:alpha=1"), "rampa do DISSOLVER, centrada no corte")
+	testing.expect(t, strings.contains(g, "fade=t=in:st=4.000:d=1.000:alpha=1"), "rampa do FADE PRETO, na borda do clipe")
 }
