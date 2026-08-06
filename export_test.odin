@@ -473,3 +473,33 @@ export_nao_inventa_audio_para_fonte_muda :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(g, "[0:a]"), "sem faixa de áudio na fonte, sem cadeia")
 	testing.expect(t, !strings.contains(g, "[aout]"), "e sem saída de áudio")
 }
+
+// O zoompan roda sobre o STREAM, que numa transição começa `hd` s ANTES do clipe (pré-roll
+// do dissolver) e termina `tl` s depois — e ainda pode levar tpad quando a fonte não tem
+// folga. Com a curva sendo `on/N` sobre esse stream, a animação saía adiantada em hd e
+// esticada por (dur+hd+tl)/dur, e o smoothstep passava de 1 (deixando de ser monótono: o
+// zoom VOLTAVA no fim). A curva tem que ser a mesma do seg_crop_at: clamp((t-start)/dur,0,1).
+@(test)
+zoompan_anima_sobre_o_clipe_nao_sobre_o_stream :: proc(t: ^testing.T) {
+	t_export_reset()
+	a := add_seg(0, 0, 0, 4)  // A
+	b := add_seg(1, 4, 0, 3)  // B, encostado em A
+	segs[b].trans = 1         // dissolver de 1s no corte A|B -> hd = 0.5 em B
+	segs[b].zoom_anim = true
+	segs[b].crop_x = 0.1; segs[b].crop_y = 0.1; segs[b].crop_w = 0.5; segs[b].crop_h = 0.5
+	segs[b].crop2_x = 0.3; segs[b].crop2_y = 0.3; segs[b].crop2_w = 0.3; segs[b].crop2_h = 0.3
+	testing.expect(t, t_feq(seg_trans(b), 1), "o dissolver de 1s vale (senão o teste não exercita o pré-roll)")
+	_, g := t_build(t)
+	// o deslocamento tem que ser o hd REAL (metade do dissolver) e o divisor, dur
+	testing.expect(t, strings.contains(g, "clip((on/30-0.5000)/3.0000"),
+		"a curva desconta o pré-roll do dissolver e corre sobre dur")
+	testing.expect(t, !strings.contains(g, "(on/"+"105"), "não usa a contagem de frames do stream")
+	// sem transição o deslocamento é zero e o divisor continua sendo dur
+	t_export_reset()
+	c := add_seg(0, 0, 0, 4)
+	segs[c].zoom_anim = true
+	segs[c].crop_x = 0.1; segs[c].crop_y = 0.1; segs[c].crop_w = 0.5; segs[c].crop_h = 0.5
+	segs[c].crop2_x = 0.3; segs[c].crop2_y = 0.3; segs[c].crop2_w = 0.3; segs[c].crop2_h = 0.3
+	_, g2 := t_build(t)
+	testing.expect(t, strings.contains(g2, "clip((on/30-0.0000)/4.0000"), "sem transição: sem deslocamento, divisor = dur")
+}

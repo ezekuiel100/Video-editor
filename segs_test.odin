@@ -511,3 +511,25 @@ fades_so_sao_cortados_com_a_interacao_assentada :: proc(t: ^testing.T) {
 	fades_settle()
 	testing.expect(t, segs[a].fade_in + segs[a].fade_out <= segs[a].dur + 0.001, "assentado, o corte acontece")
 }
+
+// as trilhas de vídeo e de áudio têm orientações OPOSTAS na tela (track_row devolve
+// g_nv-1-t para vídeo e g_nv+(t-MAXV) para áudio), então o arrasto vertical de um grupo
+// misto precisa deslocar em LINHAS. Somando o mesmo delta de ÍNDICE, como era feito, o
+// vídeo descia e o áudio SUBIA no mesmo gesto.
+@(test)
+deslocamento_vertical_e_em_linhas_nao_em_indices :: proc(t: ^testing.T) {
+	t_reset() // g_nv = 3, g_na = 2
+	// descer uma linha: a linha na tela cresce em 1 para os DOIS tipos
+	v := track_shift_rows(2, 1)          // V3 -> V2
+	a := track_shift_rows(MAXV + 1, 1)   // A2 -> ...
+	testing.expect(t, track_row(v) == track_row(2) + 1, "vídeo desce uma linha")
+	testing.expect(t, track_row(a) == track_row(MAXV + 1) + 1, "áudio desce a MESMA linha")
+	testing.expect(t, v == 1, "e no índice de vídeo isso é DESCER o número")
+	testing.expect(t, a == MAXV + 2, "enquanto no de áudio é SUBIR o número (orientações opostas)")
+	// subir uma linha: simétrico
+	testing.expect(t, track_row(track_shift_rows(0, -1)) == track_row(0) - 1, "vídeo sobe uma linha")
+	testing.expect(t, track_row(track_shift_rows(MAXV + 1, -1)) == track_row(MAXV + 1) - 1, "áudio sobe uma linha")
+	// o tipo nunca muda
+	testing.expect(t, !is_audio_track(track_shift_rows(0, -5)), "vídeo continua vídeo")
+	testing.expect(t, is_audio_track(track_shift_rows(MAXV, 5)), "áudio continua áudio")
+}

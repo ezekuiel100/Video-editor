@@ -764,6 +764,16 @@ dup_req_si:  int = -1   // segmento que pediu (só a main lê/escreve)
 dup_req_start: f32      // identidade do seg no pedido: start/in_off (validados na adoção —
 dup_req_inoff: f32      // remover um seg compacta o array e o MESMO índice vira OUTRO seg)
 dup_ready:   bool       // atômico: spawn terminou (main adota processo+frame e libera)
+// `dup_req_c` NÃO serve de flag de "spawn em voo": dois pontos o zeram à força para impedir
+// o worker de COMEÇAR um decode novo (stream_quality_sync na troca de qualidade e
+// remove_media), e com ele zerado um pedido novo passava pela guarda e sobrescrevia os
+// metadados. O spawn antigo chegava depois e era validado contra o pedido NOVO — como o
+// segmento costuma ser o mesmo, passava, e a main adotava um ffmpeg da resolução ANTIGA
+// (dup_read passava a pedir frames do tamanho errado de um pipe que produz outro).
+dup_inflight: bool      // atômico: há um spawn pedido e ainda não consumido pelo dup_poll
+dup_req_seq:  int       // atômico: carimbo do pedido ATUAL — muda a cada pedido e a cada
+dup_sp_seq:   int       // cancelamento; o worker guarda aqui o que estava servindo, e o
+                        // dup_poll só adota se os dois baterem
 dup_sp_ps:   os.Process // staging do spawn: processo entregue pelo worker
 dup_sp_r:    ^os.File   // staging: ponta de leitura
 dup_sp_on:   bool       // staging: spawn entregou decoder vivo com 1º frame em dup_buf
@@ -1692,8 +1702,17 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 					za = ah; zb = bh       // o eixo comum passou a ser a ALTURA
 					xa = ax*kh; xb = bx*kh // x agora é fração da largura JÁ esticada
 				}
-				N := max((t1 - t0)/sp * 30, 1) // frames de saída (30fps) deste segmento
-				Ls := fmt.tprintf("(on/%.3f)", f64(N))
+				// posição do frame de saída DENTRO do clipe, em fração de dur — espelha
+				// exatamente o `clamp((t - start)/dur, 0, 1)` do seg_crop_at (preview).
+				// `on/30` conta a partir do PRIMEIRO frame do stream, que está em
+				// start2 = start - hd (o pré-roll do dissolver), e o stream ainda leva o
+				// pós-roll `tl` no fim; com folga insuficiente na fonte o tpad acrescenta
+				// mais freeze_hd/freeze_tl. Por isso a curva não pode ser on/N sobre o stream:
+				// ela saía adiantada em hd e esticada por (dur+hd+tl)/dur, e o smoothstep
+				// passava de 1 (deixando de ser monótono — o zoom VOLTAVA no fim do clipe).
+				// clip() em vez de dois min/max aninhados; vírgulas escapadas, como o
+				// `between` do enable logo abaixo.
+				Ls := fmt.tprintf("clip((on/30-%.4f)/%.4f\\,0\\,1)", f64(hd), f64(max(sg.dur, 0.0001)))
 				Ss := fmt.tprintf("(%s*%s*(3-2*%s))", Ls, Ls, Ls) // smoothstep (sem vírgulas: seguro no filtergraph)
 				zexpr := fmt.tprintf("1/(%.6f+(%.6f)*%s)", za, zb-za, Ss) // zoom = 1/fração da região
 				xexpr := fmt.tprintf("(%.6f+(%.6f)*%s)*iw", xa, xb-xa, Ss)  // canto sup-esq X (px da entrada do zoompan)
@@ -3831,8 +3850,14 @@ scrub_worker :: proc() {
 		// por último; o worker SEMPRE sinaliza dup_ready (sucesso = processo em
 		// dup_sp_*; falha/EOF = dup_sp_on false, a main congela via leof).
 		if !intrinsics.atomic_load(&dup_ready) {
+			// o carimbo é lido ANTES do dup_req_c de propósito: se a main publicar um pedido
+			// novo no meio, o worker fica com o carimbo VELHO e o dup_poll descarta — spawn
+			// perdido, que o frame seguinte refaz. O erro na outra direção (carimbo novo com
+			// pedido velho) adotaria lixo.
+			seq := intrinsics.atomic_load(&dup_req_seq)
 			if ci := intrinsics.atomic_load(&dup_req_c); ci >= 0 && ci < nclips {
 				dup_open(&clips[ci], dup_req_t)
+				dup_sp_seq = seq // publicado antes do dup_ready (a main só lê depois dele)
 				intrinsics.atomic_store(&dup_ready, true)
 				continue
 			}
@@ -3947,11 +3972,14 @@ dup_release :: proc(si: int) {
 
 // pede ao worker um decoder novo p/ a vista do seg si em `l` (1 spawn em voo por vez)
 dup_request :: proc(si: int, l: f32) {
-	if intrinsics.atomic_load(&dup_ready) do return      // spawn por adotar
-	if intrinsics.atomic_load(&dup_req_c) >= 0 do return // spawn em voo
+	if intrinsics.atomic_load(&dup_ready) do return       // spawn por adotar
+	if intrinsics.atomic_load(&dup_inflight) do return    // spawn em voo (flag PRÓPRIA: dup_req_c
+	                                                      // é zerado à força pelos cancelamentos)
 	dup_req_si = si
 	dup_req_t = l
 	dup_req_start = segs[si].start; dup_req_inoff = segs[si].in_off // identidade p/ validar na adoção
+	intrinsics.atomic_add(&dup_req_seq, 1) // carimbo novo: invalida qualquer spawn anterior
+	intrinsics.atomic_store(&dup_inflight, true)
 	intrinsics.atomic_store(&dup_req_c, segs[si].src) // publica por último (worker lê)
 }
 
@@ -4032,8 +4060,14 @@ dup_poll :: proc() {
 		// valida: o seg ainda existe, aponta p/ a fonte pedida E é o MESMO seg (start/in_off
 		// batem) — src sozinho não basta: uma fonte dividida em vários segs tem todos com o
 		// mesmo src, e a compactação após remover um seg faria adotar no seg errado
+		// ...e o CARIMBO: um cancelamento (troca de qualidade da prévia, remoção de mídia) o
+		// muda, então um spawn que estava em voo naquele momento cai no ramo de descarte em
+		// vez de ser adotado com metadados de outro pedido — era assim que um ffmpeg da
+		// resolução ANTIGA virava o decoder da vista, com o dup_read pedindo frames de um
+		// tamanho que aquele pipe nunca produz.
 		ok := si >= 0 && si < nsegs && seg_ready(si) && segs[si].src == intrinsics.atomic_load(&dup_req_c) &&
-		      abs(segs[si].start - dup_req_start) < 0.001 && abs(segs[si].in_off - dup_req_inoff) < 0.001
+		      abs(segs[si].start - dup_req_start) < 0.001 && abs(segs[si].in_off - dup_req_inoff) < 0.001 &&
+		      dup_sp_seq == intrinsics.atomic_load(&dup_req_seq)
 		if dup_sp_on {
 			if ok {
 				d := &seg_dup[si]
@@ -4053,6 +4087,7 @@ dup_poll :: proc() {
 		}
 		dup_req_si = -1
 		intrinsics.atomic_store(&dup_req_c, -1)
+		intrinsics.atomic_store(&dup_inflight, false) // o canal volta a aceitar pedidos
 		intrinsics.atomic_store(&dup_ready, false) // por último: worker só reusa dup_buf depois daqui
 	}
 	for i in nsegs ..< MAX_SEGS do if seg_dup[i].ok || seg_dup[i].lon do dup_release(i)
@@ -4262,6 +4297,7 @@ stream_quality_sync :: proc() {
 		if n == 0 { // só ao encontrar trabalho: zerar isto todo frame mataria o scrub
 			intrinsics.atomic_store(&scrub_req_c, -1) // barra o worker de iniciar decode novo durante a troca
 			intrinsics.atomic_store(&dup_req_c, -1)
+			intrinsics.atomic_add(&dup_req_seq, 1) // invalida o spawn em voo: ele é da resolução ANTIGA
 		}
 		n += 1
 		if c.rsp_thr != nil { thread.join(c.rsp_thr); thread.destroy(c.rsp_thr); c.rsp_thr = nil }
@@ -4466,7 +4502,10 @@ remove_media :: proc(i: int) {
 	}
 	// 2) impede os workers de scrub E de vista dup de tocar num recurso que vai ser liberado
 	if intrinsics.atomic_load(&scrub_req_c) == i do intrinsics.atomic_store(&scrub_req_c, -1)
-	if intrinsics.atomic_load(&dup_req_c) == i do intrinsics.atomic_store(&dup_req_c, -1)
+	if intrinsics.atomic_load(&dup_req_c) == i {
+		intrinsics.atomic_store(&dup_req_c, -1)
+		intrinsics.atomic_add(&dup_req_seq, 1) // invalida o spawn em voo: a mídia dele vai embora
+	}
 	if bin_drag == i { bin_drag = -1; if st.drag == .Bin do st.drag = .None }
 	if bin_sel == i do bin_sel = -1
 	bin_marked[i] = false // não deixa marca presa num tombstone
@@ -5222,6 +5261,12 @@ show_playhead_frame :: proc() {
 // (V-topo..V1, invertido), áudio embaixo (A1..A_n). Vídeo t ocupa a linha (g_nv-1-t); áudio
 // (índice MAXV+a) ocupa a linha (g_nv+a).
 track_row :: proc(t: int) -> int { return t < MAXV ? (g_nv - 1 - t) : (g_nv + (t - MAXV)) }
+// trilha destino ao mover `t` por `dr` LINHAS na tela (dr > 0 = para baixo). Os dois espaços
+// de índice têm orientações OPOSTAS: no vídeo track_row é g_nv-1-t (índice maior = linha mais
+// ALTA), no áudio é g_nv+(t-MAXV) (índice maior = linha mais BAIXA). Somar o mesmo delta de
+// ÍNDICE nos dois — o que o arrasto em grupo fazia — descia o vídeo e SUBIA o áudio no mesmo
+// gesto. Não clampa: quem chama decide se o destino cabe (in_range).
+track_shift_rows :: proc(t, dr: int) -> int { return is_audio_track(t) ? t + dr : t - dr }
 // y do topo da trilha: soma as alturas das linhas ACIMA (alturas são por trilha, não uniformes)
 track_y :: proc(t: int) -> f32 {
 	y := g_lanes_top
@@ -5748,8 +5793,20 @@ spv_poll :: proc() {
 		spv_trash_take(e.path)                          // some quando o handle cair
 		e.path = spv_render_path; spv_render_path = "" // o slot passa a ser o dono
 		adopted = true
-		e.music = rl.LoadMusicStream(strings.clone_to_cstring(e.path, context.temp_allocator))
-		if e.music.frameCount > 0 { e.music.looping = false; e.ok = true; e.key = spv_render_key }
+		// mesma guarda do music_load: um WAV só com CABEÇALHO (o ffmpeg sai com 0 quando o
+		// trecho pedido está além do fim do áudio) deixa o raylib com o decoder e o
+		// AudioStream alocados e o handle do arquivo preso. Como e.ok fica false, nem o
+		// spv_release nem o close_now descarregavam — e o pedido era refeito para sempre,
+		// porque a contagem de falhas mora no ramo `!ok` e o ffmpeg tinha dado certo. Cada
+		// ciclo vazava um stream, deixava um WAV no %TEMP% e subia outro ffmpeg.
+		m, mok := music_load(e.path)
+		if mok { e.music = m; e.ok = true; e.key = spv_render_key }
+		else { // conta como falha p/ o SPV_TRIES desarmar o laço
+			e.music = {}
+			if e.bad_key == spv_render_key do e.bad_n += 1
+			else { e.bad_key = spv_render_key; e.bad_n = 1 }
+			if e.bad_n == SPV_TRIES do set_toast("Não consegui preparar o áudio nesta velocidade")
+		}
 		when DBG_SPV do fmt.eprintfln("[spv] LOAD i=%d frames=%d rate=%d ok=%v", i, e.music.frameCount, e.music.stream.sampleRate, e.ok)
 		e.on = false
 	} else if !ok && i < nsegs && spv_key(i, spv_render_ci) == spv_render_key {
@@ -6575,28 +6632,29 @@ update :: proc() {
 			want := max(0, mt - grab_dt)
 			delta := want - sg.start
 			tgt := clamp(track_at_y(m.y), is_audio_track(segs[drag_clip].track) ? MAXV : 0, is_audio_track(segs[drag_clip].track) ? MAXV + g_na - 1 : g_nv - 1)
-			dtr := tgt - segs[drag_clip].track // deslocamento vertical desejado (do clipe agarrado)
+			drow := track_row(tgt) - track_row(segs[drag_clip].track) // deslocamento em LINHAS (do clipe agarrado)
 			minstart := f32(1e30)
 			for k in 0 ..< nsegs do if seg_marked[k] && !track_locked[segs[k].track] && segs[k].start < minstart do minstart = segs[k].start
 			if minstart + delta < 0 do delta = -minstart // não deixa ninguém ir p/ antes de 0
 			// vertical só se TODOS couberem; senão trava (sem trilha disponível = não move)
-			if dtr != 0 do for k in 0 ..< nsegs {
+			if drow != 0 do for k in 0 ..< nsegs {
 				if !seg_marked[k] || track_locked[segs[k].track] do continue
-				if !in_range(k, segs[k].track + dtr) { dtr = 0; break }
+				if !in_range(k, track_shift_rows(segs[k].track, drow)) { drow = 0; break }
 			}
-			check :: proc(d: int, dl: f32) -> bool { // nenhum marcado invade um não-marcado?
+			check :: proc(dr: int, dl: f32) -> bool { // nenhum marcado invade um não-marcado?
 				for k in 0 ..< nsegs {
 					if !seg_marked[k] || track_locked[segs[k].track] do continue
-					if overlaps_nonmarked(segs[k].track + d, segs[k].start + dl, segs[k].dur) do return false
+					d := track_shift_rows(segs[k].track, dr)
+					if overlaps_nonmarked(d, segs[k].start + dl, segs[k].dur) do return false
 				}
 				return true
 			}
-			ok := check(dtr, delta)
-			if !ok && dtr != 0 { dtr = 0; ok = check(0, delta) } // vertical bloqueado: tenta só horizontal
-			if ok && (abs(delta) > 0.0001 || dtr != 0) {
+			ok := check(drow, delta)
+			if !ok && drow != 0 { drow = 0; ok = check(0, delta) } // vertical bloqueado: tenta só horizontal
+			if ok && (abs(delta) > 0.0001 || drow != 0) {
 				for k in 0 ..< nsegs {
 					if !seg_marked[k] || track_locked[segs[k].track] do continue
-					segs[k].track += dtr
+					segs[k].track = track_shift_rows(segs[k].track, drow)
 					segs[k].start = max(0, segs[k].start + delta)
 				}
 			}
@@ -8851,6 +8909,11 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 				if j == selected || segs[j].track != sg.track do continue
 				if segs[j].start >= sg.start + 0.001 do limit = min(limit, segs[j].start)
 			}
+			// os clipes de EFEITO da trilha também são parede: todo o resto do código os trata
+			// como ocupantes exclusivos (overlaps_any, fx_free_start, o arrasto) e o
+			// check_invariants cobra isso ("efeito sobrepõe o seg"). Sem eles no limite,
+			// desacelerar esticava o clipe por cima de um efeito e o build de debug panicava.
+			limit = min(limit, fx_wall_r(sg.track, -1, sg.start + 0.001))
 			nd = min(nd, limit - sg.start, (c.dur - sg.in_off) / sg.speed)
 			sg.dur = max(0.05, nd) // o fade é reajustado quando o arrasto assentar (fades_settle)
 		}
@@ -9574,7 +9637,12 @@ draw_preview :: proc(r: rl.Rectangle) {
 	rl.DrawRectangleRounded({ pbar.x, pbar.y, frac * pbar.width, pbar.height }, 1, 4, ACCENT)
 	pkx := pbar.x + frac * pbar.width
 	rl.DrawCircleV({ pkx, pbar.y + pbar.height/2 }, (player_seek_drag || hovered(pbar_hit)) ? 7 : 5, rl.WHITE)
-	if rl.IsMouseButtonPressed(.LEFT) && hovered(pbar_hit) { player_seek_drag = true; seek_was_playing = st.playing; st.playing = false; seek_drag_hush() }
+	// `clicked` (e não IsMouseButtonPressed cru) porque ele respeita o modal: o draw_preview
+	// roda ANTES do draw_modal, então um clique destinado ao modal chegava aqui primeiro. O
+	// cartão do "Cortar e Ampliar" cruza esta faixa em qualquer janela abaixo de ~1480px:
+	// arrastar a alça de baixo do recorte pausava a reprodução e jogava o playhead para a
+	// fração X do mouse na timeline inteira. O overlay de exportação tem a mesma sobreposição.
+	if clicked(pbar_hit) && !intrinsics.atomic_load(&export_run) { player_seek_drag = true; seek_was_playing = st.playing; st.playing = false; seek_drag_hush() }
 	if rl.IsMouseButtonReleased(.LEFT) && player_seek_drag {
 		player_seek_drag = false
 		// retoma ANTES do seek: tanto src_acquire quanto seek_global só adquirem o áudio
