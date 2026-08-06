@@ -435,6 +435,10 @@ progress_line_separa_progresso_de_erro :: proc(t: ^testing.T) {
 	testing.expect(t, progress_line("frame=42"), "linha de -progress")
 	testing.expect(t, progress_line("out_time_us=1000000"), "chave com underscore também")
 	testing.expect(t, progress_line("progress=continue"), "valor não-numérico também")
+	// o ffmpeg emite esta em TODO bloco de progresso, uma por stream de saída. Rejeitá-la
+	// (a chave tem DÍGITO) fazia ela ser guardada como se fosse o erro, sobrescrevendo a
+	// causa real e deixando export_err_n > 0 sempre ligado.
+	testing.expect(t, progress_line("stream_0_0_q=29.0"), "chave com dígito ainda é progresso")
 	testing.expect(t, !progress_line("[libx264 @ 000001] height not divisible by 2"), "erro do ffmpeg NÃO é progresso")
 	testing.expect(t, !progress_line("Conversion failed!"), "erro em texto corrido também não")
 	testing.expect(t, !progress_line("saida.mp4: Invalid argument"), "nem erro com caminho antes")

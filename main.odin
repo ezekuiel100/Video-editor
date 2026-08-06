@@ -905,6 +905,9 @@ Clip :: struct {
 	chunk_done: bool, // atômico: extração do chunk terminou
 	chunk_ok:   bool, // atômico: extração do chunk deu certo
 	chunk_busy: bool, // (main) worker no ar
+	aud_end:    f32,  // ponto (s, na fonte) a partir do qual se PROVOU não haver áudio: um chunk
+	                  // extraído ali voltou só com cabeçalho. 0 = nada provado. Faixa de áudio
+	                  // mais curta que o vídeo é o caso comum (o mic para antes do fim).
 	chunk_meas: bool, // a cobertura abaixo já foi MEDIDA? (false = usa o nominal CHUNK_SECS)
 	chunk_cov:  f32,  // segundos REAIS cobertos pelo chunk no bolso, medidos ao abri-lo. O
 	                  // ffmpeg entrega menos que -t quando o áudio acaba antes; sem isto o
@@ -1256,10 +1259,14 @@ export_dims :: proc() -> (w, h: int) { return proj_w, proj_h } // resolução do
 // thread de fundo: lê o -progress do ffmpeg e atualiza export_pct; espera o fim
 // a linha é do `-progress` (chave=valor em minúsculas, ex.: "frame=12", "speed=1.3x") e não
 // uma mensagem de erro? As do ffmpeg vêm como "[libx264 @ ...] ..." ou texto corrido.
+// (as chaves têm DÍGITO: o ffmpeg emite `stream_0_0_q=` em todo bloco de progresso, uma por
+// stream de saída. Sem aceitar dígito, essa linha era classificada como erro e sobrescrevia
+// o export_err a cada intervalo — o toast de falha mostrava "stream_0_0_q=29.0" no lugar da
+// causa, e export_err_n > 0 ficava sempre verdadeiro.)
 progress_line :: proc(s: string) -> bool {
 	for c, i in s {
 		if c == '=' do return i > 0
-		if !((c >= 'a' && c <= 'z') || c == '_') do return false
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') do return false
 	}
 	return false
 }
@@ -3541,10 +3548,22 @@ try_chunk_open :: proc(c: ^Clip, local: f32) -> bool {
 	// que -t quando o áudio da fonte acaba antes. Com a nominal, um ponto fora do arquivo
 	// caía aqui como "coberto", reabria o mesmo WAV todo frame e o chamador nunca pedia outro.
 	if local < c.chunk_base || local >= c.chunk_base + chunk_cov_of(c) - 0.5 do return false
-	if c.has_audio { rl.UnloadMusicStream(c.music); c.has_audio = false }
+	// abre ANTES de descartar o que está tocando: descarregar primeiro e só então descobrir
+	// que o chunk novo está vazio jogava fora o OGG completo, que o audio_load_ready
+	// recarregava inteiro no frame seguinte (centenas de ms na main, a cada ciclo)
+	m, mok := music_load(c.aud_ck[c.chunk_slot])
 	c.chunk_meas = true
-	if !music_open(c, c.aud_ck[c.chunk_slot]) { c.chunk_cov = 0; return false } // vazio: não cobre nada
-	c.chunk_cov = f32(c.music.frameCount) / f32(max(c.music.stream.sampleRate, 1))
+	if !mok {
+		c.chunk_cov = 0 // vazio: não cobre nada
+		// e o vazio PROVA que o áudio da fonte acaba em algum ponto <= esta base: registra,
+		// senão o chunk_request pede o mesmo trecho de novo (um ffmpeg por ciclo, p/ sempre)
+		if c.aud_end <= 0 || c.chunk_base < c.aud_end do c.aud_end = c.chunk_base
+		return false
+	}
+	if c.has_audio do rl.UnloadMusicStream(c.music)
+	c.music = m; c.has_audio = true
+	c.chunk_cov = f32(m.frameCount) / f32(max(m.stream.sampleRate, 1))
+	c.music_full = false
 	c.music_base = c.chunk_base
 	c.music_slot = c.chunk_slot // este slot agora está preso pelo dr_wav
 	// só confirma se o relógio realmente cobre o ponto (o try_part_open já fazia assim):
@@ -3560,6 +3579,11 @@ chunk_cov_of :: proc(c: ^Clip) -> f32 { return c.chunk_meas ? c.chunk_cov : CHUN
 // já cobre. Chame try_part_open/try_chunk_open antes.
 chunk_request :: proc(c: ^Clip, local: f32) {
 	if c.chunk_busy do return
+	// já se descobriu (por um chunk que voltou vazio) que o áudio da fonte acaba antes daqui:
+	// pedir de novo só gastaria um ffmpeg por ciclo, para sempre, e o resultado seria o mesmo
+	// arquivo só-cabeçalho. O aud_end é reconhecidamente conservador (só marca o que foi
+	// PROVADO vazio), então nunca barra um trecho que tem som.
+	if c.aud_end > 0 && local >= c.aud_end do return
 	if intrinsics.atomic_load(&c.chunk_done) && intrinsics.atomic_load(&c.chunk_ok) &&
 	   local >= c.chunk_base && local < c.chunk_base + chunk_cov_of(c) - 0.5 {
 		return // já no bolso (pela cobertura REAL, não pela nominal)
@@ -3578,24 +3602,32 @@ chunk_request :: proc(c: ^Clip, local: f32) {
 	c.chunk_thr = thread.create_and_start_with_poly_data(c, chunk_worker)
 }
 
+// carrega um arquivo como rl.Music pronto p/ tocar (pausado no início), SEM tocar em clipe
+// nenhum — quem chama decide se troca o stream ativo por este. ok=false quando o arquivo não
+// abre ou abre com 0 amostras (o ffmpeg grava só o header quando o trecho pedido está além do
+// fim do áudio): aí o raylib JÁ alocou o decoder e registrou o AudioStream no mixer, então
+// precisa do Unload — sair sem ele vazava um buffer por tentativa, num caminho retentado a
+// cada frame. ctxData nil = a carga falhou de vez, não há o que descarregar.
+music_load :: proc(path: string) -> (rl.Music, bool) {
+	m := rl.LoadMusicStream(strings.clone_to_cstring(path, context.temp_allocator))
+	if m.frameCount == 0 {
+		if m.ctxData != nil do rl.UnloadMusicStream(m)
+		return {}, false
+	}
+	m.looping = false
+	rl.PlayMusicStream(m)
+	rl.PauseMusicStream(m)
+	return m, true
+}
+
 // abre um WAV como rl.Music do clipe, pausado no início; false se inválido
 music_open :: proc(c: ^Clip, path: string) -> bool {
-	c.music = rl.LoadMusicStream(strings.clone_to_cstring(path, context.temp_allocator))
-	if c.music.frameCount == 0 {
-		// arquivo VÁLIDO mas sem amostras (o ffmpeg grava só o header quando o trecho
-		// pedido está além do fim do áudio): o raylib já alocou o decoder e registrou o
-		// AudioStream no mixer. Sair sem descarregar vazava um buffer por tentativa — e
-		// este caminho é retentado a cada frame. ctxData nil = a carga falhou de vez.
-		if c.music.ctxData != nil do rl.UnloadMusicStream(c.music)
-		c.music = {}
-		return false
-	}
+	m, ok := music_load(path)
+	if !ok { c.music = {}; return false }
+	c.music = m
 	c.music_base = 0 // head/completo começam na origem; quem abre chunk sobrescreve
 	c.music_full = false // quem abre o part_path(c,0) completo marca depois
 	c.music_slot = -1 // não é um slot de chunk; try_chunk_open sobrescreve ao abrir chunk
-	c.music.looping = false
-	rl.PlayMusicStream(c.music)
-	rl.PauseMusicStream(c.music)
 	c.has_audio = true
 	return true
 }
@@ -4490,6 +4522,17 @@ clamp_fades :: proc(sg: ^Seg) {
 	if sg.fade_in + sg.fade_out > sg.dur do sg.fade_out = max(0, sg.dur - sg.fade_in)
 }
 
+// (main, todo frame) reajusta os fades de TODOS os segmentos — mas só com a interação
+// ASSENTADA. O clamp é destrutivo: rodando a cada frame do arrasto do slider de velocidade
+// (ou do aparo), ir até 4x cortava os fades e voltar a 1x devolvia a duração mas não eles.
+// Aqui o corte só acontece quando o usuário solta, então o vai-e-volta dentro do mesmo
+// arrasto não perde nada. Roda antes do history_tick p/ o ajuste entrar no mesmo passo de
+// undo da edição que o causou.
+fades_settle :: proc() {
+	if edit_in_progress() do return
+	for i in 0 ..< nsegs do clamp_fades(&segs[i])
+}
+
 // primeira trilha NÃO travada a partir de `tr`, dentro do MESMO tipo (vídeo/áudio); procura
 // para cima e depois dá a volta. -1 = todas travadas. Sem isto, o "+" da miniatura do bin, o
 // botão Texto e a colocação automática do import furavam o cadeado que a timeline promete.
@@ -5065,11 +5108,16 @@ trans_next :: proc(ai: int) -> int {
 	}
 	return -1
 }
-// metade da transição do corte de `i`, valor CRU. Não chama seg_trans de propósito: ele
-// chamaria trans_max de volta e um corte pediria o do outro em recursão infinita.
+// metade da transição do corte de `i`, sem passar pelo seg_trans de propósito: ele chamaria
+// trans_max de volta e um corte pediria o do outro em recursão infinita. Mas o campo cru
+// SOZINHO não serve: `.trans` não é zerado quando o vizinho da esquerda some, então um corte
+// que já não existe continuava cobrando espaço e encolhia (ou apagava) o dissolver do corte
+// seguinte. Aqui exige o corte existir e aplica os tetos que dependem só de `i` — os do
+// vizinho ficam de fora, que é justamente o que evita a recursão.
 trans_half_raw :: proc(i: int) -> f32 {
 	if i < 0 || i >= nsegs || segs[i].trans <= 0.001 || seg_speed(i) != 1 do return 0
-	return segs[i].trans / 2
+	if trans_prev(i) < 0 do return 0 // sem clipe à esquerda não há corte: não gasta nada
+	return min(segs[i].trans/2, segs[i].dur, f32(1.5))
 }
 trans_max :: proc(bi: int) -> f32 {
 	a := trans_prev(bi)
@@ -6290,6 +6338,12 @@ update :: proc() {
 		// ESC — sem saída a não ser matar o processo. Acontecia sozinho ao terminar uma
 		// exportação (.Done) ou no Alt+F4 com projeto sujo (.Confirm). Volta pra janela.
 		if fullscreen_preview do toggle_fullscreen_preview()
+		// o editor de recorte inline não roda sob o modal (gate no draw_preview), e com ele
+		// para o ÚNICO ponto que solta a alça — o IsMouseButtonReleased no fim dele. O modal
+		// .Done da exportação abre sozinho, podendo cair no meio de um arrasto do recorte:
+		// a alça ficava presa e o próximo clique-e-arraste em qualquer lugar reescrevia a
+		// região do segmento. Só solta a alça; o modo em si continua ligado.
+		crop_drag = -1; crop_grab = {}
 		st.drag = .None; ui_slider_active = -1; player_seek_drag = false; return
 	}
 
@@ -6538,10 +6592,14 @@ update :: proc() {
 			snapped := snap_edge(drag_clip, mt)
 			new_start := clamp(snapped, lo, old_end - 0.05)
 			if abs(new_start - snapped) > 0.0001 do snap_line = -1
-			sg.in_off += (new_start - sg.start) * spd
+			// imagem/texto: a borda pode ir p/ ANTES do início antigo (não há fonte que
+			// limite), e aí o acúmulo deixaria in_off NEGATIVO — o check_invariants reprova
+			// (`in_off negativo`) e o inv_fail é um panic, então o build de debug caía no
+			// mesmo frame. in_off não significa nada nessas mídias (seg_src_span ignora).
+			if src.is_img || src.is_text do sg.in_off = 0
+			else                         do sg.in_off += (new_start - sg.start) * spd
 			sg.start = new_start
 			sg.dur = old_end - new_start
-			clamp_fades(sg)
 		} else { // aparar a borda direita (mantém o início fixo)
 			// limites: fim da fonte e início do vizinho à direita. Imagem/TEXTO = still sem
 			// fim real: pode esticar livremente (cap alto), só respeitando o vizinho.
@@ -6553,7 +6611,6 @@ update :: proc() {
 			new_end := clamp(snapped, sg.start + 0.05, max_end)
 			if abs(new_end - snapped) > 0.0001 do snap_line = -1
 			sg.dur = new_end - sg.start
-			clamp_fades(sg)
 		}
 	} else if st.drag == .FadeIn && drag_clip >= 0 && drag_clip < nsegs {
 		sg := &segs[drag_clip]
@@ -6940,6 +6997,7 @@ update :: proc() {
 	}
 	audio_secondary() // mixa as trilhas de áudio (música de fundo) em sincronia com o master
 	audio_speed_preview() // som dos segmentos com velocidade != 1 (tom preservado)
+	fades_settle()    // fades maiores que o clipe, depois que o arrasto assentou
 	history_tick()    // grava um passo de undo quando uma edição assenta
 
 	// exportação terminou: avisa e limpa a thread (só a main mexe em toast/thread)
@@ -8762,8 +8820,7 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 				if segs[j].start >= sg.start + 0.001 do limit = min(limit, segs[j].start)
 			}
 			nd = min(nd, limit - sg.start, (c.dur - sg.in_off) / sg.speed)
-			sg.dur = max(0.05, nd)
-			clamp_fades(sg) // acelerar encurta o clipe: o fade não pode ficar maior que ele
+			sg.dur = max(0.05, nd) // o fade é reajustado quando o arrasto assentar (fades_settle)
 		}
 		txt("Duração", x, y, 13, TEXT); txt(timecode(sg.dur), vx - 10, y, 13, MUTED); y += 24
 		txt("Muda o tom do áudio.", x, y, 11, MUTED)

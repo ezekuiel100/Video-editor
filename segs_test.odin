@@ -472,3 +472,42 @@ fades_reclampados_quando_o_clipe_encolhe :: proc(t: ^testing.T) {
 		testing.expect(t, segs[k].fade_in + segs[k].fade_out <= segs[k].dur + 0.001, "e a soma dos dois também")
 	}
 }
+
+// o campo .trans nunca é zerado quando o vizinho da ESQUERDA some, e o trans_max desconta a
+// metade do corte vizinho para as janelas não se sobreporem. Sem exigir que o corte ainda
+// exista, um dissolver inerte continuava cobrando espaço e encolhia (ou apagava) o do corte
+// seguinte — sem o usuário ter tocado nele.
+@(test)
+transicao_de_corte_que_sumiu_nao_cobra_espaco :: proc(t: ^testing.T) {
+	t_reset()
+	_ = add_seg(0, 0, 0, 2)    // X
+	a := add_seg(0, 2, 0, 0.6) // A, curto
+	b := add_seg(0, 2.6, 0, 2) // B
+	segs[a].trans = 1; segs[b].trans = 1 // dissolver nos dois cortes
+	com_x := seg_trans(b)
+	testing.expect(t, com_x > 0.001, "com X presente o dissolver de A|B existe (menor, dividindo A)")
+	remove_seg(0, false) // apaga X sem ripple: A e B ficam onde estão; os índices caem 1
+	testing.expect(t, trans_prev(0) < 0, "A ficou sem vizinho à esquerda")
+	testing.expect(t, seg_trans(0) == 0, "o dissolver de A some junto com o corte, como sempre")
+	testing.expect(t, seg_trans(1) > com_x + 0.1, "e o de A|B RECUPERA o espaço que o corte morto ocupava")
+}
+
+// o clamp dos fades é destrutivo: rodando a cada frame do arrasto, ir e voltar no slider de
+// velocidade devolvia a duração mas não os fades cortados no meio do caminho
+@(test)
+fades_so_sao_cortados_com_a_interacao_assentada :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10)
+	segs[a].fade_in = 3; segs[a].fade_out = 3
+	segs[a].dur = 2   // como se o slider de velocidade tivesse encolhido o clipe
+	st.drag = .Clip   // ...com o arrasto ainda EM CURSO
+	fades_settle()
+	testing.expect(t, t_feq(segs[a].fade_in, 3), "durante o arrasto o fade original é preservado")
+	segs[a].dur = 10  // usuário voltou o slider antes de soltar
+	st.drag = .None
+	fades_settle()
+	testing.expect(t, t_feq(segs[a].fade_in, 3) && t_feq(segs[a].fade_out, 3), "o vai-e-volta não perdeu nada")
+	segs[a].dur = 2   // agora encolhe de verdade e solta
+	fades_settle()
+	testing.expect(t, segs[a].fade_in + segs[a].fade_out <= segs[a].dur + 0.001, "assentado, o corte acontece")
+}

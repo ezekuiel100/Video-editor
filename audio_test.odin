@@ -301,3 +301,20 @@ chunk_cobertura_real_manda_no_lugar_da_nominal :: proc(t: ^testing.T) {
 	testing.expect(t, c.chunk_req == 599, "dentro da cobertura real continua sendo 'já no bolso'")
 	testing.expect(t, !c.chunk_busy, "e não marca worker no ar")
 }
+
+@(test)
+chunk_request_nao_repete_trecho_provado_vazio :: proc(t: ^testing.T) {
+	t_reset()
+	// um chunk extraído em 600s voltou só com cabeçalho: está PROVADO que o áudio da fonte
+	// acaba antes daí. Sem registrar isso, o chunk_request pedia o mesmo trecho de novo a
+	// cada ciclo — um ffmpeg por segundo, para sempre, enquanto o playhead ficasse na cauda.
+	// (só o retorno antecipado: passar dele sobe um ffmpeg)
+	c := t_aud(3600, 0, 60)
+	c.chunk_busy = false
+	c.aud_end = 600
+	c.chunk_req = 599
+	chunk_request(c, 700)
+	testing.expect(t, c.chunk_req == 599, "não pede áudio onde já se provou não haver")
+	testing.expect(t, !c.chunk_busy, "e não sobe worker nenhum")
+	testing.expect(t, c.chunk_thr == nil, "nenhuma thread criada")
+}
