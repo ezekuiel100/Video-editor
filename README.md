@@ -2,7 +2,7 @@
 
 Editor de vídeo não-linear, escrito em **[Odin](https://odin-lang.org/)** com **raylib**. Interface *immediate-mode* desenhada à mão, decodificação de vídeo/áudio via **ffmpeg** (sem bindings C) e o áudio como relógio-mestre de sincronia.
 
-> Projeto de arquivo único (`main.odin`). Roda no Windows.
+> Fonte em `src/` (mesmo `package main`, `odin build src`). Roda no Windows.
 
 ---
 
@@ -39,7 +39,7 @@ O raylib já vem pré-compilado com o Odin no Windows (`vendor/raylib`), não pr
 ## Compilar e rodar
 
 ```sh
-odin build . -out:editor.exe
+odin build src -out:editor.exe
 ./editor.exe
 ```
 
@@ -48,7 +48,7 @@ odin build . -out:editor.exe
 ### Build de debug (com verificação de invariantes)
 
 ```sh
-odin build . -debug -out:editor_debug.exe
+odin build src -debug -out:editor_debug.exe
 ```
 
 Liga `check_invariants()` (roda 1×/frame validando o estado da timeline). No release é no-op.
@@ -56,7 +56,7 @@ Liga `check_invariants()` (roda 1×/frame validando o estado da timeline). No re
 ### Testes
 
 ```sh
-odin test . -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
+odin test src -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
 ```
 
 - `ODIN_TEST_THREADS=1` é **obrigatório** — os testes compartilham os globais (`segs`/`clips`/`st`).
@@ -154,18 +154,27 @@ Também dá pra arrastar arquivos de vídeo pra dentro da janela (vão pro bin).
 ## Estrutura do projeto
 
 ```
-main.odin           # o editor inteiro
-parse_test.odin     # testes de parsing (ffprobe, multi-seleção, waveform…)
-segs_test.odin      # testes da lógica de segmentos/timeline
-export_test.odin    # testes da montagem do comando de exportação (grafo como texto)
-audio_test.odin     # testes da janela de áudio (head/chunk/OGG completo)
-bench.odin          # modo -bench (perfil da main thread)
-editor.exe          # build release
-editor_debug.exe    # build debug (invariantes ligados)
+src/                # package main (odin build src)
+  main.odin         # startup, loop, globais de UI
+  process.odin      # Job Objects, PATH, temps, log F4
+  export.odin       # filtergraph, workers, NVENC
+  project.odin      # .ovp save/load, diálogos de projeto
+  segs.odin         # Seg/FxSeg, corte, ripple, invariantes, undo
+  audio.odin        # janela head/chunk, mix, preview de velocidade
+  media.odin        # Clip, probe, import, cache, streaming
+  preview.odin      # shaders, composite, crop, fullscreen
+  ui.odin           # widgets, topbar, bin, painéis, modais
+  timeline_ui.odin  # draw_timeline
+  update.odin       # update() (input / drag / atalhos)
+  *_test.odin       # testes (mesmo pacote)
+  bench.odin        # modo -bench
+  icon.png          # #load no main (ícone da janela)
+editor.exe          # build release (sai na raiz)
+editor_debug.exe    # build debug
 build-installer.ps1 # recompila e gera o instalador (1 comando)
 setup.iss           # script do Inno Setup (empacota editor + ffmpeg)
-make_icon.py        # gera icon.ico/icon.png (Pillow)
-icon.rc / icon.ico  # recurso do ícone embutido no .exe
+make_icon.py        # gera icon.ico / src/icon.png (Pillow)
+icon.rc / icon.ico  # recurso do ícone embutido no .exe (instalador)
 dist/               # payload do instalador (ffmpeg + Setup.exe) — não versionado
 ```
 

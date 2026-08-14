@@ -57,6 +57,6 @@ sizes = [16, 24, 32, 48, 64, 128, 256]
 # ICO deve partir da MAIOR imagem — o Pillow reduz p/ cada tamanho (ignora tamanhos > origem).
 base = img.resize((256, 256), Image.LANCZOS)
 base.save(OUT + r"\icon.ico", format="ICO", sizes=[(s, s) for s in sizes])
-# PNG 64x64 p/ o rl.SetWindowIcon em runtime (via #load)
-img.resize((64, 64), Image.LANCZOS).save(OUT + r"\icon.png")
-print("gerado: icon.ico (" + ",".join(str(s) for s in sizes) + ") + icon.png 64x64")
+# PNG 64x64 p/ o rl.SetWindowIcon em runtime (via #load em src/main.odin)
+img.resize((64, 64), Image.LANCZOS).save(OUT + r"\src\icon.png")
+print("gerado: icon.ico (" + ",".join(str(s) for s in sizes) + ") + src/icon.png 64x64")

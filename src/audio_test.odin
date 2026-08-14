@@ -27,7 +27,7 @@ package main
 // handle falso. Ao escrever um caso novo, confirme que ele cai num retorno
 // antecipado — os testes abaixo dizem em qual, no nome ou no comentário.
 //
-//   odin test . -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
+//   odin test src -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
 //
 // (t_reset/t_feq vêm de segs_test.odin — mesmo pacote)
 

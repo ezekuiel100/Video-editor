@@ -2,7 +2,7 @@ package main
 
 // Testes da EXPORTAÇÃO. Rodar junto com o resto:
 //
-//   odin test . -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
+//   odin test src -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
 //
 // Por que estes testes existem: erro no export falha em SILÊNCIO. O ffmpeg aceita
 // um filtergraph com o trim deslocado sem reclamar — sai um arquivo perfeitamente

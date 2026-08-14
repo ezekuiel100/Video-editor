@@ -3,7 +3,7 @@ package main
 // Testes unitários da lógica de SEGMENTOS da timeline (corte, ripple, paredes,
 // cadeia contígua, ganho de áudio, mapa timeline→fonte). Rodar com:
 //
-//   odin test . -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
+//   odin test src -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
 //
 // THREADS=1 é obrigatório: os testes compartilham os globais (segs/clips/st).
 // INVARIANTS=true liga o check_invariants() (sem o define a chamada é no-op).

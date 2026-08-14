@@ -6,7 +6,7 @@ package main
 // gerado pelo ffmpeg — exige ffmpeg no PATH, que é dependência dura do editor).
 // Rodar junto com os demais:
 //
-//   odin test . -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
+//   odin test src -out:tests.exe -define:ODIN_TEST_THREADS=1 -define:INVARIANTS=true
 //
 // (t_reset/t_feq vêm de segs_test.odin — mesmo pacote)
 

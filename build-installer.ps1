@@ -20,7 +20,7 @@ if (-not $rc) { throw "rc.exe (Windows SDK) nao encontrado." }
 if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar icon.rc." }
 
 Write-Host "[2/4] Compilando editor.exe (release, sem console, com icone)..." -ForegroundColor Cyan
-odin build . -out:editor.exe -subsystem:windows -o:speed -extra-linker-flags:"icon.res"
+odin build src -out:editor.exe -subsystem:windows -o:speed -extra-linker-flags:"icon.res"
 if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar o editor." }
 
 # ffmpeg empacotado precisa existir
