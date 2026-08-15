@@ -51,8 +51,10 @@ stream_dh :: proc() -> i32 { return stream_hi ? STREAM_HI_H : STREAM_LO_H }
 // demais: num arrasto lento fundo num vídeo de horas cada seek custa MAIS que 1.5s de
 // movimento do playhead, então o worker nunca chegava a <1.5s e o preview vivia preso na
 // miniatura borrada. 4s mantém o frame REAL (360/720p, levemente atrás do cursor) na tela
-// enquanto o worker persegue; saltos grandes (clique-seek, arrasto rápido) passam de 4s e
-// ainda mostram a miniatura na POSIÇÃO certa. Cache (clipes curtos) decodifica ao vivo — nunca cai aqui.
+// enquanto o worker persegue. Saltos grandes com o player PARADO (clique-seek) passam de 4s
+// e ainda mostram a miniatura na POSIÇÃO certa. No ARRASTO do cursor a miniatura NÃO entra
+// no player (qualidade): fica o último frame nítido. Cache (clipes curtos) decodifica ao
+// vivo — nunca cai aqui.
 SCRUB_SHARP_S :: f32(4.0)
 // scrub: acima desta latência (ms) de um decode de scrub por SOFTWARE, o clipe migra p/
 // NVDEC no scrub (c.scrub_hw). 700ms é conservador: mesmo o pior init de cuvid (~575ms) +

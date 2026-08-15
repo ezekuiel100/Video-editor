@@ -563,6 +563,13 @@ scrub_use_thumb :: proc(c: ^Clip, lt: f32) -> bool {
 	return abs(lt - thumb_t) < err_tex
 }
 
+// o player só cai no filmstrip com o cursor PARADO. Arrasto (régua ou barra) mantém
+// o último frame nítido — esticar 256×144 no canvas era a queda de qualidade.
+scrub_player_uses_thumb :: proc(c: ^Clip, lt: f32) -> bool {
+	if st.drag == .Playhead || player_seek_drag do return false
+	return scrub_use_thumb(c, lt)
+}
+
 // desenha UM segmento de vídeo/texto no canvas com um multiplicador de opacidade
 // (usado pelo blend da transição: clipe que sai × (1-p), clipe que entra × p).
 // `vt` é o tempo de EXIBIÇÃO (view_t), não o playhead cru — ver view_t.
@@ -597,16 +604,16 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	if seg_is_dup(i) && seg_dup[i].ok && seg_dup[i].src == sg.src do tex = seg_dup[i].tex
 	else if !c.tex_ok do return
 	else if c.streaming && c.thumbs_ready && c.nthumbs > 0 {
-		// o frame em c.tex está LONGE do alvo (arrastando o playhead, ou o respawn de
-		// um clique-seek ainda em voo): mostra a MINIATURA do filmstrip SÓ se ela estiver
-		// mais perto do cursor que o último frame nítido. Sem o empate com tex_t, um
-		// decode 5s atrás (ainda o momento certo) caía numa thumb a 50–100s num vídeo
-		// longo — o player "saltava" pra outra cena. Frame nítido substitui quando o
-		// worker chega. Só fora do playback contínuo: catch-up tocando não pisca thumb.
+		// clique-seek PARADO: se o frame nítido está longe e a miniatura está mais perto
+		// do alvo, mostra o filmstrip (cena certa, borrada) até o worker chegar.
+		// ARRASTO do cursor / barra: NUNCA troca por thumb — 256×144 esticado no canvas
+		// é o "a qualidade caiu". Fica o último 720p; o worker substitui quando decodifica.
+		// Playback contínuo também não pisca thumb (catch-up).
 		lt := seg_local(i, vt)
-		waiting := st.drag == .Playhead || player_seek_drag || !st.playing || intrinsics.atomic_load(&c.rsp_busy)
+		dragging := st.drag == .Playhead || player_seek_drag
+		waiting := dragging || !st.playing || intrinsics.atomic_load(&c.rsp_busy)
 		past_eof := c.eof_at > 0 && lt >= c.eof_at - 0.05 // além do fim real: congela (comportamento antigo)
-		if waiting && !past_eof && scrub_use_thumb(c, lt) {
+		if waiting && !past_eof && scrub_player_uses_thumb(c, lt) {
 			tex = c.thumbs[clamp(int(lt / c.thumb_dt), 0, c.nthumbs - 1)]
 			tw_ = f32(THUMB_W); th_ = f32(THUMB_H)
 			if st.playing do dbg_thumb_frames += 1 // diagnóstico: miniatura mostrada DURANTE o playback (flash borrado)

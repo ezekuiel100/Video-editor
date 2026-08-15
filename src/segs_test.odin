@@ -31,6 +31,7 @@ t_reset :: proc() {
 	st = State{}
 	selected = -1; play_clip = -1; drag_clip = -1; sel_trans = -1; bin_sel = -1
 	src_preview = -1
+	player_seek_drag = false
 	aud_prev = -1
 	snap_line = -1
 	seg_clipbrd_n = 0
@@ -683,6 +684,25 @@ scrub_thumb_so_se_mais_perto_que_o_frame :: proc(t: ^testing.T) {
 	testing.expect(t, !scrub_use_thumb(c, 53), "≤4s do frame nítido: não cai na thumb")
 	testing.expect(t, !scrub_use_thumb(c, 55), "5s atrás, thumb no mesmo instante: empate fica o frame")
 	testing.expect(t, scrub_use_thumb(c, 150), "cursor em outra cena: a thumb de 150s vence o frame em 50s")
+}
+
+@(test)
+scrub_arrasto_nao_usa_filmstrip_no_player :: proc(t: ^testing.T) {
+	// a política do player: arrastando, a thumb NÃO substitui o frame — mesmo quando
+	// scrub_use_thumb diria que ela está mais perto. Senão o canvas estica 256×144.
+	t_reset()
+	c := &clips[0]
+	c.nthumbs = 36
+	c.thumb_dt = 100
+	c.tex_t = 50
+	testing.expect(t, scrub_use_thumb(c, 150), "parado: thumb vence (cena certa)")
+	st.drag = .Playhead
+	testing.expect(t, !scrub_player_uses_thumb(c, 150), "arrasto na régua: fica o 720p")
+	st.drag = .None
+	player_seek_drag = true
+	testing.expect(t, !scrub_player_uses_thumb(c, 150), "arrasto na barra: fica o 720p")
+	player_seek_drag = false
+	testing.expect(t, scrub_player_uses_thumb(c, 150), "parado de novo: thumb pode entrar")
 }
 
 @(test)
