@@ -324,6 +324,10 @@ set_play_clip :: proc(si: int, local: f32) {
 				c.music_full = true
 				rl.SeekMusicStream(c.music, target)
 				rl.ResumeMusicStream(c.music)
+			} else {
+				// sem stream o invariante de debug (play_clip + src_audio) passa, mas
+				// este slot NÃO pode ficar como relógio: o playback leria Music zerado
+				play_clip = -1
 			}
 		} else {
 			// Stop antes do Seek: o Seek do raylib não descarta os sub-buffers já

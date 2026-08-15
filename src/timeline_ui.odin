@@ -42,7 +42,9 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			switch k {
 			case 0: do_undo()
 			case 1: do_redo()
-			case 2: remove_seg(selected, !alt_down())
+			case 2:
+				if track_locked[segs[selected].track] { set_toast("Trilha bloqueada") }
+				else do remove_seg(selected, !alt_down())
 			}
 		}
 		icon(ix, tb.y + tb.height/2, k)
@@ -400,7 +402,11 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : rl.Color{60,64,74,220})
 			rl.DrawLineEx({xr.x + 4, xr.y + 4}, {xr.x + 10, xr.y + 10}, 1.6, rl.WHITE)
 			rl.DrawLineEx({xr.x + 10, xr.y + 4}, {xr.x + 4, xr.y + 10}, 1.6, rl.WHITE)
-			if clicked(xr) { remove_seg(i, !alt_down()); consumed = true }
+			if clicked(xr) {
+				if track_locked[segs[i].track] { set_toast("Trilha bloqueada") }
+				else do remove_seg(i, !alt_down())
+				consumed = true
+			}
 		}
 
 		// forma de onda no RODAPÉ do mesmo bloco (estilo NLE), só se houver áudio
@@ -534,8 +540,12 @@ draw_timeline :: proc(r: rl.Rectangle) {
 				rl.DrawRectangleRounded({ ext.x + ext.width - 2.5, vr.y + vr.height/2 - 9, 5, 18 }, 0.5, 4, amber)
 				if hovered(eL) || hovered(eR) || dragging do ew_cursor = true
 				txt_c(rl.TextFormat("%.1fs", f64(td)), cut, badge.y + bh + 3, 11, amber)
-				if xbtn({ cut - 7, vr.y + 2, 14, 14 }) { segs[i].trans = 0; sel_trans = -1; consumed = true; set_toast("Transição removida") }
-				if !consumed && st.drag == .None && rl.IsMouseButtonPressed(.LEFT) && (hovered(eL) || hovered(eR)) {
+				if xbtn({ cut - 7, vr.y + 2, 14, 14 }) {
+					if track_locked[segs[i].track] { set_toast("Trilha bloqueada") }
+					else { segs[i].trans = 0; sel_trans = -1; set_toast("Transição removida") }
+					consumed = true
+				}
+				if !consumed && !track_locked[segs[i].track] && st.drag == .None && rl.IsMouseButtonPressed(.LEFT) && (hovered(eL) || hovered(eR)) {
 					st.drag = .TransDur; drag_clip = i; consumed = true
 				}
 				// clique na região selecionada não vira arrasto/seleção de clipe
@@ -560,10 +570,14 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			if is_sel {
 				rl.DrawRectangleLinesEx(reg, 1.4, white)
 				txt_c(rl.TextFormat("%.1fs", f64(sg.vfin)), vr.x + fw2/2, reg.y + reg.height + 2, 11, white)
-				if xbtn({ vr.x + 3, vr.y + 3, 14, 14 }) { segs[i].vfin = 0; sel_trans = -1; consumed = true; set_toast("Fade de entrada removido") }
+				if xbtn({ vr.x + 3, vr.y + 3, 14, 14 }) {
+					if track_locked[segs[i].track] { set_toast("Trilha bloqueada") }
+					else { segs[i].vfin = 0; sel_trans = -1; set_toast("Fade de entrada removido") }
+					consumed = true
+				}
 			}
 			if hg || is_sel do ew_cursor = true
-			if !consumed && st.drag == .None && rl.IsMouseButtonPressed(.LEFT) && hovered(grip) {
+			if !consumed && !track_locked[segs[i].track] && st.drag == .None && rl.IsMouseButtonPressed(.LEFT) && hovered(grip) {
 				sel_trans = i; sel_trans_kind = 1; selected = -1; bin_sel = -1
 				st.drag = .TransDur; drag_clip = i; consumed = true
 			}
@@ -581,10 +595,14 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			if is_sel {
 				rl.DrawRectangleLinesEx(reg, 1.4, white)
 				txt_c(rl.TextFormat("%.1fs", f64(sg.vfout)), reg.x + fw2/2, reg.y + reg.height + 2, 11, white)
-				if xbtn({ reg.x + fw2 - 17, vr.y + 3, 14, 14 }) { segs[i].vfout = 0; sel_trans = -1; consumed = true; set_toast("Fade de saída removido") }
+				if xbtn({ reg.x + fw2 - 17, vr.y + 3, 14, 14 }) {
+					if track_locked[segs[i].track] { set_toast("Trilha bloqueada") }
+					else { segs[i].vfout = 0; sel_trans = -1; set_toast("Fade de saída removido") }
+					consumed = true
+				}
 			}
 			if hg || is_sel do ew_cursor = true
-			if !consumed && st.drag == .None && rl.IsMouseButtonPressed(.LEFT) && hovered(grip) {
+			if !consumed && !track_locked[segs[i].track] && st.drag == .None && rl.IsMouseButtonPressed(.LEFT) && hovered(grip) {
 				sel_trans = i; sel_trans_kind = 2; selected = -1; bin_sel = -1
 				st.drag = .TransDur; drag_clip = i; consumed = true
 			}
@@ -721,7 +739,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		mp := rl.GetMousePosition()
 		// alças de áudio do segmento SELECIONADO têm prioridade sobre mover/aparar
 		near :: proc(a, b: rl.Vector2) -> bool { return abs(a.x-b.x) < 8 && abs(a.y-b.y) < 8 }
-		if selected >= 0 && seg_ready(selected) {
+		if selected >= 0 && seg_ready(selected) && !track_locked[segs[selected].track] {
 			if g_sel_fi.x >= 0 && near(mp, g_sel_fi) {
 				st.drag = .FadeIn; drag_clip = selected; consumed = true
 			} else if g_sel_fo.x >= 0 && near(mp, g_sel_fo) {
@@ -746,13 +764,14 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			cr := rl.Rectangle{ x, track_y(segs[i].track) + 4, w, th(segs[i].track) - 8 }
 			if cr.y + cr.height < rows_clip.y || cr.y > rows_clip.y + rows_clip.height do continue // fora da viewport
 			if rl.CheckCollisionPointRec(mp, cr) {
+				// se dois retângulos cobrirem o ponto (gap 0, overlap), ganha o de CIMA na tela
+				if hit >= 0 && track_row(segs[i].track) >= track_row(segs[hit].track) do continue
 				hit = i
 				// perto de uma borda (e o segmento largo o bastante) -> aparar
 				if w > 16 {
 					if mp.x - x < 6 do edge = -1
 					else if (x + w) - mp.x < 6 do edge = 1
 				}
-				break
 			}
 		}
 		if hit >= 0 && track_locked[segs[hit].track] {
@@ -922,9 +941,13 @@ draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
 	}
 }
 
-// HH:MM:SS:FF (30 fps)
+// HH:MM:SS:FF — FF segue o fps do clipe sob o playhead (fonte), senão 30
 timecode :: proc(total: f32) -> cstring {
+	fps := DEC_FPS
+	if v := view_seg(); v >= 0 {
+		if c := cfps_of(seg_src(v)); c > 0 do fps = c
+	}
 	s := int(total)
-	f := int((total - f32(s)) * 30)
+	f := int((total - f32(s)) * fps)
 	return fmt.ctprintf("%02d:%02d:%02d:%02d", s/3600, (s%3600)/60, s%60, f)
 }

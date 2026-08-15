@@ -194,21 +194,30 @@ update :: proc() {
 		} else if fx_sel >= 0 && fx_sel < nfx { // clipe de efeito selecionado
 			remove_fxseg(fx_sel); set_toast("Efeito removido")
 		} else if sel_trans >= 0 && sel_trans < nsegs { // transição/fade selecionado tem prioridade
-			switch sel_trans_kind {
-			case 1: segs[sel_trans].vfin = 0;  set_toast("Fade de entrada removido")
-			case 2: segs[sel_trans].vfout = 0; set_toast("Fade de saída removido")
-			case:   segs[sel_trans].trans = 0; set_toast("Transição removida")
+			if track_locked[segs[sel_trans].track] { set_toast("Trilha bloqueada") }
+			else {
+				switch sel_trans_kind {
+				case 1: segs[sel_trans].vfin = 0;  set_toast("Fade de entrada removido")
+				case 2: segs[sel_trans].vfout = 0; set_toast("Fade de saída removido")
+				case:   segs[sel_trans].trans = 0; set_toast("Transição removida")
+				}
+				sel_trans = -1
 			}
-			sel_trans = -1
 		} else if seg_marks_count() > 1 {
 			// deletar GRUPO: remove os marcados de índice MAIOR p/ MENOR (a compactação não
 			// invalida os índices menores). Deixa os vãos (ripple=false) p/ não embaralhar o resto.
-			n := seg_marks_count()
-			for k := nsegs - 1; k >= 0; k -= 1 do if seg_marked[k] do remove_seg(k, false)
+			n := 0
+			for k := nsegs - 1; k >= 0; k -= 1 {
+				if !seg_marked[k] do continue
+				if track_locked[segs[k].track] do continue // cadeado: não apaga
+				remove_seg(k, false); n += 1
+			}
 			seg_clear_marks(); selected = -1
-			set_toast(rl.TextFormat("%d clipes removidos", n))
+			if n == 0 do set_toast("Trilha bloqueada")
+			else do set_toast(rl.TextFormat("%d clipes removidos", n))
 		} else if selected >= 0 {
-			remove_seg(selected, !alt_down())
+			if track_locked[segs[selected].track] { set_toast("Trilha bloqueada") }
+			else do remove_seg(selected, !alt_down())
 		}
 	}
 
@@ -279,7 +288,7 @@ update :: proc() {
 				scrub_req_t = local
 			}
 		}
-	} else if st.drag == .Clip && drag_clip >= 0 && drag_clip < nsegs {
+	} else if st.drag == .Clip && drag_clip >= 0 && drag_clip < nsegs && !track_locked[segs[drag_clip].track] {
 		sg := &segs[drag_clip]
 		src := seg_src(drag_clip)
 		mt := tl_t(m.x)
@@ -365,28 +374,30 @@ update :: proc() {
 			if abs(new_end - snapped) > 0.0001 do snap_line = -1
 			sg.dur = new_end - sg.start
 		}
-	} else if st.drag == .FadeIn && drag_clip >= 0 && drag_clip < nsegs {
+	} else if st.drag == .FadeIn && drag_clip >= 0 && drag_clip < nsegs && !track_locked[segs[drag_clip].track] {
 		sg := &segs[drag_clip]
 		sg.fade_in = clamp(tl_t(m.x) - sg.start, 0, sg.dur)
 		if sg.fade_in + sg.fade_out > sg.dur do sg.fade_in = max(0, sg.dur - sg.fade_out)
-	} else if st.drag == .FadeOut && drag_clip >= 0 && drag_clip < nsegs {
+	} else if st.drag == .FadeOut && drag_clip >= 0 && drag_clip < nsegs && !track_locked[segs[drag_clip].track] {
 		sg := &segs[drag_clip]
 		sg.fade_out = clamp((sg.start + sg.dur) - tl_t(m.x), 0, sg.dur)
 		if sg.fade_in + sg.fade_out > sg.dur do sg.fade_out = max(0, sg.dur - sg.fade_in)
-	} else if st.drag == .TransDur && drag_clip >= 0 && drag_clip < nsegs {
+	} else if st.drag == .TransDur && drag_clip >= 0 && drag_clip < nsegs && !track_locked[segs[drag_clip].track] {
 		// arrastar uma alça do dissolver/fade selecionado. Mínimo 0.2s (remover é pelo
 		// Delete/X). O tipo vem de sel_trans_kind (consistente: só se arrasta o selecionado).
 		sg := &segs[drag_clip]
 		switch sel_trans_kind {
 		case 1: // fade preto de entrada: largura = distância da borda esquerda
 			sg.vfin  = clamp(tl_t(m.x) - sg.start, 0.1, max(f32(0.2), sg.dur*0.9))
+			if sg.vfin + sg.vfout > sg.dur do sg.vfin = max(0.1, sg.dur - sg.vfout)
 		case 2: // fade preto de saída: largura = distância da borda direita
 			sg.vfout = clamp((sg.start + sg.dur) - tl_t(m.x), 0.1, max(f32(0.2), sg.dur*0.9))
+			if sg.vfin + sg.vfout > sg.dur do sg.vfout = max(0.1, sg.dur - sg.vfin)
 		case: // dissolver: D é SIMÉTRICO no corte, distância do mouse ao corte = D/2
 			half := abs(tl_t(m.x) - sg.start)
 			sg.trans = clamp(half * 2, 0.2, trans_max(drag_clip))
 		}
-	} else if st.drag == .Vol && drag_clip >= 0 && drag_clip < nsegs {
+	} else if st.drag == .Vol && drag_clip >= 0 && drag_clip < nsegs && !track_locked[segs[drag_clip].track] {
 		frac := clamp((g_vby1 - m.y) / (g_vby1 - g_vby0), 0, 1) // base=0, topo=VOL_MAX
 		v := frac * VOL_MAX
 		if abs(v - 1) < 0.06 * VOL_MAX do v = 1 // gruda em 100%

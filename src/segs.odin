@@ -204,6 +204,11 @@ clamp_fades :: proc(sg: ^Seg) {
 	sg.fade_in  = clamp(sg.fade_in,  0, sg.dur)
 	sg.fade_out = clamp(sg.fade_out, 0, sg.dur)
 	if sg.fade_in + sg.fade_out > sg.dur do sg.fade_out = max(0, sg.dur - sg.fade_in)
+	// fade PRETO: as duas rampas no mesmo clipe não podem somar mais que dur
+	// (o arrasto de cada alça ia até 0.9*dur sozinho — as duas juntas estouravam)
+	sg.vfin  = clamp(sg.vfin,  0, sg.dur)
+	sg.vfout = clamp(sg.vfout, 0, sg.dur)
+	if sg.vfin + sg.vfout > sg.dur do sg.vfout = max(0, sg.dur - sg.vfin)
 }
 
 // (main, todo frame) reajusta os fades de TODOS os segmentos — mas só com a interação
@@ -436,7 +441,7 @@ check_invariants :: proc() {
 	// o relógio-mestre precisa de fonte pronta e com áudio
 	if play_clip >= 0 {
 		if !seg_ready(play_clip) do inv_fail("play_clip %d com fonte não-pronta", play_clip)
-		if !seg_src(play_clip).has_audio do inv_fail("play_clip %d é o relógio mas a fonte não tem áudio", play_clip)
+		if !seg_src(play_clip).src_audio do inv_fail("play_clip %d é o relógio mas a fonte não tem áudio", play_clip)
 	}
 	for i in 0 ..< nsegs {
 		s := segs[i]
@@ -495,7 +500,9 @@ seg_clipbrd_n: int
 // copia o grupo marcado (se houver) ou o segmento selecionado; retorna quantos
 copy_segs :: proc() -> int {
 	n := 0
-	if seg_marks_count() > 1 {
+	if seg_marks_count() >= 1 {
+		// 1 marcado também entra aqui: senão um clipe marcado + outro selecionado
+		// copiava o selecionado (o grupo de 1 era ignorado)
 		for i in 0 ..< nsegs do if seg_marked[i] && seg_ready(i) { seg_clipbrd[n] = segs[i]; n += 1 }
 	} else if selected >= 0 && selected < nsegs && seg_ready(selected) {
 		seg_clipbrd[0] = segs[selected]
@@ -654,9 +661,10 @@ remove_seg :: proc(si: int, ripple := true) {
 		// os clipes de EFEITO da trilha deslizam junto — senão um segmento escorregava
 		// p/ cima de um efeito (sobreposição que nenhum arrasto permite criar)
 		for k in 0 ..< nfx do if fxsegs[k].track == rt && fxsegs[k].start > rs + 0.001 do fxsegs[k].start -= rd
-		// leva o playhead junto p/ ele ficar sobre o mesmo conteúdo de antes
-		if st.playhead >= rs + rd do st.playhead -= rd
-		else if st.playhead > rs do st.playhead = rs
+		// o playhead é TEMPO GLOBAL, não por trilha: recuá-lo aqui pulava o conteúdo
+		// das outras trilhas (apagar 10s em V2 com o cursor em 30s em V1 jogava p/ 20s).
+		// O seek_global abaixo reposiciona A/V no mesmo instante; o que escorregou
+		// nesta trilha passa por baixo do cursor, o resto não se mexe.
 	}
 	st.playing = false
 	seek_global(st.playhead)
@@ -732,7 +740,7 @@ snap_start :: proc(tr, moving: int, proposed: f32, dur: f32) -> f32 {
 	thr := SNAP_PX / pps()
 	result := proposed
 	bestd := thr
-	pts: [2 * MAX_SEGS + 2]f32
+	pts: [2 * MAX_SEGS + 2 * MAX_FX + 2]f32
 	n := 0
 	pts[n] = 0; n += 1
 	pts[n] = st.playhead; n += 1
@@ -741,6 +749,12 @@ snap_start :: proc(tr, moving: int, proposed: f32, dur: f32) -> f32 {
 		if i == moving || !seg_blocks(i) do continue // importando também encaixa (é obstáculo)
 		pts[n] = segs[i].start; n += 1
 		pts[n] = segs[i].start + segs[i].dur; n += 1
+	}
+	// efeitos também são parede: sem as bordas aqui o snap alinhava num ponto que
+	// overlaps_any rejeitava em seguida (o clipe "recusava" a guia)
+	for k in 0 ..< nfx {
+		pts[n] = fxsegs[k].start; n += 1
+		pts[n] = fxsegs[k].start + fxsegs[k].dur; n += 1
 	}
 	for k in 0 ..< n {
 		p := pts[k]
@@ -757,7 +771,7 @@ snap_edge :: proc(moving: int, proposed: f32) -> f32 {
 	thr := SNAP_PX / pps()
 	result := proposed
 	bestd := thr
-	pts: [2 * MAX_SEGS + 2]f32
+	pts: [2 * MAX_SEGS + 2 * MAX_FX + 2]f32
 	n := 0
 	pts[n] = 0; n += 1
 	pts[n] = st.playhead; n += 1
@@ -765,6 +779,10 @@ snap_edge :: proc(moving: int, proposed: f32) -> f32 {
 		if i == moving || !seg_blocks(i) do continue
 		pts[n] = segs[i].start; n += 1
 		pts[n] = segs[i].start + segs[i].dur; n += 1
+	}
+	for k in 0 ..< nfx {
+		pts[n] = fxsegs[k].start; n += 1
+		pts[n] = fxsegs[k].start + fxsegs[k].dur; n += 1
 	}
 	for k in 0 ..< n {
 		p := pts[k]
@@ -778,7 +796,9 @@ snap_edge :: proc(moving: int, proposed: f32) -> f32 {
 seg_at :: proc(t: f32) -> int {
 	best := -1
 	for i in 0 ..< nsegs {
-		if !seg_ready(i) || seg_src(i).is_audio || segs[i].aonly || t < segs[i].start || t >= segs[i].start + segs[i].dur do continue
+		if !seg_ready(i) || seg_src(i).is_audio || segs[i].aonly do continue
+		if segs[i].track < MAXV && track_hidden[segs[i].track] do continue // olho fechado: não vence o preview
+		if t < segs[i].start || t >= segs[i].start + segs[i].dur do continue
 		if best < 0 || segs[i].track > segs[best].track do best = i
 	}
 	return best
@@ -791,7 +811,7 @@ audio_seg_at :: proc(t: f32) -> int {
 	best := -1
 	for i in 0 ..< nsegs {
 		if !seg_ready(i) || t < segs[i].start || t >= segs[i].start + segs[i].dur do continue
-		if !seg_src(i).has_audio || segs[i].muted || track_muted[segs[i].track] do continue
+		if !seg_src(i).src_audio || segs[i].muted || track_muted[segs[i].track] do continue
 		if is_audio_track(segs[i].track) do continue // trilha de áudio = secundário, não master
 		if best < 0 || segs[i].track > segs[best].track do best = i
 	}
@@ -799,7 +819,7 @@ audio_seg_at :: proc(t: f32) -> int {
 	// nenhum áudio de vídeo: aí sim uma trilha de áudio vira o relógio (timeline só-música)
 	for i in 0 ..< nsegs {
 		if !seg_ready(i) || t < segs[i].start || t >= segs[i].start + segs[i].dur do continue
-		if !seg_src(i).has_audio || segs[i].muted || track_muted[segs[i].track] || !is_audio_track(segs[i].track) do continue
+		if !seg_src(i).src_audio || segs[i].muted || track_muted[segs[i].track] || !is_audio_track(segs[i].track) do continue
 		if best < 0 || segs[i].track > segs[best].track do best = i
 	}
 	return best
@@ -967,9 +987,9 @@ view_t :: proc() -> f32 {
 	td := timeline_dur()
 	return (td > 0 && st.playhead >= td) ? max(0, td - VIEW_EPS) : st.playhead
 }
-view_seg :: proc() -> int { return seg_at(st.playhead) }
+view_seg :: proc() -> int { return seg_at(view_t()) } // view_t: no fim da timeline, o último quadro (não -1)
 // mídia-fonte sob o playhead (-1 = nenhuma) — usada p/ destacar no bin
-view_src :: proc() -> int { a := seg_at(st.playhead); return a >= 0 ? segs[a].src : -1 }
+view_src :: proc() -> int { a := view_seg(); return a >= 0 ? segs[a].src : -1 }
 // velocidade efetiva do segmento (0 no zero-value = 1). dur é timeline; a fonte
 // consumida é dur*speed, então o mapa timeline->fonte multiplica o delta por speed.
 seg_speed :: proc(si: int) -> f32 { s := segs[si].speed; return s <= 0 ? 1 : s }

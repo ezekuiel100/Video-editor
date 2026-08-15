@@ -25,7 +25,7 @@ t_reset :: proc() {
 	clips[0].probed = true; clips[0].dur = 100
 	clips[1].probed = true; clips[1].dur = 100
 	g_nv = 3; g_na = 2
-	for i in 0 ..< MAXTRACKS { track_muted[i] = false; track_locked[i] = false; track_h[i] = 0 }
+	for i in 0 ..< MAXTRACKS { track_muted[i] = false; track_locked[i] = false; track_hidden[i] = false; track_h[i] = 0 }
 	// geometria vertical determinística (o draw_timeline é quem seta isso em runtime)
 	g_lanes_top = 0; g_track_h = 72; g_track_gap = 3
 	st = State{}
@@ -165,7 +165,7 @@ remove_com_ripple :: proc(t: ^testing.T) {
 	testing.expect(t, nsegs == 3, "sobram 3 segmentos")
 	testing.expect(t, t_feq(segs[1].start, 15), "ripple fecha o buraco na mesma trilha")
 	testing.expect(t, t_feq(segs[2].start, 30), "a outra trilha não desliza")
-	testing.expect(t, t_feq(st.playhead, 17), "playhead acompanha o conteúdo (22−5)")
+	testing.expect(t, t_feq(st.playhead, 22), "playhead é tempo global: ripple nesta trilha NÃO o recua")
 	testing.expect(t, selected == 1, "índice selecionado corrigido após a compactação")
 }
 
@@ -607,4 +607,68 @@ linha_de_seg_do_projeto_recusa_o_que_derruba_o_programa :: proc(t: ^testing.T) {
 	testing.expect(t, !seg_line_ok(0, 0, nan, 5), "NaN no in_off")
 	testing.expect(t, !seg_line_ok(0, 0, 0, nan), "NaN na duração")
 	testing.expect(t, !seg_line_ok(0, 1e30, 0, 5), "infinito no start")
+}
+
+@(test)
+ripple_nao_puxa_playhead_de_outra_trilha :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 0, 0, 60, 0)  // V1 cobre o playhead
+	add_seg(1, 10, 0, 10, 1) // V2 [10,20) — o que some
+	st.playhead = 30
+	remove_seg(1) // ripple só em V2
+	testing.expect(t, nsegs == 1, "V2 sumiu")
+	testing.expect(t, t_feq(st.playhead, 30), "V1 não foi editada: o cursor fica nos 30s")
+}
+
+@(test)
+view_seg_pula_trilha_oculta_e_usa_view_t :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 0, 0, 10, 0) // V1
+	add_seg(1, 0, 0, 10, 2) // V3 por cima
+	track_hidden[2] = true
+	st.playhead = 5
+	testing.expect(t, view_seg() == 0, "olho fechado em V3: o preview/inspector veem V1")
+	st.playhead = 10 // fim EXATO da timeline
+	testing.expect(t, view_seg() == 0, "view_t recua 1ms: último quadro, não vazio")
+}
+
+@(test)
+copy_um_marcado_nao_o_selecionado :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 5)
+	b := add_seg(1, 10, 0, 5, 1)
+	selected = b
+	seg_marked[a] = true
+	testing.expect(t, copy_segs() == 1, "copia o único marcado")
+	testing.expect(t, seg_clipbrd[0].src == 0, "é o marcado, não o selecionado")
+}
+
+@(test)
+fades_video_nao_somam_mais_que_dur :: proc(t: ^testing.T) {
+	t_reset()
+	si := add_seg(0, 0, 0, 2)
+	segs[si].vfin = 1.8
+	segs[si].vfout = 1.8
+	clamp_fades(&segs[si])
+	testing.expect(t, segs[si].vfin + segs[si].vfout <= 2.001, "as duas rampas pretas cabem no clipe")
+}
+
+@(test)
+snap_alinha_em_efeito :: proc(t: ^testing.T) {
+	t_reset()
+	st.zoom = 1 // pps() != 0
+	add_seg(0, 0, 0, 4)
+	nfx = 1
+	fxsegs[0] = FxSeg{ start = 10, dur = 2, track = 0 }
+	got := snap_start(0, -1, 10.02, 3)
+	testing.expect(t, t_feq(got, 10), "borda do efeito é ponto de encaixe")
+}
+
+@(test)
+audio_seg_at_olha_src_audio :: proc(t: ^testing.T) {
+	t_reset()
+	clips[0].src_audio = true
+	clips[0].has_audio = false // stream ainda não abriu
+	add_seg(0, 0, 0, 10)
+	testing.expect(t, audio_seg_at(5) == 0, "fonte COM faixa é master mesmo sem rl.Music")
 }
