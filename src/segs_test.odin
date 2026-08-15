@@ -672,3 +672,48 @@ audio_seg_at_olha_src_audio :: proc(t: ^testing.T) {
 	add_seg(0, 0, 0, 10)
 	testing.expect(t, audio_seg_at(5) == 0, "fonte COM faixa é master mesmo sem rl.Music")
 }
+
+@(test)
+scrub_thumb_so_se_mais_perto_que_o_frame :: proc(t: ^testing.T) {
+	t_reset()
+	c := &clips[0]
+	c.nthumbs = 36
+	c.thumb_dt = 100 // vídeo de ~1h: 1 thumb a cada 100s (centros em 50, 150, …)
+	c.tex_t = 50
+	testing.expect(t, !scrub_use_thumb(c, 53), "≤4s do frame nítido: não cai na thumb")
+	testing.expect(t, !scrub_use_thumb(c, 55), "5s atrás, thumb no mesmo instante: empate fica o frame")
+	testing.expect(t, scrub_use_thumb(c, 150), "cursor em outra cena: a thumb de 150s vence o frame em 50s")
+}
+
+@(test)
+scrub_arrasto_atualiza_video_sob_texto :: proc(t: ^testing.T) {
+	t_reset()
+	clips[0].streaming = true
+	clips[0].tex_t = 0
+	clips[1].is_text = true
+	add_seg(0, 0, 0, 10, 0) // V1 = vídeo
+	add_seg(1, 0, 0, 10, 1) // V2 = título por cima (é o view_seg)
+	st.playhead = 5
+	scrub_req_c = -1
+	scrub_req_t = 0
+	testing.expect(t, view_seg() == 1, "topo é o texto")
+	scrub_at_playhead()
+	testing.expect(t, scrub_req_c == 0, "o worker pede o VÍDEO debaixo, não o título")
+	testing.expect(t, t_feq(scrub_req_t, 5), "no tempo local do cursor")
+	scrub_req_c = -1
+}
+
+@(test)
+scrub_arrasto_pede_camada_mais_atrasada :: proc(t: ^testing.T) {
+	t_reset()
+	clips[0].streaming = true; clips[0].tex_t = 1 // base quase no cursor
+	clips[1].streaming = true; clips[1].tex_t = 0 // overlay parado no 0
+	add_seg(0, 0, 0, 10, 0)
+	add_seg(1, 0, 0, 10, 1)
+	st.playhead = 8
+	scrub_req_c = -1
+	scrub_at_playhead()
+	testing.expect(t, scrub_req_c == 1, "overlay está 8s atrasado; a base só 7s")
+	testing.expect(t, t_feq(scrub_req_t, 8), "tempo local do overlay")
+	scrub_req_c = -1
+}

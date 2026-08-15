@@ -16,7 +16,7 @@ update :: proc() {
 	// FPS dinâmico: parado (sem playback nem arrasto), 30fps bastam p/ a UI —
 	// metade do custo de render; qualquer interação volta a 60 no frame seguinte.
 	// O avanço por relógio de parede usa dt, então funciona em qualquer fps.
-	idle := !st.playing && st.drag == .None && !win_dragging && !tl_hbar_drag && !zoom_bar_drag && !bin_marquee && !tl_marquee && !tl_split_drag && !md_split_drag && track_resize < 0
+	idle := !st.playing && st.drag == .None && !player_seek_drag && !win_dragging && !tl_hbar_drag && !zoom_bar_drag && !bin_marquee && !tl_marquee && !tl_split_drag && !md_split_drag && track_resize < 0
 	// PLAYBACK: sem cap de CPU — deixa o VSYNC ditar o ritmo (trava no vblank do monitor,
 	// como o VLC). SetTargetFPS(60) por timer de CPU não sincroniza com o refresh e batia
 	// contra o vsync = judder/tearing. 0 = ilimitado, mas o VSYNC_HINT segura no refresh atual
@@ -266,28 +266,9 @@ update :: proc() {
 	// arrasto: mover playhead (scrub), mover/aparar um segmento, ou soltar do bin
 	if st.drag == .Playhead {
 		st.playhead = clamp(tl_t(m.x), 0, timeline_dur())
-		vc := view_seg()
-		// se o seg de topo é uma vista DUPLICADA, NÃO escreve na textura da fonte com
-		// o tempo dele (corrompia a camada do dono, que usa a mesma textura) — a vista
-		// dup é atualizada pelo tick por-frame (dup_frame) com textura própria
-		if vc >= 0 && !seg_is_dup(vc) {
-			src := seg_src(vc)
-			local := seg_local(vc, st.playhead)
-			if !src.streaming {
-				clip_show(src, int(local * cfps_of(src))) // cache: preview ao vivo, direto da RAM
-			} else {
-				// streaming: delega o frame ao worker async (não trava a UI); keyframes
-				// chegam conforme o decode dá (num arquivo de HORAS cada spawn paga o
-				// parse do índice, ~centenas de ms) e a MINIATURA cobre o meio-tempo.
-				// NOTA: houve uma tentativa de "arrasto suave" (ler o pipe do decoder ao
-				// vivo sequencialmente + respawns de convergência) — REVERTIDA: a
-				// oscilação entre os modos degradava a sessão com o tempo (preview preso
-				// na miniatura, worker descartado, loop de respawns). Se voltar ao tema,
-				// o caminho certo é um decoder PERSISTENTE de scrub por clipe.
-				intrinsics.atomic_store(&scrub_req_c, segs[vc].src)
-				scrub_req_t = local
-			}
-		}
+		// todas as trilhas (não só o topo) + worker no streaming mais atrasado.
+		// ver scrub_at_playhead: título em cima não pode congelar o vídeo debaixo.
+		scrub_at_playhead()
 	} else if st.drag == .Clip && drag_clip >= 0 && drag_clip < nsegs && !track_locked[segs[drag_clip].track] {
 		sg := &segs[drag_clip]
 		src := seg_src(drag_clip)
@@ -542,9 +523,25 @@ update :: proc() {
 		snap_line = -1
 	}
 
+	// barra do player (e tela cheia): o playhead já foi atualizado no draw do
+	// frame anterior; pede o mesmo preview do arrasto na régua. Sem isto a barra
+	// só atualizava cache — clipe longo ficava no frame velho até soltar.
+	if player_seek_drag && st.drag != .Playhead {
+		if src_preview >= 0 && src_preview < nclips {
+			c := &clips[src_preview]
+			if !c.streaming do clip_show(c, int(src_t * cfps_of(c)))
+			else {
+				intrinsics.atomic_store(&scrub_req_c, src_preview)
+				scrub_req_t = src_t
+			}
+		} else {
+			scrub_at_playhead()
+		}
+	}
+
 	// scrub streaming: sobe o frame que o worker decodificou (só na main thread);
 	// fora do scrub, deixa o worker ocioso.
-	if st.drag != .Playhead do intrinsics.atomic_store(&scrub_req_c, -1)
+	if st.drag != .Playhead && !player_seek_drag do intrinsics.atomic_store(&scrub_req_c, -1)
 	if intrinsics.atomic_load(&scrub_ready) {
 		dc := scrub_done_c
 		// NÃO sobe o frame de scrub durante o PLAYBACK: um scrub tardio (o worker ainda estava

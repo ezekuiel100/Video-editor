@@ -935,6 +935,44 @@ show_playhead_frame :: proc() {
 	}
 }
 
+// preview DURANTE o arrasto do playhead / barra do player. `show_playhead_frame` não
+// roda nesse gesto (o decode ao vivo brigaria com o worker), então isto é quem manda
+// a imagem acompanhar o cursor:
+//   • cache (clipes curtos): frame exato da RAM em TODAS as trilhas visíveis — não
+//     só no topo. Sem isto, um título/legenda em V2 fazia `view_seg()` devolver o
+//     texto e o vídeo debaixo ficava CONGELADO o arrasto inteiro.
+//   • streaming (clipes longos): um pedido ao worker (um canal só). Escolhe a camada
+//     mais ATRASADA do cursor — overlay nítido + base a 30s não deixa a base para trás.
+// Texto / imagem / vista dup não pedem decode (já têm o próprio caminho).
+scrub_at_playhead :: proc() {
+	vt := view_t()
+	req_c := -1
+	req_t: f32
+	best := f32(-1)
+	for t := g_nv - 1; t >= 0; t -= 1 { // topo → base (empate de atraso: fica o de cima)
+		if track_hidden[t] do continue
+		i := seg_on_track_at(t, vt)
+		if i < 0 || segs[i].aonly || seg_is_dup(i) do continue
+		src := seg_src(i)
+		if src.is_text || src.is_audio || src.is_img do continue
+		local := seg_local(i, vt)
+		if !src.streaming {
+			clip_show(src, int(local * cfps_of(src)))
+			continue
+		}
+		err := abs(local - src.tex_t)
+		if req_c < 0 || err > best {
+			req_c = segs[i].src
+			req_t = local
+			best = err
+		}
+	}
+	if req_c >= 0 {
+		intrinsics.atomic_store(&scrub_req_c, req_c)
+		scrub_req_t = req_t
+	}
+}
+
 // linha (de cima p/ baixo) do lane da trilha `t`, contando só as VISÍVEIS: vídeo em cima
 // (V-topo..V1, invertido), áudio embaixo (A1..A_n). Vídeo t ocupa a linha (g_nv-1-t); áudio
 // (índice MAXV+a) ocupa a linha (g_nv+a).

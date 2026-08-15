@@ -339,10 +339,13 @@ draw_fullscreen_video :: proc(sw, sh: f32) {
 		if src_preview >= 0 {
 			src_t = np
 			if !clips[src_preview].streaming do clip_show(&clips[src_preview], int(np * cfps_of(&clips[src_preview])))
+			else {
+				intrinsics.atomic_store(&scrub_req_c, src_preview)
+				scrub_req_t = src_t
+			}
 		} else {
 			st.playhead = np
-			v := view_seg()
-			if v >= 0 && !seg_src(v).streaming do clip_show(seg_src(v), int(seg_local(v, np) * cfps_of(seg_src(v))))
+			scrub_at_playhead()
 		}
 	}
 
@@ -548,6 +551,18 @@ render_text_png :: proc(c: ^Clip, sg: Seg, path: string) -> bool {
 	return ok
 }
 
+// o filmstrip só substitui o último frame decodificado se estiver MAIS PERTO do
+// cursor. `tex_t` perto (≤ SCRUB_SHARP_S) sempre vence — é nítido e já é o momento.
+// Empate: fica o frame (nitidez). Thumb mais longe que o frame: fica o frame.
+scrub_use_thumb :: proc(c: ^Clip, lt: f32) -> bool {
+	if c.nthumbs <= 0 || c.thumb_dt <= 0 do return false
+	err_tex := abs(lt - c.tex_t)
+	if err_tex <= SCRUB_SHARP_S do return false
+	ti := clamp(int(lt / c.thumb_dt), 0, c.nthumbs - 1)
+	thumb_t := (f32(ti) + 0.5) * c.thumb_dt
+	return abs(lt - thumb_t) < err_tex
+}
+
 // desenha UM segmento de vídeo/texto no canvas com um multiplicador de opacidade
 // (usado pelo blend da transição: clipe que sai × (1-p), clipe que entra × p).
 // `vt` é o tempo de EXIBIÇÃO (view_t), não o playhead cru — ver view_t.
@@ -583,14 +598,15 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	else if !c.tex_ok do return
 	else if c.streaming && c.thumbs_ready && c.nthumbs > 0 {
 		// o frame em c.tex está LONGE do alvo (arrastando o playhead, ou o respawn de
-		// um clique-seek ainda em voo): mostra a MINIATURA do filmstrip do ponto certo —
-		// borrada, mas feedback INSTANTÂNEO na posição do cursor (estilo NLE); o frame
-		// nítido substitui assim que o decode assíncrono chega (tex_t alcança o alvo).
-		// Só fora do playback contínuo: um catch-up tocando NÃO deve piscar miniatura.
+		// um clique-seek ainda em voo): mostra a MINIATURA do filmstrip SÓ se ela estiver
+		// mais perto do cursor que o último frame nítido. Sem o empate com tex_t, um
+		// decode 5s atrás (ainda o momento certo) caía numa thumb a 50–100s num vídeo
+		// longo — o player "saltava" pra outra cena. Frame nítido substitui quando o
+		// worker chega. Só fora do playback contínuo: catch-up tocando não pisca thumb.
 		lt := seg_local(i, vt)
-		waiting := st.drag == .Playhead || !st.playing || intrinsics.atomic_load(&c.rsp_busy)
+		waiting := st.drag == .Playhead || player_seek_drag || !st.playing || intrinsics.atomic_load(&c.rsp_busy)
 		past_eof := c.eof_at > 0 && lt >= c.eof_at - 0.05 // além do fim real: congela (comportamento antigo)
-		if waiting && !past_eof && abs(lt - c.tex_t) > SCRUB_SHARP_S {
+		if waiting && !past_eof && scrub_use_thumb(c, lt) {
 			tex = c.thumbs[clamp(int(lt / c.thumb_dt), 0, c.nthumbs - 1)]
 			tw_ = f32(THUMB_W); th_ = f32(THUMB_H)
 			if st.playing do dbg_thumb_frames += 1 // diagnóstico: miniatura mostrada DURANTE o playback (flash borrado)

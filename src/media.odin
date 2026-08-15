@@ -47,7 +47,7 @@ stream_hi: bool = true
 stream_dw :: proc() -> i32 { return stream_hi ? STREAM_HI_W : STREAM_LO_W }
 stream_dh :: proc() -> i32 { return stream_hi ? STREAM_HI_H : STREAM_LO_H }
 // scrub (streaming): distância MÁX (s, no tempo da fonte) que o último frame decodificado
-// pode estar do cursor antes de cair pra miniatura 96×54 do filmstrip. Era 1.5 fixo — curto
+// pode estar do cursor antes de cair pra miniatura 256×144 do filmstrip. Era 1.5 fixo — curto
 // demais: num arrasto lento fundo num vídeo de horas cada seek custa MAIS que 1.5s de
 // movimento do playhead, então o worker nunca chegava a <1.5s e o preview vivia preso na
 // miniatura borrada. 4s mantém o frame REAL (360/720p, levemente atrás do cursor) na tela

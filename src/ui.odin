@@ -2189,10 +2189,13 @@ draw_preview :: proc(r: rl.Rectangle) {
 		if src_preview >= 0 {
 			src_t = np
 			if !clips[src_preview].streaming do clip_show(&clips[src_preview], int(np * cfps_of(&clips[src_preview]))) // cache: scrub instantâneo
+			else { // streaming: mesmo worker da régua (o update também pede; aqui antecipa 1 frame)
+				intrinsics.atomic_store(&scrub_req_c, src_preview)
+				scrub_req_t = src_t
+			}
 		} else {
 			st.playhead = np
-			v := view_seg()
-			if v >= 0 && !seg_src(v).streaming do clip_show(seg_src(v), int(seg_local(v, np) * cfps_of(seg_src(v))))
+			scrub_at_playhead() // todas as trilhas + worker (não só o cache do topo)
 		}
 	}
 
