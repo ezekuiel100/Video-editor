@@ -610,7 +610,7 @@ update :: proc() {
 				dbg_seek_n -= 1
 				fmt.eprintfln("[seek/SEM-AUDIO] ph=%.3f", f64(st.playhead))
 			}
-			if st.playhead >= timeline_dur() do st.playing = false
+			if st.playhead >= timeline_dur() { st.playing = false; play_clip = -1 }
 			else do show_playhead_frame()
 		} else if seg_speed(a) != 1 {
 			// VELOCIDADE != 1: NÃO usa o áudio da fonte como relógio (a reamostragem
@@ -622,8 +622,11 @@ update :: proc() {
 			}
 			sg := &segs[a]
 			nl := (st.playhead - sg.start) + dt
-			if nl >= sg.dur do st.playhead = sg.start + sg.dur
-			else { st.playhead = sg.start + nl; show_playhead_frame() }
+			if nl >= sg.dur {
+				st.playhead = sg.start + sg.dur
+				// pin sem parar = playhead congelado e playing=true (vídeo "travado")
+				if st.playhead >= timeline_dur() - 0.001 { st.playing = false; play_clip = -1 }
+			} else { st.playhead = sg.start + nl; show_playhead_frame() }
 			when DBG_SEEK do if dbg_seek_n > 0 {
 				dbg_seek_n -= 1
 				cc := seg_src(a)
@@ -703,8 +706,10 @@ update :: proc() {
 					// relógio de PAREDE: underrun real re-sincroniza no próximo frame;
 					// áudio acabado segue em silêncio até o fim do segmento.
 					nl := (st.playhead - sg.start) + dt
-					if nl >= sg.dur do st.playhead = sg.start + sg.dur
-					else { st.playhead = sg.start + nl; show_playhead_frame() }
+					if nl >= sg.dur {
+						st.playhead = sg.start + sg.dur
+						if st.playhead >= timeline_dur() - 0.001 { st.playing = false; play_clip = -1 }
+					} else { st.playhead = sg.start + nl; show_playhead_frame() }
 				} else if !rl.IsMusicStreamPlaying(c.music) || local >= out0 - 0.001 {
 					rl.PauseMusicStream(c.music) // fim da cadeia (a fonte pode continuar)
 					play_clip = -1
@@ -743,8 +748,10 @@ update :: proc() {
 					play_clip = -1
 				}
 				local := (st.playhead - sg.start) + dt // avanço no tempo da timeline
-				if local >= sg.dur { st.playhead = sg.start + sg.dur }
-				else { st.playhead = sg.start + local; show_playhead_frame() }
+				if local >= sg.dur {
+					st.playhead = sg.start + sg.dur
+					if st.playhead >= timeline_dur() - 0.001 { st.playing = false; play_clip = -1 }
+				} else { st.playhead = sg.start + local; show_playhead_frame() }
 			}
 		}
 	}

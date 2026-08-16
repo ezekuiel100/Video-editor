@@ -663,7 +663,7 @@ prof_hud :: proc() {
 			(rsp && rt > 2) ? rl.Color{ 250, 170, 90, 255 } : gray); y += 16
 		thumbing := abs(lt - c.tex_t) > SCRUB_SHARP_S
 		txt(rl.TextFormat("gap=%.2fs  tex_dt=%.2fs  MINIATURA:%s",
-			lt - (c.live_base + f32(c.live_frame) / DEC_FPS), lt - c.tex_t,
+			lt - live_now(c), lt - c.tex_t,
 			thumbing ? cstring("SIM") : cstring("nao")), x, y, 12,
 			thumbing ? rl.Color{ 250, 170, 90, 255 } : gray); y += 15
 		// números CRUS: qual está insano — o playhead, o tempo-fonte, ou o decoder?

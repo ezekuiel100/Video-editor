@@ -259,7 +259,9 @@ audio_load_ready :: proc() {
 		// vídeo o completo também mede < dur-0.5, e a troca abaixo o substituía por ele mesmo
 		// a cada frame (Unload+Load do OGG inteiro, com o playback picotando junto).
 		is_head := c.music_base == 0 && !c.music_full
-		if full_ready && is_head && st.drag == .None {
+		// NUNCA troca head→OGG completo DURANTE o play: LoadMusicStream de ~90MB
+		// na main trava a UI por segundos (o usuário só está assistindo). Espera pausar.
+		if full_ready && is_head && st.drag == .None && !st.playing {
 			pos := play_clip >= 0 && segs[play_clip].src == i ? rl.GetMusicTimePlayed(c.music) : -1
 			resume := st.playing && play_clip >= 0 && segs[play_clip].src == i
 			rl.UnloadMusicStream(c.music); c.has_audio = false
@@ -313,31 +315,13 @@ set_play_clip :: proc(si: int, local: f32) {
 	if c.has_audio && audio_clock_ok(c, local) {
 		msdur := f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
 		target := clamp(local - c.music_base, 0, msdur) // posição no ARQUIVO ativo
-		// recarrega o áudio completo a cada seek (stream novo, decoder novo) em vez de
-		// só reposicionar — foi o que estabilizou o playback do áudio longo. Só quando
-		// o OGG completo JÁ existe: ver audio_full_window_ready, cuja guarda parts_done
-		// é o que impede o clipe de mutar ao dar seek com vários vídeos na timeline.
-		is_full := audio_full_window_ready(c)
-		if is_full {
-			rl.UnloadMusicStream(c.music); c.has_audio = false
-			if music_open(c, part_path(c, 0)) {
-				c.music_full = true
-				rl.SeekMusicStream(c.music, target)
-				rl.ResumeMusicStream(c.music)
-			} else {
-				// sem stream o invariante de debug (play_clip + src_audio) passa, mas
-				// este slot NÃO pode ficar como relógio: o playback leria Music zerado
-				play_clip = -1
-			}
-		} else {
-			// Stop antes do Seek: o Seek do raylib não descarta os sub-buffers já
-			// enfileirados — sem o Stop tocava ~0.5s do áudio da posição ANTIGA (blip)
-			// ao adquirir dentro do head/chunk. Play + pré-enchimento como nos demais.
-			rl.StopMusicStream(c.music)
-			rl.SeekMusicStream(c.music, target)
-			rl.PlayMusicStream(c.music)
-			for _ in 0 ..< 4 do rl.UpdateMusicStream(c.music)
-		}
+		// Stop + Seek (nunca Unload+Load do OGG de ~90MB): recarregar na main
+		// a cada seek congelava o editor. O Stop descarta os sub-buffers velhos
+		// (senão tocava ~0.5s da posição antiga).
+		rl.StopMusicStream(c.music)
+		rl.SeekMusicStream(c.music, target)
+		rl.PlayMusicStream(c.music)
+		for _ in 0 ..< 4 do rl.UpdateMusicStream(c.music)
 		seek_pending = true
 		seek_pending_loc = clamp(local, 0, c.dur) // coords da FONTE (o playback compara nelas)
 	} else if c.has_audio {

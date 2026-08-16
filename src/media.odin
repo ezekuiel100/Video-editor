@@ -77,6 +77,7 @@ CACHE_BUDGET  :: 45  // teto de segundos (ponderado por fps) no cache RAM. Corta
 // compartilhado reparte: quem não coube alcança nos frames seguintes. 6 = 2 clipes
 // em catch-up pleno; regime normal (30fps de vídeo em 60fps de UI) usa ~0.5/clipe.
 READ_BUDGET  :: 6
+READ_MS_MAX  :: f64(10) // teto de reads bloqueantes por chamada de clip_frame/dup_frame
 g_read_budget: int // restante neste frame; reset no topo do update (só main thread)
 HEAD_SECS     :: f32(60) // áudio em 2 estágios: head de N segundos toca já, resto vem depois
 CHUNK_SECS    :: f32(300) // áudio sob demanda: seek além do coberto extrai um trecho deste tamanho ali (~1-2s; ~58MB)
@@ -175,6 +176,7 @@ SegDup :: struct {
 	lr:     ^os.File,   // ponta de leitura do pipe
 	lbase:  f32,        // tempo de fonte do frame 0 do decoder
 	lframe: int,        // frames já lidos deste decoder
+	lfps:   f32,        // -r deste decoder (0 = DEC_FPS); casa com speed do seg
 	leof:   f32,        // fim real detectado (0 = desconhecido); congela em vez de respawnar em loop
 }
 seg_dup:     [MAX_SEGS]SegDup
@@ -182,6 +184,7 @@ dup_buf:     []u8       // 1º frame lido pelo WORKER no spawn (só o worker esc
 dup_rd_buf:  []u8       // frames do catch-up lidos pela MAIN (buffers separados: sem corrida)
 dup_req_c:   int = -1   // atômico: clipe a spawnar (-1 = ocioso); main publica por último
 dup_req_t:   f32        // tempo alvo na fonte
+dup_req_fps: f32        // -r pedido (speed do seg)
 dup_req_si:  int = -1   // segmento que pediu (só a main lê/escreve)
 dup_req_start: f32      // identidade do seg no pedido: start/in_off (validados na adoção —
 dup_req_inoff: f32      // remover um seg compacta o array e o MESMO índice vira OUTRO seg)
@@ -316,6 +319,11 @@ Clip :: struct {
 	                 // REAL de uma recusa do NVDEC no meio do stream (fallback p/ software)
 	live_base: f32, // -ss atual (segundos)
 	live_frame:int, // frames lidos desde o respawn
+	live_fps:  f32, // taxa de SAÍDA do decoder atual (-r). 0 = DEC_FPS. A speed!=1
+	                // baixa isto (2x → 15fps) p/ a main ler a MESMA qtde de frames/s
+	                // de parede que em 1x — senão o pipe a 30fps de fonte exigia o
+	                // dobro de reads bloqueantes e o atraso >1.5s virava respawn em
+	                // loop (UI travada / vídeo congelado só de assistir em 2x).
 	tex_t:     f32, // tempo (s, na fonte) do frame ATUALMENTE em c.tex — o draw usa p/
 	                // saber se o frame mostrado está longe do alvo (scrub/seek em voo)
 	                // e cair pra miniatura do ponto certo em vez de congelar no velho
@@ -327,6 +335,7 @@ Clip :: struct {
 	// cada seek (picote). Um worker faz o respawn; o vídeo congela o frame atual.
 	rsp_thr:  ^thread.Thread,
 	rsp_t:    f32,  // alvo (s) do respawn pendente
+	rsp_fps:  f32,  // -r pedido neste respawn (main escreve; worker lê)
 	rsp_t0:   f64,  // quando foi pedido (p/ medir a latência no overlay)
 	rsp_busy: bool, // atômico: worker é o DONO do live stream (main não toca)
 	rsp_done: bool, // atômico: novo decoder pronto, 1º frame em fbuf
@@ -507,6 +516,30 @@ hw_reject :: proc(c: ^Clip) { c.no_hw = true; c.no_hw_tk = time.tick_now(); dbg(
 // soma de segundos em cache (só clipes já-decididos e não-streaming)
 // fps do cache do clipe (segue a fonte, teto 60); DEC_FPS quando não definido
 cfps_of :: proc(c: ^Clip) -> f32 { return c.cfps > 0 ? c.cfps : DEC_FPS }
+
+// taxa de SAÍDA do decoder ao vivo: DEC_FPS/speed. A 2x sai 15 fps (1 frame a cada
+// 1/15 s da FONTE) → a main lê ~30 frames/s de parede, a mesma carga de 1x.
+live_want_fps :: proc(spd: f32) -> f32 {
+	s := spd <= 0.01 ? f32(1) : spd
+	return clamp(DEC_FPS / s, 10, 60)
+}
+live_rate :: proc(c: ^Clip) -> f32 { return c.live_fps > 0 ? c.live_fps : DEC_FPS }
+live_now  :: proc(c: ^Clip) -> f32 { return c.live_base + f32(c.live_frame) / live_rate(c) }
+dup_rate  :: proc(d: ^SegDup) -> f32 { return d.lfps > 0 ? d.lfps : DEC_FPS }
+dup_now   :: proc(d: ^SegDup) -> f32 { return d.lbase + f32(d.lframe) / dup_rate(d) }
+
+// velocidade do segmento desta fonte que está sob o playhead (1 na prévia do bin).
+clip_view_speed :: proc(c: ^Clip) -> f32 {
+	if src_preview >= 0 && src_preview < nclips && &clips[src_preview] == c do return 1
+	for t := g_nv - 1; t >= 0; t -= 1 {
+		i := seg_on_track_at(t, st.playhead)
+		if i >= 0 && seg_src(i) == c && !segs[i].aonly do return seg_speed(i)
+	}
+	for i in 0 ..< nsegs {
+		if segs[i].src >= 0 && i < nsegs && seg_src(i) == c && !segs[i].aonly do return seg_speed(i)
+	}
+	return 1
+}
 
 cached_seconds :: proc() -> f32 {
 	s: f32 = 0
@@ -1184,7 +1217,7 @@ ensure_tex :: proc(c: ^Clip) {
 	if c.tex_ok || !intrinsics.atomic_load(&c.probed) do return
 	if c.streaming {
 		if intrinsics.atomic_load(&c.rsp_busy) do return // worker é o dono de fbuf
-		if c.live_frame > 0 { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = c.live_base + f32(c.live_frame) / DEC_FPS }
+		if c.live_frame > 0 { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = live_now(c) }
 	} else {
 		if intrinsics.atomic_load(&c.cached) > 0 do clip_show(c, 0)
 	}
@@ -1317,19 +1350,21 @@ dup_open :: proc(c: ^Clip, t: f32) {
 		ss := fmt.bprintf(tb[:], "%.3f", t)
 		vfb: [128]u8; vf := dec_vf_of(c, vfb[:]) // mesma resolução do primário (dec_content_rect é compartilhado)
 		sf := cframe(c)
+		rfb: [16]u8
+		rs := fmt.bprintf(rfb[:], "%.2f", dup_req_fps > 0 ? dup_req_fps : DEC_FPS)
 		// -threads 2 no decode por SOFTWARE: 2 cores bastam p/ 30fps a 360p; sem o teto,
 		// vários clipes empilhados caindo p/ software (pressão NVDEC) disputavam TODOS
 		// os cores entre si e com os workers — a sessão inteira ia degradando
 		sw_cmd := []string{
 			"ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "2",
 			"-ss", ss, "-i", c.path,
-			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", "30",
+			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", rs,
 			"-an", "-sn", "pipe:1",
 		}
 		hw_cmd := []string{ // sem -resize (esticaria): letterbox pela CPU preserva o aspecto
 			"ffmpeg", "-hide_banner", "-loglevel", "error",
 			"-ss", ss, "-c:v", hw, "-i", c.path,
-			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", "30",
+			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", rs,
 			"-an", "-sn", "pipe:1",
 		}
 		p, pe := os.process_start(os.Process_Desc{ command = hw != "" ? hw_cmd : sw_cmd, stdout = w })
@@ -1429,6 +1464,7 @@ dup_request :: proc(si: int, l: f32) {
 	                                                      // é zerado à força pelos cancelamentos)
 	dup_req_si = si
 	dup_req_t = l
+	dup_req_fps = live_want_fps(seg_speed(si))
 	dup_req_start = segs[si].start; dup_req_inoff = segs[si].in_off // identidade p/ validar na adoção
 	intrinsics.atomic_add(&dup_req_seq, 1) // carimbo novo: invalida qualquer spawn anterior
 	intrinsics.atomic_store(&dup_inflight, true)
@@ -1439,6 +1475,8 @@ dup_request :: proc(si: int, l: f32) {
 dup_read :: proc(si: int) -> bool {
 	d := &seg_dup[si]
 	sf := cframe(seg_src(si)) // resolução da fonte (dup_rd_buf é max-sized)
+	ready, dead := pipe_has(d.lr, sf)
+	if !dead && !ready do return false // main: sem frame pronto, não bloqueia
 	total := 0
 	for total < sf {
 		audio_pump() // leitura bloqueante do pipe: mantém o áudio alimentado
@@ -1447,14 +1485,14 @@ dup_read :: proc(si: int) -> bool {
 		if n == 0 || e != nil do break
 	}
 	if total < sf { // fim do vídeo: registra e congela (não respawna em loop)
-		end := d.lbase + f32(d.lframe) / DEC_FPS
+		end := dup_now(d)
 		if d.leof <= 0 || end < d.leof do d.leof = max(end, 0.001)
 		dup_live_stop(d)
 		return false
 	}
 	d.lframe += 1
 	dup_upload(si, rawptr(raw_data(dup_rd_buf)))
-	d.has = d.lbase + f32(d.lframe - 1) / DEC_FPS
+	d.has = d.lbase + f32(d.lframe - 1) / dup_rate(d)
 	return true
 }
 
@@ -1486,7 +1524,13 @@ dup_frame :: proc(si: int, local: f32) {
 		dup_request(si, l)
 		return
 	}
-	cur := d.lbase + f32(d.lframe) / DEC_FPS
+	want := live_want_fps(seg_speed(si))
+	if abs(dup_rate(d) - want) > 0.6 {
+		dup_live_stop(d)
+		dup_request(si, l)
+		return
+	}
+	cur := dup_now(d)
 	// mesma correção do clip_frame: alvo atrás da posição ATUAL (não do início do
 	// stream) é inalcançável — senão a zona já-passada virava zona morta sem respawn
 	if l < cur - 0.2 || l > cur + 1.5 {
@@ -1498,7 +1542,9 @@ dup_frame :: proc(si: int, local: f32) {
 	// ler demais aqui esvaziaria o buffer de áudio). Também debita do orçamento
 	// global — vista dup em catch-up soma ao custo das trilhas empilhadas.
 	guard := 0
-	for d.lbase + f32(d.lframe) / DEC_FPS < l && guard < 2 && g_read_budget > 0 {
+	t0 := time.tick_now()
+	for dup_now(d) < l && guard < 2 && g_read_budget > 0 {
+		if time.duration_milliseconds(time.tick_diff(t0, time.tick_now())) > READ_MS_MAX do break
 		if !dup_read(si) do break
 		guard += 1; g_read_budget -= 1
 	}
@@ -1526,6 +1572,7 @@ dup_poll :: proc() {
 				dup_live_stop(d) // por segurança (não deveria haver um vivo)
 				d.lps = dup_sp_ps; d.lr = dup_sp_r; d.lon = true
 				d.lbase = dup_req_t; d.lframe = 1
+				d.lfps = dup_req_fps
 				dup_upload(si, rawptr(raw_data(dup_buf)))
 				d.src = segs[si].src
 				d.has = dup_req_t
@@ -1578,19 +1625,22 @@ stream_seek :: proc(c: ^Clip, sec: f32, upload: bool) {
 		if e != nil do return
 		ss := fmt.tprintf("%.3f", sec)
 		vfb: [128]u8; vf := dec_vf_of(c, vfb[:]) // 360p (const) ou 720p conforme a qualidade
+		fps := c.rsp_fps > 0 ? c.rsp_fps : DEC_FPS
+		c.live_fps = fps
+		rs := fmt.tprintf("%.2f", fps)
 		// -threads 2 no decode por SOFTWARE: 2 cores bastam p/ 30fps a 360p; sem o teto,
 		// vários clipes empilhados caindo p/ software (pressão NVDEC) disputavam TODOS
 		// os cores entre si e com os workers — a sessão inteira ia degradando
 		sw_cmd := []string{
 			"ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "2",
 			"-ss", ss, "-i", c.path,
-			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", "30",
+			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", rs,
 			"-an", "-sn", "pipe:1",
 		}
 		hw_cmd := []string{ // sem -resize (esticaria): letterbox pela CPU preserva o aspecto
 			"ffmpeg", "-hide_banner", "-loglevel", "error",
 			"-ss", ss, "-c:v", hw, "-i", c.path,
-			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", "30",
+			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", rs,
 			"-an", "-sn", "pipe:1",
 		}
 		p, pe := os.process_start(os.Process_Desc{ command = hw != "" ? hw_cmd : sw_cmd, stdout = w })
@@ -1605,7 +1655,7 @@ stream_seek :: proc(c: ^Clip, sec: f32, upload: bool) {
 			// era fim do vídeo) — só agora desliga a GPU p/ este clipe
 			if force_sw do hw_reject(c)
 			else if hw != "" do c.no_hw = false // hardware entregando de novo: cura a marca
-			if upload { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = c.live_base + f32(c.live_frame) / DEC_FPS }
+			if upload { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = live_now(c) }
 			dbg("RESPAWN", "clip='%s' base=%.1fs %s dur=%.0fms OK (%s)", c.name, sec, hw != "" ? "HW" : "SW",
 				time.duration_milliseconds(time.tick_diff(dbg_t, time.tick_now())), upload ? "main" : "worker")
 			return
@@ -1634,6 +1684,7 @@ stream_seek_async :: proc(c: ^Clip, t: f32) {
 	dbg_rsp_n += 1; dbg_rsp_t = t; dbg_rsp_ph = st.playhead
 	if c.rsp_thr != nil { thread.join(c.rsp_thr); thread.destroy(c.rsp_thr); c.rsp_thr = nil }
 	c.rsp_t = t
+	c.rsp_fps = live_want_fps(clip_view_speed(c))
 	c.rsp_t0 = rl.GetTime()
 	intrinsics.atomic_store(&c.rsp_done, false)
 	intrinsics.atomic_store(&c.rsp_busy, true)
@@ -1663,7 +1714,7 @@ adopt_respawns :: proc() {
 			continue
 		}
 		intrinsics.atomic_store(&c.rsp_busy, false)
-		if c.live_on { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = c.live_base + f32(c.live_frame) / DEC_FPS }
+		if c.live_on { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = live_now(c) }
 	}
 }
 
@@ -1674,11 +1725,26 @@ audio_pump :: proc() {
 	if play_clip >= 0 && seg_src(play_clip).has_audio do rl.UpdateMusicStream(seg_src(play_clip).music)
 }
 
+// tem um frame INTEIRO no pipe, sem bloquear? Na main, um os.read com ffmpeg
+// lento/NVDEC preso CONGELA o app (o pipe não tem timeout). PeekNamedPipe
+// devolve 0 = tenta no próximo frame; false = pipe morto (trata como EOF).
+pipe_has :: proc(f: ^os.File, n: int) -> (ok: bool, dead: bool) {
+	if f == nil do return false, true
+	avail: u32
+	if !win.PeekNamedPipe(win.HANDLE(os.fd(f)), nil, 0, nil, &avail, nil) do return false, true
+	return int(avail) >= n, false
+}
+
 // lê um frame do decoder ao vivo para fbuf (sem GL). pump=true (só main thread)
-// mantém o áudio alimentado entre as leituras bloqueantes do pipe.
+// NÃO bloqueia no pipe: sem um frame pronto, devolve false e deixa o stream vivo.
 stream_read_raw :: proc(c: ^Clip, pump := false) -> bool {
 	if !c.live_on do return false
 	sf := cframe(c) // bytes de 1 frame na resolução ATUAL do clipe (fbuf é max-sized)
+	if pump { // main: nunca espera o ffmpeg — senão a UI some
+		ready, dead := pipe_has(c.live_r, sf)
+		if dead { /* cai no tratamento de EOF abaixo, com total=0 */ }
+		else if !ready do return false
+	}
 	total := 0
 	for total < sf {
 		if pump do audio_pump()
@@ -1687,7 +1753,7 @@ stream_read_raw :: proc(c: ^Clip, pump := false) -> bool {
 		if n == 0 || e != nil do break
 	}
 	if total < sf { // o stream acabou: fim REAL do vídeo, OU o NVDEC desistiu no meio
-		end := c.live_base + f32(c.live_frame) / DEC_FPS
+		end := live_now(c)
 		// NVDEC pode abortar no MEIO de um vídeo pesado (perfil/sessões esgotadas)
 		// fechando o pipe — NÃO é fim de verdade. Se ainda falta muito p/ o fim do clipe
 		// e estávamos por hardware, desliga o NVDEC e NÃO grava eof: o clip_frame vê
@@ -1707,7 +1773,7 @@ stream_read_raw :: proc(c: ^Clip, pump := false) -> bool {
 	}
 	c.live_frame += 1
 	// passou de um eof registrado: era falso (ex.: recusa do NVDEC) — invalida
-	if c.eof_at > 0 && c.live_base + f32(c.live_frame) / DEC_FPS > c.eof_at do c.eof_at = 0
+	if c.eof_at > 0 && live_now(c) > c.eof_at do c.eof_at = 0
 	return true
 }
 
@@ -1715,7 +1781,7 @@ stream_read_raw :: proc(c: ^Clip, pump := false) -> bool {
 stream_read :: proc(c: ^Clip) -> bool {
 	if !stream_read_raw(c, true) do return false
 	upload_tex(c, rawptr(raw_data(c.fbuf)))
-	c.tex_t = c.live_base + f32(c.live_frame) / DEC_FPS
+	c.tex_t = live_now(c)
 	dbg_vframes += 1 // diagnóstico: 1 frame de vídeo NOVO na tela (o heartbeat vira isto em fps real)
 	return true
 }
@@ -1837,7 +1903,7 @@ clip_frame :: proc(c: ^Clip, local: f32) {
 	if intrinsics.atomic_load(&c.rsp_busy) {
 		if !intrinsics.atomic_load(&c.rsp_done) do return
 		intrinsics.atomic_store(&c.rsp_busy, false)
-		if c.live_on { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = c.live_base + f32(c.live_frame) / DEC_FPS } // 1º frame do novo decoder
+		if c.live_on { upload_tex(c, rawptr(raw_data(c.fbuf))); c.tex_t = live_now(c) } // 1º frame do novo decoder
 		// se o alvo andou muito durante o respawn, o check de janela abaixo re-pede
 	}
 	if !c.live_on {
@@ -1847,7 +1913,13 @@ clip_frame :: proc(c: ^Clip, local: f32) {
 		stream_seek_async(c, l)
 		return
 	}
-	cur := c.live_base + f32(c.live_frame) / DEC_FPS
+	// speed mudou (1x↔2x): o -r do pipe atual está errado — respawna na taxa nova
+	want_fps := live_want_fps(clip_view_speed(c))
+	if abs(live_rate(c) - want_fps) > 0.6 {
+		stream_seek_async(c, l)
+		return
+	}
+	cur := live_now(c)
 	// pulo p/ TRÁS compara com a posição ATUAL (cur), não com o início do stream
 	// (live_base): o pipe só anda pra frente, então QUALQUER alvo atrás de cur é
 	// inalcançável sem respawn. Comparar com live_base criava uma ZONA MORTA
@@ -1865,7 +1937,9 @@ clip_frame :: proc(c: ^Clip, local: f32) {
 	// de UI sem travar — a 60fps sobra folga sobre os 30fps do vídeo. O orçamento
 	// GLOBAL (g_read_budget) reparte entre os clipes quando há vários empilhados.
 	guard := 0
-	for c.live_base + f32(c.live_frame) / DEC_FPS < l && guard < 3 && g_read_budget > 0 {
+	t0 := time.tick_now()
+	for live_now(c) < l && guard < 3 && g_read_budget > 0 {
+		if time.duration_milliseconds(time.tick_diff(t0, time.tick_now())) > READ_MS_MAX do break
 		if !stream_read(c) do break
 		guard += 1; g_read_budget -= 1
 	}

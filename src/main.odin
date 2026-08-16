@@ -522,8 +522,10 @@ main :: proc() {
 					ac.chunk_busy, intrinsics.atomic_load(&ac.chunk_done),
 					intrinsics.atomic_load(&ac.chunk_ok), ac.chunk_base)
 			} else {
-				dbg("AUDIO", "SEM MASTER (play_clip=%d) ph=%.1fs — vídeo anda pelo relógio de parede, sem som",
-					play_clip, st.playhead)
+				aa := audio_seg_at(st.playhead)
+				why: cstring = aa < 0 ? "sem-seg-audio" : (seg_speed(aa) != 1 ? "speed!=1" : "janela-audio")
+				dbg("AUDIO", "SEM MASTER (play_clip=%d) ph=%.1fs a=%d why=%s — relógio de parede",
+					play_clip, st.playhead, aa, why)
 			}
 		}
 		rl.EndDrawing() // sempre: é aqui que o raylib faz o poll de eventos

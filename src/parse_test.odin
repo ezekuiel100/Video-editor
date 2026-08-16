@@ -223,3 +223,12 @@ waveform_pcm_de_verdade :: proc(t: ^testing.T) {
 	testing.expect(t, wave_peak(c, 0.1, 0.4) > 0.3, "trecho com tom tem pico alto")
 	testing.expect(t, wave_peak(c, 0.7, 0.95) < 0.01, "trecho além do áudio fica em 0")
 }
+
+@(test)
+live_want_fps_acompanha_a_velocidade :: proc(t: ^testing.T) {
+	testing.expect(t, t_feq(live_want_fps(1), DEC_FPS), "1x = 30 fps de saída")
+	testing.expect(t, t_feq(live_want_fps(2), DEC_FPS/2), "2x = 15 fps (mesma carga de parede que 1x)")
+	testing.expect(t, t_feq(live_want_fps(0.5), 60), "0.5x sobe até o teto 60")
+	testing.expect(t, live_want_fps(4) >= 10, "4x não cai abaixo do piso (decode ainda lê ~40 frames/s)")
+	testing.expect(t, t_feq(live_want_fps(0), DEC_FPS), "speed 0 (zero-value) trata como 1x")
+}
