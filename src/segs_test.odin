@@ -53,6 +53,23 @@ add_seg_defaults :: proc(t: ^testing.T) {
 }
 
 @(test)
+undo_restaura_flags_de_trilha :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 0, 0, 10)
+	history_baseline()
+	track_muted[0] = true
+	track_locked[1] = true
+	track_hidden[2] = true
+	history_tick() // assenta o passo (sem arrasto)
+	testing.expect(t, undo_top == 1, "silenciar/bloquear/ocultar vira um passo de undo")
+	do_undo()
+	testing.expect(t, !track_muted[0] && !track_locked[1] && !track_hidden[2], "desfazer devolve as trilhas")
+	do_redo()
+	testing.expect(t, track_muted[0] && track_locked[1] && track_hidden[2], "refazer reaplica")
+	undo_top = 0; redo_top = 0; committed_ok = false // não vaza toast/histórico p/ o próximo teste
+}
+
+@(test)
 gain_vol_mudo_e_fades :: proc(t: ^testing.T) {
 	t_reset()
 	si := add_seg(0, 10, 0, 10) // timeline [10,20)

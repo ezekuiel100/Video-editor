@@ -83,8 +83,8 @@ save_project_text :: proc() -> string {
 	for i in 0 ..< nsegs {
 		if idx[segs[i].src] < 0 do continue
 		s := segs[i]
-		fmt.sbprintf(&b, "%d %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f\n",
-			idx[s.src], s.track, s.start, s.in_off, s.dur, s.vol, s.muted ? 1 : 0, s.fade_in, s.fade_out, s.scale, s.px, s.py, s.rot, s.opacity, s.speed <= 0 ? 1 : s.speed, s.trans, s.vfin, s.vfout, s.crop_x, s.crop_y, s.crop_w, s.crop_h, s.zoom_anim ? 1 : 0, s.crop2_x, s.crop2_y, s.crop2_w, s.crop2_h, s.aonly ? 1 : 0, s.fx_bright, s.fx_contrast, s.fx_satur, s.fx_look, s.fx_vignette, s.fx_temp)
+		fmt.sbprintf(&b, "%d %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+			idx[s.src], s.track, s.start, s.in_off, s.dur, s.vol, s.muted ? 1 : 0, s.fade_in, s.fade_out, s.scale, s.px, s.py, s.rot, s.opacity, s.speed <= 0 ? 1 : s.speed, s.trans, s.vfin, s.vfout, s.crop_x, s.crop_y, s.crop_w, s.crop_h, s.zoom_anim ? 1 : 0, s.crop2_x, s.crop2_y, s.crop2_w, s.crop2_h, s.aonly ? 1 : 0, s.fx_bright, s.fx_contrast, s.fx_satur, s.fx_look, s.fx_vignette, s.fx_temp, s.bulge, s.bulge_x, s.bulge_y, s.bulge_r, s.wobble, s.wobble_speed)
 	}
 	// LAYOUT do editor: divisórias (frações da janela) + altura de cada trilha. Não afeta o
 	// vídeo exportado, mas o usuário monta o espaço de trabalho e espera reencontrá-lo.
@@ -95,6 +95,18 @@ save_project_text :: proc() -> string {
 	fmt.sbprintf(&b, "trackh")
 	for i in 0 ..< MAXTRACKS do fmt.sbprintf(&b, " %.1f", track_h[i]) // 0 = altura padrão
 	fmt.sbprintf(&b, "\n")
+	// mute / lock / hide da TRILHA (não do clipe). Sem estas linhas o clipe volta,
+	// mas a faixa que o usuário silenciou/bloqueou/escondeu nasce ligada de novo.
+	// Projetos antigos não têm as chaves → load deixa tudo false (zero-value).
+	fmt.sbprintf(&b, "trackm")
+	for i in 0 ..< MAXTRACKS do fmt.sbprintf(&b, " %d", track_muted[i] ? 1 : 0)
+	fmt.sbprintf(&b, "\n")
+	fmt.sbprintf(&b, "trackl")
+	for i in 0 ..< MAXTRACKS do fmt.sbprintf(&b, " %d", track_locked[i] ? 1 : 0)
+	fmt.sbprintf(&b, "\n")
+	fmt.sbprintf(&b, "trackv") // v = hidden (trackh já é altura)
+	for i in 0 ..< MAXTRACKS do fmt.sbprintf(&b, " %d", track_hidden[i] ? 1 : 0)
+	fmt.sbprintf(&b, "\n")
 	// clipes de EFEITO (faixa): kind start dur amount radius cx cy wobble speed angle track
 	fmt.sbprintf(&b, "fx %d\n", nfx)
 	for i in 0 ..< nfx {
@@ -102,6 +114,81 @@ save_project_text :: proc() -> string {
 		fmt.sbprintf(&b, "%d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d\n", e.kind, e.start, e.dur, e.amount, e.radius, e.cx, e.cy, e.wobble, e.speed, e.angle, e.track)
 	}
 	return strings.to_string(b)
+}
+
+// campos numéricos de uma linha `seg` (projetos antigos têm 34; os 6 últimos são bulge/wobble)
+OVP_SEG_N :: 40
+
+OvpParsed :: struct {
+	muted, locked, hidden: [MAXTRACKS]bool,
+	nseg: int,
+	fields: [MAX_SEGS][OVP_SEG_N]f32,
+}
+
+// lê o texto de um .ovp SEM importar mídia — serve p/ teste de round-trip e p/ inspecionar
+// o que o save emitiu. Arquivo inválido → ok=false.
+parse_project_text :: proc(data: string) -> (p: OvpParsed, ok: bool) {
+	lines := strings.split_lines(data, context.temp_allocator)
+	if len(lines) < 1 || strings.trim_space(lines[0]) != "OVP1" do return
+	ok = true
+	li := 1
+	for li < len(lines) {
+		ln := strings.trim_space(lines[li]); li += 1
+		if ln == "" do continue
+		toks := strings.fields(ln, context.temp_allocator)
+		if len(toks) == 0 do continue
+		switch toks[0] {
+		case "trackm":
+			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS do p.muted[k - 1] = (strconv.parse_int(toks[k]) or_else 0) != 0
+		case "trackl":
+			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS do p.locked[k - 1] = (strconv.parse_int(toks[k]) or_else 0) != 0
+		case "trackv":
+			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS do p.hidden[k - 1] = (strconv.parse_int(toks[k]) or_else 0) != 0
+		case "seg":
+			n := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else 0) : 0
+			for _ in 0 ..< n {
+				if li >= len(lines) || p.nseg >= MAX_SEGS do break
+				ft := strings.fields(strings.trim_space(lines[li]), context.temp_allocator); li += 1
+				row: [OVP_SEG_N]f32
+				row[14] = 1
+				for k in 0 ..< min(OVP_SEG_N, len(ft)) do row[k] = f32(strconv.parse_f64(ft[k]) or_else 0)
+				p.fields[p.nseg] = row
+				p.nseg += 1
+			}
+		}
+	}
+	return
+}
+
+// aplica flags de trilha + campos extra do Seg a partir do parse (mídias já no bin).
+apply_parsed_project :: proc(p: OvpParsed) {
+	nsegs = 0
+	for i in 0 ..< p.nseg {
+		f := p.fields[i]
+		if !seg_line_ok(f[0], f[2], f[3], f[4]) do continue
+		ltr := int(f[1])
+		ltr = is_audio_track(ltr) ? clamp(ltr, MAXV, MAXV+MAXA-1) : clamp(ltr, 0, MAXV-1)
+		si := add_seg(int(f[0]), f[2], f[3], f[4], ltr)
+		if si < 0 do continue
+		seg_apply_ovp_fields(&segs[si], f)
+	}
+	for i in 0 ..< MAXTRACKS {
+		track_muted[i] = p.muted[i]
+		track_locked[i] = p.locked[i]
+		track_hidden[i] = p.hidden[i]
+	}
+}
+
+seg_apply_ovp_fields :: proc(sg: ^Seg, f: [OVP_SEG_N]f32) {
+	sg.vol = f[5]; sg.muted = f[6] > 0.5; sg.fade_in = f[7]; sg.fade_out = f[8]
+	sg.scale = f[9]; sg.px = f[10]; sg.py = f[11]; sg.rot = f[12]; sg.opacity = f[13]
+	sg.speed = (inv_bad(f[14]) || f[14] <= 0) ? 1 : f[14]
+	sg.trans = f[15]; sg.vfin = f[16]; sg.vfout = f[17]
+	sg.crop_x = f[18]; sg.crop_y = f[19]; sg.crop_w = f[20]; sg.crop_h = f[21]
+	sg.zoom_anim = f[22] > 0.5; sg.crop2_x = f[23]; sg.crop2_y = f[24]; sg.crop2_w = f[25]; sg.crop2_h = f[26]
+	sg.aonly = f[27] > 0.5
+	sg.fx_bright = f[28]; sg.fx_contrast = f[29]; sg.fx_satur = f[30]; sg.fx_look = f[31]; sg.fx_vignette = f[32]; sg.fx_temp = f[33]
+	sg.bulge = f[34]; sg.bulge_x = f[35]; sg.bulge_y = f[36]; sg.bulge_r = f[37]; sg.wobble = f[38]; sg.wobble_speed = f[39]
 }
 
 save_project :: proc(path: string) {
@@ -122,8 +209,9 @@ load_project :: proc(path: string) {
 	ltl := f32(-1); lmd := f32(-1) // divisórias salvas (-1 = ausente: mantém o padrão)
 	lpq := stream_hi               // qualidade da prévia salva (ausente = mantém a atual)
 	lth: [MAXTRACKS]f32            // alturas de trilha salvas (0 = padrão)
+	lm, ll, lv: [MAXTRACKS]bool    // mute / lock / hide (ausente = tudo false)
 	mpaths := make([dynamic]string, context.temp_allocator)
-	Seg2 :: struct { fields: [34]f32 }
+	Seg2 :: struct { fields: [OVP_SEG_N]f32 }
 	segd := make([dynamic]Seg2, context.temp_allocator)
 	fxd  := make([dynamic]FxSeg, context.temp_allocator)
 	li := 1
@@ -150,6 +238,12 @@ load_project :: proc(path: string) {
 			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS {
 				if v, o := strconv.parse_f64(toks[k]); o do lth[k - 1] = f32(v)
 			}
+		case "trackm": // trilha silenciada
+			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS do lm[k - 1] = (strconv.parse_int(toks[k]) or_else 0) != 0
+		case "trackl": // trilha bloqueada
+			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS do ll[k - 1] = (strconv.parse_int(toks[k]) or_else 0) != 0
+		case "trackv": // trilha oculta (v de hidden — trackh já é altura)
+			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS do lv[k - 1] = (strconv.parse_int(toks[k]) or_else 0) != 0
 		case "media":
 			n := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else 0) : 0
 			for _ in 0 ..< n { if li < len(lines) { append(&mpaths, strings.clone(strings.trim_space(lines[li]), context.temp_allocator)); li += 1 } }
@@ -160,7 +254,7 @@ load_project :: proc(path: string) {
 				ft := strings.fields(strings.trim_space(lines[li]), context.temp_allocator); li += 1
 				s: Seg2
 				s.fields[14] = 1 // velocidade padrão p/ projetos antigos (14 campos)
-				for k in 0 ..< min(34, len(ft)) do s.fields[k] = f32(strconv.parse_f64(ft[k]) or_else 0)
+				for k in 0 ..< min(OVP_SEG_N, len(ft)) do s.fields[k] = f32(strconv.parse_f64(ft[k]) or_else 0)
 				append(&segd, s)
 			}
 		case "fx": // clipes de efeito da faixa
@@ -214,13 +308,7 @@ load_project :: proc(path: string) {
 		ltr = is_audio_track(ltr) ? clamp(ltr, MAXV, MAXV+MAXA-1) : clamp(ltr, 0, MAXV-1)
 		si := add_seg(int(f[0]), f[2], f[3], f[4], ltr)
 		if si < 0 do continue
-		sg := &segs[si]
-		sg.vol = f[5]; sg.muted = f[6] > 0.5; sg.fade_in = f[7]; sg.fade_out = f[8]
-		sg.scale = f[9]; sg.px = f[10]; sg.py = f[11]; sg.rot = f[12]; sg.opacity = f[13]; sg.speed = (inv_bad(f[14]) || f[14] <= 0) ? 1 : f[14]; sg.trans = f[15]; sg.vfin = f[16]; sg.vfout = f[17]
-		sg.crop_x = f[18]; sg.crop_y = f[19]; sg.crop_w = f[20]; sg.crop_h = f[21]
-		sg.zoom_anim = f[22] > 0.5; sg.crop2_x = f[23]; sg.crop2_y = f[24]; sg.crop2_w = f[25]; sg.crop2_h = f[26] // zoom animado
-		sg.aonly = f[27] > 0.5 // áudio separado do vídeo (projetos antigos: 0 = normal)
-		sg.fx_bright = f[28]; sg.fx_contrast = f[29]; sg.fx_satur = f[30]; sg.fx_look = f[31]; sg.fx_vignette = f[32]; sg.fx_temp = f[33] // efeitos de cor
+		seg_apply_ovp_fields(&segs[si], f)
 	}
 	for f in fxd { if nfx < MAX_FX { fxsegs[nfx] = f; nfx += 1 } } // clipes de efeito da faixa
 	// restaura a contagem de trilhas: do arquivo se houver, senão o suficiente p/ mostrar tudo
@@ -239,6 +327,7 @@ load_project :: proc(path: string) {
 	stream_hi = lpq // qualidade da prévia (set_stream_quality não serve aqui: nada foi importado ainda)
 	for i in 0 ..< MAXTRACKS {
 		track_h[i] = (lth[i] >= TRACK_H_MIN && lth[i] <= TRACK_H_MAX) ? lth[i] : 0 // 0 = padrão
+		track_muted[i] = lm[i]; track_locked[i] = ll[i]; track_hidden[i] = lv[i]
 	}
 	if res_w > 0 && res_h > 0 do set_proj_res(res_w, res_h) // resolução salva (novo formato)
 	else do set_proj_ar(ar)                                  // projeto antigo: deriva do aspecto

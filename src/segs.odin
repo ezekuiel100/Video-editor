@@ -140,7 +140,11 @@ fxlib_drag:  int = -1 // índice em fx_lib sendo arrastado do painel p/ a timeli
 // interação assenta (fora de arrasto/slider), sem instrumentar cada operação. ---
 // g_nv/g_na entram no snapshot: sem eles, desfazer podia devolver um segmento a uma
 // trilha removida (track_row negativo = desenhado sobre a régua e inalcançável)
-Snapshot :: struct { segs: [MAX_SEGS]Seg, nsegs: int, fxsegs: [MAX_FX]FxSeg, nfx: int, nv, na: int }
+Snapshot :: struct {
+	segs: [MAX_SEGS]Seg, nsegs: int, fxsegs: [MAX_FX]FxSeg, nfx: int, nv, na: int,
+	// flags da TRILHA: sem elas, silenciar/bloquear/ocultar não desfaz e some ao reabrir
+	muted, locked, hidden: [MAXTRACKS]bool,
+}
 MAX_UNDO :: 100
 undo_stack: [MAX_UNDO]Snapshot
 undo_top:   int
@@ -1111,12 +1115,21 @@ seg_run_end :: proc(a: int) -> f32 {
 }
 
 // ---------- undo/redo ----------
-snap_now :: proc() -> Snapshot { s: Snapshot; s.segs = segs; s.nsegs = nsegs; s.fxsegs = fxsegs; s.nfx = nfx; s.nv = g_nv; s.na = g_na; return s }
-snap_apply :: proc(s: Snapshot) { segs = s.segs; nsegs = s.nsegs; fxsegs = s.fxsegs; nfx = s.nfx; g_nv = s.nv; g_na = s.na }
+snap_now :: proc() -> Snapshot {
+	s: Snapshot
+	s.segs = segs; s.nsegs = nsegs; s.fxsegs = fxsegs; s.nfx = nfx; s.nv = g_nv; s.na = g_na
+	s.muted = track_muted; s.locked = track_locked; s.hidden = track_hidden
+	return s
+}
+snap_apply :: proc(s: Snapshot) {
+	segs = s.segs; nsegs = s.nsegs; fxsegs = s.fxsegs; nfx = s.nfx; g_nv = s.nv; g_na = s.na
+	track_muted = s.muted; track_locked = s.locked; track_hidden = s.hidden
+}
 snap_eq :: proc(s: Snapshot) -> bool {
 	if s.nsegs != nsegs || s.nfx != nfx || s.nv != g_nv || s.na != g_na do return false
 	for i in 0 ..< nsegs do if segs[i] != s.segs[i] do return false // Seg é comparável (sem ponteiros)
 	for i in 0 ..< nfx   do if fxsegs[i] != s.fxsegs[i] do return false
+	if s.muted != track_muted || s.locked != track_locked || s.hidden != track_hidden do return false
 	return true
 }
 push_stack :: proc(stack: ^[MAX_UNDO]Snapshot, top: ^int, s: Snapshot) {

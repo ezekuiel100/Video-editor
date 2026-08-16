@@ -390,6 +390,62 @@ salvar_nao_descarta_segmento_em_probe :: proc(t: ^testing.T) {
 	clips[1].closed = false
 }
 
+@(test)
+ovp_guarda_flags_de_trilha_e_bulge :: proc(t: ^testing.T) {
+	t_export_reset()
+	si := add_seg(0, 0, 0, 10)
+	segs[si].bulge = 0.45
+	segs[si].bulge_x = 0.10
+	segs[si].bulge_y = -0.20
+	segs[si].bulge_r = 0.35
+	segs[si].wobble = 0.15
+	segs[si].wobble_speed = 2.5
+	track_muted[0] = true
+	track_locked[2] = true
+	track_hidden[1] = true
+
+	txt := save_project_text()
+	testing.expect(t, strings.contains(txt, "\ntrackm "), "mute da trilha tem de ir no arquivo")
+	testing.expect(t, strings.contains(txt, "\ntrackl "), "lock da trilha tem de ir no arquivo")
+	testing.expect(t, strings.contains(txt, "\ntrackv "), "hide da trilha tem de ir no arquivo")
+
+	// limpa o que o usuário veria ao reabrir (sem tocar disco / ffmpeg)
+	nsegs = 0
+	segs[0] = Seg{}
+	for i in 0 ..< MAXTRACKS { track_muted[i] = false; track_locked[i] = false; track_hidden[i] = false }
+
+	p, ok := parse_project_text(txt)
+	testing.expect(t, ok, "texto emitido pelo save tem de parsear")
+	testing.expect(t, p.muted[0] && !p.muted[1], "trilha 0 muda, as outras não")
+	testing.expect(t, p.locked[2] && !p.locked[0], "trilha 2 bloqueada")
+	testing.expect(t, p.hidden[1] && !p.hidden[0], "trilha 1 oculta")
+	testing.expect(t, p.nseg == 1, "1 segmento no arquivo")
+	testing.expect(t, t_feq(p.fields[0][34], 0.45), "bulge")
+	testing.expect(t, t_feq(p.fields[0][35], 0.10), "bulge_x")
+	testing.expect(t, t_feq(p.fields[0][36], -0.20), "bulge_y")
+	testing.expect(t, t_feq(p.fields[0][37], 0.35), "bulge_r")
+	testing.expect(t, t_feq(p.fields[0][38], 0.15), "wobble")
+	testing.expect(t, t_feq(p.fields[0][39], 2.5), "wobble_speed")
+
+	apply_parsed_project(p)
+	testing.expect(t, nsegs == 1 && t_feq(segs[0].bulge, 0.45) && t_feq(segs[0].wobble, 0.15), "apply restaura bulge/wobble")
+	testing.expect(t, track_muted[0] && track_locked[2] && track_hidden[1], "apply restaura mute/lock/hide")
+}
+
+@(test)
+ovp_antigo_sem_flags_nem_bulge_abre_neutro :: proc(t: ^testing.T) {
+	t_export_reset()
+	// 34 campos (formato anterior): sem bulge e sem trackm/l/v
+	old := "OVP1\nar 1.777778\nres 1920 1080\ntracks 3 2\nmedia 1\nA.mp4\nseg 1\n0 0 0.0000 0.0000 10.0000 1.0000 0 0.0000 0.0000 1.0000 0.0000 0.0000 0.0000 1.0000 1.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0 0.0000 0.0000 0.0000 0.0000 0 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000\n"
+	p, ok := parse_project_text(old)
+	testing.expect(t, ok && p.nseg == 1, "projeto antigo ainda parseia")
+	testing.expect(t, !p.muted[0] && !p.locked[0] && !p.hidden[0], "sem as chaves novas = trilhas ligadas")
+	testing.expect(t, p.fields[0][34] == 0 && p.fields[0][38] == 0, "campos ausentes nascem 0 (sem distorção)")
+	apply_parsed_project(p)
+	testing.expect(t, nsegs == 1 && segs[0].bulge == 0 && segs[0].wobble == 0, "bulge ausente = neutro")
+	testing.expect(t, !track_muted[0] && !track_locked[0] && !track_hidden[0], "flags ausentes = desligadas")
+}
+
 // O FILTERGRAPH NÃO PODE VIAJAR NA LINHA DE COMANDO. Ele é a maior coisa do comando e o
 // Windows corta em 32767 chars no CreateProcessW: com a timeline cheia o export morria com
 // um "Falha ao iniciar ffmpeg" que não dizia nada. Vai por -filter_complex_script.
