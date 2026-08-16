@@ -65,18 +65,18 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	}
 	ix += 34
 
-	// botão "Cortar e Ampliar": abre o modal do retângulo de zoom (só p/ clipe de vídeo/imagem)
+	// botão "Cortar e Ampliar": só o ícone na barra (como desfazer/lâmina). O nome
+	// aparece no hover, desenhado no fim de draw_timeline p/ ficar por cima da régua.
 	cz_ok := selected >= 0 && selected < nsegs && seg_ready(selected) && !seg_audio_like(selected) && !seg_src(selected).is_text
-	cz := rl.Rectangle{ ix - 4, tb.y + 4, 138, 26 }
+	cz := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
 	if cz_ok && clicked(cz) do open_crop_modal()
 	rl.DrawRectangleRounded(cz, 0.3, 4, (hovered(cz) && cz_ok) ? HOVER : PANEL2)
 	{ // ícone: cantos de recorte
-		icx := cz.x + 15; icy := tb.y + tb.height/2; icol := cz_ok ? TEXT : rl.Color{ 92,96,104,255 }
+		icx := cz.x + 13; icy := tb.y + tb.height/2; icol := cz_ok ? TEXT : rl.Color{ 92,96,104,255 }
 		rl.DrawLineEx({icx-6, icy-6},{icx-6, icy+1}, 2, icol); rl.DrawLineEx({icx-6, icy-6},{icx+1, icy-6}, 2, icol)
 		rl.DrawLineEx({icx+6, icy+6},{icx+6, icy-1}, 2, icol); rl.DrawLineEx({icx+6, icy+6},{icx-1, icy+6}, 2, icol)
 	}
-	txt("Cortar e Ampliar", cz.x + 30, tb.y + 10, 12, cz_ok ? TEXT : rl.Color{ 92,96,104,255 })
-	ix += 144
+	ix += 30
 
 	view_w := r.width - f32(LANE_X)
 	g_view_w = view_w // guardado p/ o atalho F (ajustar à janela), tratado no update
@@ -848,6 +848,16 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			}
 			tl_marquee = false; tl_marquee_moved = false
 		}
+	}
+
+	// tooltip do botão de recorte: por cima da régua/trilhas, só no hover
+	if hovered(cz) {
+		tip: cstring = "Cortar e Ampliar"
+		tw := txt_w(tip, 12) + 16
+		tr := rl.Rectangle{ cz.x, cz.y + cz.height + 6, tw, 22 }
+		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
+		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
+		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
 	}
 }
 
