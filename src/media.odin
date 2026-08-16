@@ -1475,8 +1475,8 @@ dup_request :: proc(si: int, l: f32) {
 dup_read :: proc(si: int) -> bool {
 	d := &seg_dup[si]
 	sf := cframe(seg_src(si)) // resolução da fonte (dup_rd_buf é max-sized)
-	ready, dead := pipe_has(d.lr, sf)
-	if !dead && !ready do return false // main: sem frame pronto, não bloqueia
+	ready, dead := pipe_ready(d.lr)
+	if !dead && !ready do return false // main: pipe vazio, não bloqueia
 	total := 0
 	for total < sf {
 		audio_pump() // leitura bloqueante do pipe: mantém o áudio alimentado
@@ -1725,25 +1725,26 @@ audio_pump :: proc() {
 	if play_clip >= 0 && seg_src(play_clip).has_audio do rl.UpdateMusicStream(seg_src(play_clip).music)
 }
 
-// tem um frame INTEIRO no pipe, sem bloquear? Na main, um os.read com ffmpeg
-// lento/NVDEC preso CONGELA o app (o pipe não tem timeout). PeekNamedPipe
-// devolve 0 = tenta no próximo frame; false = pipe morto (trata como EOF).
-pipe_has :: proc(f: ^os.File, n: int) -> (ok: bool, dead: bool) {
+// tem ALGUM byte no pipe, sem bloquear? O buffer padrão do pipe no Windows é
+// ~64KB — um frame 720p rgb24 tem ~2.8MB. Exigir o quadro INTEIRO no Peek
+// nunca passava (ffmpeg trava no write nos 64KB, a main nunca lia) = poucos
+// frames / vídeo aos solavancos. Qualquer dado basta: o resto chega no read
+// conforme drenamos. 0 = tenta no próximo frame; Peek falhou = pipe morto.
+pipe_ready :: proc(f: ^os.File) -> (ok: bool, dead: bool) {
 	if f == nil do return false, true
 	avail: u32
 	if !win.PeekNamedPipe(win.HANDLE(os.fd(f)), nil, 0, nil, &avail, nil) do return false, true
-	return int(avail) >= n, false
+	return avail > 0, false
 }
 
 // lê um frame do decoder ao vivo para fbuf (sem GL). pump=true (só main thread)
-// NÃO bloqueia no pipe: sem um frame pronto, devolve false e deixa o stream vivo.
+// só entra no read se o pipe já tem dados — senão devolve false e o stream segue.
 stream_read_raw :: proc(c: ^Clip, pump := false) -> bool {
 	if !c.live_on do return false
 	sf := cframe(c) // bytes de 1 frame na resolução ATUAL do clipe (fbuf é max-sized)
-	if pump { // main: nunca espera o ffmpeg — senão a UI some
-		ready, dead := pipe_has(c.live_r, sf)
-		if dead { /* cai no tratamento de EOF abaixo, com total=0 */ }
-		else if !ready do return false
+	if pump { // main: não espera um pipe vazio (ffmpeg/NVDEC parado)
+		ready, dead := pipe_ready(c.live_r)
+		if !dead && !ready do return false
 	}
 	total := 0
 	for total < sf {
