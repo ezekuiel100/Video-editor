@@ -27,6 +27,7 @@ clear_project :: proc() {
 	st.playhead = 0
 	set_proj_ar(16.0/9.0); ar_auto = true // formato volta ao padrão (1920x1080) e reativa a autodetecção
 	dirty = false
+	clear_proj_path() // Novo projeto não tem arquivo — o próximo Ctrl+S pergunta o nome de novo
 }
 
 // executa a ação que estava esperando a resposta do "salvar alterações?"
@@ -191,10 +192,63 @@ seg_apply_ovp_fields :: proc(sg: ^Seg, f: [OVP_SEG_N]f32) {
 	sg.bulge = f[34]; sg.bulge_x = f[35]; sg.bulge_y = f[36]; sg.bulge_r = f[37]; sg.wobble = f[38]; sg.wobble_speed = f[39]
 }
 
-save_project :: proc(path: string) {
+// caminho do .ovp aberto/salvo (heap). Vazio = ainda sem arquivo → Ctrl+S abre o diálogo.
+proj_path: string
+save_pending: bool  // gravar no PRÓXIMO frame: este ainda desenha "Salvando..."
+save_flash_t: f32   // segundos restantes do cartão na tela
+save_flash_ok: bool // false = Salvando… | true = Salvo
+
+set_proj_path :: proc(p: string) {
+	if proj_path == p do return
+	if proj_path != "" do delete(proj_path)
+	proj_path = p != "" ? strings.clone(p) : ""
+}
+clear_proj_path :: proc() { set_proj_path("") }
+
+file_name :: proc(path: string) -> string {
+	for i := len(path) - 1; i >= 0; i -= 1 do if path[i] == '/' || path[i] == '\\' do return path[i + 1:]
+	return path
+}
+
+// 1º save: diálogo. Depois: grava no mesmo caminho, sem perguntar o nome.
+request_save :: proc() {
+	if proj_path != "" { begin_save(proj_path); return }
+	if p, ok := save_dialog("Meu Projeto"); ok do begin_save(ensure_ext(p, ".ovp"))
+}
+request_save_as :: proc() {
+	hint := proj_path != "" ? file_name(proj_path) : "Meu Projeto"
+	if p, ok := save_dialog(hint); ok do begin_save(ensure_ext(p, ".ovp"))
+}
+// marca p/ gravar no próximo frame (o atual ainda pinta "Salvando...")
+begin_save :: proc(path: string) {
+	set_proj_path(path)
+	save_pending = true
+	save_flash_ok = false
+	save_flash_t = 1.6
+}
+// grava AGORA (sem esperar o próximo frame). Usado no "Salvar alterações?" antes de Novo/Abrir/Sair.
+save_now :: proc() -> bool {
+	if proj_path == "" {
+		if p, ok := save_dialog("Meu Projeto"); ok do set_proj_path(ensure_ext(p, ".ovp"))
+		else do return false
+	}
+	return save_project(proj_path)
+}
+
+save_project :: proc(path: string) -> bool {
 	txt := save_project_text()
-	if os.write_entire_file(path, transmute([]u8)txt) == nil { dirty = false; set_toast(rl.TextFormat("Projeto salvo: %s", cs(path))) }
-	else do set_toast("Falha ao salvar o projeto")
+	if os.write_entire_file(path, transmute([]u8)txt) == nil {
+		set_proj_path(path)
+		dirty = false
+		save_flash_ok = true
+		save_flash_t = 1.6
+		set_toast(rl.TextFormat("Salvo: %s", cs(file_name(path))))
+		return true
+	}
+	save_pending = false
+	save_flash_t = 0
+	set_toast("Falha ao salvar o projeto")
+	return false
 }
 
 // carrega um projeto (.ovp): limpa o atual, reimporta as mídias e recria os segmentos
@@ -333,7 +387,8 @@ load_project :: proc(path: string) {
 	else do set_proj_ar(ar)                                  // projeto antigo: deriva do aspecto
 	ar_auto = false // projeto salvo traz seu próprio formato — não sobrescreve na próxima importação
 	dirty = false
-	set_toast(rl.TextFormat("Projeto aberto: %s", cs(path)))
+	set_proj_path(path) // Ctrl+S a partir daqui grava neste arquivo, sem pedir nome
+	set_toast(rl.TextFormat("Projeto aberto: %s", cs(file_name(path))))
 }
 
 // diálogo nativo "Salvar como" — retorna o caminho escolhido (folder+nome)

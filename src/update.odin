@@ -67,6 +67,12 @@ update :: proc() {
 		}
 	}
 	if toast_t > 0 do toast_t -= dt
+	if save_flash_t > 0 do save_flash_t -= dt
+	// gravar DEPOIS de um frame com "Salvando..." na tela (o write é síncrono e instantâneo)
+	if save_pending && proj_path != "" {
+		save_pending = false
+		save_project(proj_path)
+	}
 
 	audio_load_ready() // carrega áudios cuja extração terminou
 	adopt_respawns()   // sobe frames de respawns de vídeo concluídos (até pausado)
@@ -166,9 +172,10 @@ update :: proc() {
 		if rl.IsKeyPressed(.Z) && !shift do do_undo()
 		if rl.IsKeyPressed(.Y) || (rl.IsKeyPressed(.Z) && shift) do do_redo()
 	}
-	// Ctrl+S = salvar projeto | Ctrl+O = abrir projeto
+	// Ctrl+S = salvar (diálogo só na 1ª vez) | Ctrl+Shift+S = salvar como | Ctrl+O = abrir
 	if ctrl && rl.IsKeyPressed(.S) {
-		if p, ok := save_dialog("Meu Projeto"); ok do save_project(ensure_ext(p, ".ovp"))
+		if shift do request_save_as()
+		else do request_save()
 	}
 	if ctrl && rl.IsKeyPressed(.O) do request_open()
 	// Ctrl+C/X = copiar/recortar o clipe selecionado (ou grupo marcado) da timeline

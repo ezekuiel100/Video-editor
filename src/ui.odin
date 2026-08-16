@@ -417,10 +417,8 @@ draw_modal :: proc(sw, sh: f32) {
 		txt("O que deseja fazer?", cx + 24, cy + 86, 14, MUTED)
 		if ui_btn({ cx + 24, cy + ch - 52, 150, 36 }, "Salvar", true) {
 			modal = .None
-			if p, ok := save_dialog("Meu Projeto"); ok {
-				save_project(ensure_ext(p, ".ovp"))
-				do_pending()
-			} else do pending_action = .None // cancelou o diálogo: aborta a ação
+			if save_now() do do_pending() // grava AGORA (já tem caminho, ou pede o nome)
+			else do pending_action = .None // cancelou o diálogo: aborta a ação
 		}
 		if ui_btn({ cx + 184, cy + ch - 52, 150, 36 }, "Não salvar", false) { modal = .None; do_pending() }
 		if ui_btn({ cx + cw - 130, cy + ch - 52, 106, 36 }, "Cancelar", false) { modal = .None; pending_action = .None }
@@ -843,7 +841,18 @@ draw :: proc() {
 		txt_c(trans_drag < len(names) ? names[trans_drag] : "Transição", gr.x + 56, gr.y + 7, 12, over ? ACCENT : TEXT)
 	}
 
-	if toast_t > 0 {
+	if save_flash_t > 0 {
+		label: cstring = save_flash_ok ? "Salvo" : "Salvando..."
+		w := txt_w(label, 16) + 40
+		r := rl.Rectangle{ sw/2 - w/2, sh/2 - 28, w, 48 }
+		fade := save_flash_ok ? clamp(save_flash_t / 0.45, 0, 1) : 1 // Salvo some no fim; Salvando fica opaco
+		a := u8(fade * 235)
+		rl.DrawRectangleRounded(r, 0.25, 8, rl.Color{ 28, 32, 40, a })
+		rl.DrawRectangleRoundedLinesEx(r, 0.25, 8, 2, rl.Color{ ACCENT.r, ACCENT.g, ACCENT.b, a })
+		txt_c(label, sw/2, r.y + 14, 16, rl.Color{ 235, 238, 242, a })
+	}
+
+	if toast_t > 0 && save_flash_t <= 0 {
 		w := txt_w(toast_msg, 14) + 28
 		r := rl.Rectangle{ sw/2 - w/2, 46, w, 30 }
 		a := u8(clamp(toast_t / 3 * 255, 0, 230))
@@ -1021,8 +1030,8 @@ draw_ctx_menu :: proc() {
 // dropdown do menu Arquivo: Novo / Abrir / Salvar (desenhado por último p/ ficar por cima)
 draw_file_menu :: proc() {
 	if !file_menu_open do return
-	items := []cstring{ "Novo projeto", "Abrir projeto  (Ctrl+O)", "Salvar projeto  (Ctrl+S)" }
-	iw: f32 = 220; ih: f32 = 32
+	items := []cstring{ "Novo projeto", "Abrir projeto  (Ctrl+O)", "Salvar  (Ctrl+S)", "Salvar como  (Ctrl+Shift+S)" }
+	iw: f32 = 268; ih: f32 = 32
 	mr := rl.Rectangle{ g_file_menu_x, 34, iw, f32(len(items))*ih + 6 }
 	rl.DrawRectangleRounded(mr, 0.06, 6, rl.Color{ 30, 33, 40, 250 })
 	rl.DrawRectangleRoundedLinesEx(mr, 0.06, 6, 1, LINE)
@@ -1035,7 +1044,8 @@ draw_file_menu :: proc() {
 			switch ii {
 			case 0: request_new()  // pergunta se quer salvar se houver algo não salvo
 			case 1: request_open() // idem antes de abrir outro projeto
-			case 2: if p, ok := save_dialog("Meu Projeto"); ok do save_project(ensure_ext(p, ".ovp"))
+			case 2: request_save()
+			case 3: request_save_as()
 			}
 		}
 	}
@@ -1066,7 +1076,9 @@ draw_topbar :: proc(sw, h: f32) {
 		}
 		x += w
 	}
-	txt_c("Sem Título : 00:00:00:00", sw/2, h/2 - 8, 14, MUTED)
+	// nome do arquivo no centro da barra (com * se houver edição não salva)
+	pname := proj_path != "" ? file_name(proj_path) : "Sem título"
+	txt_c(rl.TextFormat(dirty ? "%s  •" : "%s", cs(pname)), sw/2, h/2 - 8, 14, MUTED)
 
 	bw: f32 = 34
 
