@@ -26,7 +26,11 @@ txt_c :: proc(s: cstring, cx, y, size: f32, col: rl.Color) {
 // com o menu de contexto aberto (ou no frame em que ele engoliu o clique), a UI de
 // trás fica inerte — hover e cliques não atravessam o menu (padrão do modal)
 hovered :: proc(r: rl.Rectangle) -> bool {
+	// menu Arquivo cobre as abas (Mídia/Transições/Efeitos): o draw dele é por último,
+	// mas o clique em "Abrir" passava ANTES na aba de baixo e deixava o projeto em Efeitos
 	if ctx_open || ctx_ate do return false
+	// menu Arquivo cobre as abas (y>=34). A barra de título (Arquivo/Editar/…) continua clicável.
+	if file_menu_open && !g_file_menu_draw && rl.GetMousePosition().y >= 34 do return false
 	return rl.CheckCollisionPointRec(rl.GetMousePosition(), r)
 }
 // clique válido; quando há modal aberto, só conta se for DENTRO do modal (g_modal_draw)
@@ -1030,6 +1034,8 @@ draw_ctx_menu :: proc() {
 // dropdown do menu Arquivo: Novo / Abrir / Salvar (desenhado por último p/ ficar por cima)
 draw_file_menu :: proc() {
 	if !file_menu_open do return
+	g_file_menu_draw = true
+	defer { g_file_menu_draw = false }
 	items := []cstring{ "Novo projeto", "Abrir projeto  (Ctrl+O)", "Salvar  (Ctrl+S)", "Salvar como  (Ctrl+Shift+S)" }
 	iw: f32 = 268; ih: f32 = 32
 	mr := rl.Rectangle{ g_file_menu_x, 34, iw, f32(len(items))*ih + 6 }

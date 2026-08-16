@@ -25,6 +25,7 @@ clear_project :: proc() {
 	nclips = 0
 	undo_top = 0; redo_top = 0; committed_ok = false
 	st.playhead = 0
+	st.active_tab = 0 // Novo/Abrir volta pra aba Mídia (o clique em Arquivo→Abrir não pode deixar Efeitos)
 	set_proj_ar(16.0/9.0); ar_auto = true // formato volta ao padrão (1920x1080) e reativa a autodetecção
 	dirty = false
 	clear_proj_path() // Novo projeto não tem arquivo — o próximo Ctrl+S pergunta o nome de novo

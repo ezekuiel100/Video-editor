@@ -122,6 +122,7 @@ ar_menu_open: bool          // dropdown rápido de presets de proporção aberto
 tf_pw, tf_ph: TField        // campos Largura/Altura do modal "Configurações do Projeto"
 ps_wf, ps_hf: bool          // foco dos campos L/A do modal
 file_menu_open: bool       // dropdown do menu Arquivo aberto
+g_file_menu_draw: bool     // true enquanto draw_file_menu roda (cliques no menu não são bloqueados)
 
 // --- menu de CONTEXTO da timeline (botão direito): copiar/colar/duplicar/etc.
 // Aberto no update (botão direito sobre g_vlane); cliques tratados no UPDATE
