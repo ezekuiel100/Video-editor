@@ -19,6 +19,8 @@ package main
 //
 //   audio_clock_ok           -> puro, qualquer caso serve
 //   audio_full_window_ready  -> puro, qualquer caso serve
+//   audio_window_end / audio_in_open_window -> puros
+//   audio_adopt_or_request   -> só caminhos que NÃO chegam no corpo do chunk_request
 //   try_part_open            -> só até o `if c.has_audio { rl.UnloadMusicStream }`
 //   try_chunk_open           -> idem
 //   chunk_request            -> só os dois early-returns (o resto SOBE UM FFMPEG)
@@ -317,4 +319,54 @@ chunk_request_nao_repete_trecho_provado_vazio :: proc(t: ^testing.T) {
 	testing.expect(t, c.chunk_req == 599, "não pede áudio onde já se provou não haver")
 	testing.expect(t, !c.chunk_busy, "e não sobe worker nenhum")
 	testing.expect(t, c.chunk_thr == nil, "nenhuma thread criada")
+}
+
+// ------------------------------------------------------- audio_adopt_or_request
+// (só retornos antecipados — nenhum chega no corpo do chunk_request)
+
+@(test)
+adopt_nao_pede_chunk_na_cauda_do_completo :: proc(t: ^testing.T) {
+	t_reset()
+	// REGRESSÃO: a timeline pedia chunk a cada frame nos 0.25s finais (audio_clock_ok
+	// falha), a adoção trocava o OGG pelo WAV da cauda e o áudio picotava com o
+	// vídeo já no último frame.
+	c := t_aud(60, 0, 60)
+	c.music_full = true
+	c.streaming = false
+	intrinsics.atomic_store(&c.parts_done, 1)
+	c.chunk_req = 42
+	testing.expect(t, audio_in_open_window(c, 59.9), "59.9 ainda é a janela aberta (margem morta)")
+	testing.expect(t, !audio_adopt_or_request(c, 59.9), "na cauda não há relógio")
+	testing.expect(t, c.chunk_req == 42, "e NÃO encomenda um chunk do fim")
+	testing.expect(t, !c.chunk_busy, "nenhum worker sobe")
+	testing.expect(t, c.has_audio, "o stream completo segue aberto")
+}
+
+@(test)
+adopt_nao_pede_chunk_alem_do_audio_curto :: proc(t: ^testing.T) {
+	t_reset()
+	// áudio acaba aos 90s dum vídeo de 100s: além do EOF não existe janela melhor
+	c := t_aud(100, 0, 90)
+	c.music_full = true
+	intrinsics.atomic_store(&c.parts_done, 1)
+	c.chunk_req = 7
+	testing.expect(t, !audio_adopt_or_request(c, 95), "além do áudio: desiste")
+	testing.expect(t, c.chunk_req == 7, "não pede a cauda vazia")
+	testing.expect(t, !c.chunk_busy)
+}
+
+@(test)
+adopt_nao_pede_chunk_na_cauda_do_head :: proc(t: ^testing.T) {
+	t_reset()
+	// head de 60s ainda no ar, OGG incompleto: os 0.25s finais do HEAD não podem
+	// disparar um chunk do mesmo trecho (o prefetch de -15s já cuida do próximo).
+	c := t_aud(3600, 0, 60)
+	c.music_full = false
+	c.streaming = true
+	intrinsics.atomic_store(&c.parts_done, 0)
+	c.chunk_req = 11
+	testing.expect(t, !audio_clock_ok(c, 59.9), "59.9 está na margem morta do head")
+	testing.expect(t, !audio_adopt_or_request(c, 59.9), "sem janela melhor agora")
+	testing.expect(t, c.chunk_req == 11, "não extrai a cauda do head")
+	testing.expect(t, !c.chunk_busy)
 }

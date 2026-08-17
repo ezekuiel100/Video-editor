@@ -168,6 +168,36 @@ try_chunk_open :: proc(c: ^Clip, local: f32) -> bool {
 // cobertura do chunk no bolso: a medida real quando já conhecida, senão a nominal
 chunk_cov_of :: proc(c: ^Clip) -> f32 { return c.chunk_meas ? c.chunk_cov : CHUNK_SECS }
 
+audio_window_end :: proc(c: ^Clip) -> f32 {
+	if !c.has_audio || c.music.stream.sampleRate == 0 do return c.music_base
+	return c.music_base + f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
+}
+
+// `local` está na janela aberta — inclusive nos 0.25s finais (onde o relógio
+// não vale) e um fiapo depois do EOF do decoder (GetMusicTimePlayed às vezes
+// passa 10-20ms do frameCount).
+audio_in_open_window :: proc(c: ^Clip, local: f32) -> bool {
+	if !c.has_audio do return false
+	return local >= c.music_base && local < audio_window_end(c) + 0.05
+}
+
+// tenta deixar c.music cobrindo `local`. true = já dá para usar como relógio.
+// NÃO pede chunk na cauda da janela aberta nem quando o OGG completo já é a
+// única janela: extraía o fim, a adoção trocava o stream (Unload+Load) e o
+// playback picotava depois que o vídeo já tinha acabado. O preview do bin
+// já guardava isso; a timeline pedia a cada frame.
+audio_adopt_or_request :: proc(c: ^Clip, local: f32) -> bool {
+	if audio_clock_ok(c, local) do return true
+	if try_part_open(c, local) do return true
+	// OGG completo aberto ou no disco: se não cobriu, o áudio da fonte acabou
+	// (0.25s finais, ou faixa mais curta que o vídeo). Chunk da cauda só piora.
+	if c.music_full || (!c.streaming && intrinsics.atomic_load(&c.parts_done) >= 1) do return false
+	if try_chunk_open(c, local) do return true
+	if audio_in_open_window(c, local) do return false
+	chunk_request(c, local)
+	return false
+}
+
 // (main) pede um chunk cobrindo `local`. Ignora se já há um worker no ar (quando
 // ele terminar, se o playhead saiu da área, pede-se outro) ou se o chunk no bolso
 // já cobre. Chame try_part_open/try_chunk_open antes.
@@ -239,7 +269,9 @@ audio_load_ready :: proc() {
 		if c.chunk_busy && intrinsics.atomic_load(&c.chunk_done) {
 			c.chunk_busy = false
 			if a := seg_at(st.playhead); a >= 0 && segs[a].src == i {
-				_ = try_chunk_open(c, seg_local(a, st.playhead))
+				// o completo já é a única janela: adotar um chunk da cauda
+				// descarregava o OGG no último instante (picote no fim)
+				if !c.music_full do _ = try_chunk_open(c, seg_local(a, st.playhead))
 			}
 		}
 		if !c.has_audio {
@@ -377,9 +409,8 @@ audio_secondary :: proc() {
 		// longos tocava a posição ERRADA (ou o fim do head) = áudio "bugado" ao sobrepor.
 		if !audio_clock_ok(c, local) {
 			if c.mix_on { rl.PauseMusicStream(c.music); c.mix_on = false }
-			// adota a parte completa ou o chunk no bolso; senão encomenda um chunk —
-			// o som desta trilha volta quando a janela cobrir (~1-2s)
-			if !try_part_open(c, local) && !try_chunk_open(c, local) do chunk_request(c, local)
+			// mesma guarda da timeline/preview: na cauda do completo NÃO pede chunk
+			_ = audio_adopt_or_request(c, local)
 			continue
 		}
 		msdur := f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
@@ -402,7 +433,7 @@ audio_secondary :: proc() {
 		// pré-busca: perto do fim da janela ativa e ainda falta segmento -> encomenda
 		// o próximo chunk JÁ (troca na borda sem ficar mudo esperando a extração)
 		cend := c.music_base + msdur
-		if cend < sg.in_off + sg.dur && local > cend - 15 {
+		if !c.music_full && cend < sg.in_off + sg.dur && local > cend - 15 {
 			if int((cend + 1) / FULL_PART) >= intrinsics.atomic_load(&c.parts_done) {
 				chunk_request(c, cend - 1)
 			}

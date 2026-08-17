@@ -130,17 +130,12 @@ src_acquire :: proc() {
 	// o glitch e captura quando o raw assentar perto da âncora
 	aud_prev = clamp(src_t, 0, c.dur); smooth_bad = 0
 	if !c.has_audio do return
-	if !try_part_open(c, src_t) do _ = try_chunk_open(c, src_t)
-	if audio_clock_ok(c, src_t) {
+	if audio_adopt_or_request(c, src_t) {
 		msdur := f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
 		target := clamp(src_t - c.music_base, 0, msdur)
 		rl.StopMusicStream(c.music); rl.SeekMusicStream(c.music, target) // Stop zera os buffers antigos
 		if st.playing do rl.PlayMusicStream(c.music)
 		for _ in 0 ..< 8 do rl.UpdateMusicStream(c.music) // pré-enche c/ o áudio novo
-	} else if c.streaming || intrinsics.atomic_load(&c.parts_done) < 1 {
-		// fora da janela: encomenda o áudio da região. Cache com o completo pronto NÃO pede
-		// (a parte 0 é a única janela — fora dela é a cauda sem áudio; mesmo guard do update)
-		chunk_request(c, src_t)
 	}
 }
 
@@ -417,26 +412,12 @@ update_src_preview :: proc(dt: f32) {
 		src_t = nt
 		if !rl.IsMusicStreamPlaying(c.music) && src_t < c.dur - 0.25 do rl.ResumeMusicStream(c.music) // underrun
 	} else {
-		// fora da janela ativa (ou sem áudio): relógio de parede. Cache com o áudio completo
-		// pronto: a parte 0 é a ÚNICA janela — se não cobre src_t, é a CAUDA além do fim do
-		// áudio (0.25s finais, ou áudio mais curto que o vídeo); pedir chunk aqui extraía a
-		// cauda, a adoção rebobinava o relógio ~1s e o fim da prévia virava loop bugado.
-		// Chunks só p/ streaming ou enquanto o completo não ficou pronto.
-		// Adotou uma janela NOVA? Tem de reposicionar o stream em src_t. O chunk é pedido
-		// com 1s de margem ANTES do ponto (chunk_request: local-1), então tocar do início da
-		// janela deixa o relógio 1s atrás — e o PLL travava nesse atraso PARA SEMPRE (o
-		// escape do smooth_clock só reatava p/ FRENTE). Era o "áudio dessincronizado depois
-		// de adiantar": medido, -1.02s cravado por centenas de frames. O caminho da timeline
-		// não tinha o bug porque re-adquire via set_play_clip, que seeka.
-		got := false
-		if c.has_audio {
-			got = try_part_open(c, src_t)
-			if !got && (c.streaming || intrinsics.atomic_load(&c.parts_done) < 1) {
-				got = try_chunk_open(c, src_t)
-				if !got do chunk_request(c, src_t)
-			}
-		}
-		if got do src_acquire() // seek + play + ancora o PLL em src_t
+		// fora da janela ativa (ou sem áudio): relógio de parede. audio_adopt_or_request
+		// não pede chunk na cauda do completo (0.25s finais, ou áudio mais curto que o
+		// vídeo) — pedir extraía a cauda, a adoção rebobinava ~1s e o fim virava loop.
+		// Adotou uma janela NOVA? Tem de reposicionar o stream em src_t (src_acquire
+		// seeka; tocar do início da janela deixava o PLL 1s atrás para sempre).
+		if c.has_audio && audio_adopt_or_request(c, src_t) do src_acquire()
 		else do src_t += dt
 	}
 	if src_t >= c.dur - 0.02 { // fim da fonte: para no fim
@@ -475,6 +456,16 @@ seek_drag_hush :: proc() {
 	}
 }
 
+// para o playback da timeline e silencia o stream-relógio. Sem o Pause, os
+// ~0.7s de buffer já enfileirados continuam saindo depois que o vídeo acabou.
+stop_timeline_play :: proc() {
+	if play_clip >= 0 && play_clip < nsegs && seg_src(play_clip).has_audio {
+		rl.PauseMusicStream(seg_src(play_clip).music)
+	}
+	play_clip = -1
+	st.playing = false
+}
+
 toggle_play :: proc() {
 	if src_preview >= 0 { // prévia de origem: espaço toca/pausa a fonte
 		c := &clips[src_preview]
@@ -490,9 +481,7 @@ toggle_play :: proc() {
 	}
 	if nsegs == 0 { return }
 	if st.playing {
-		st.playing = false
-		if play_clip >= 0 && seg_src(play_clip).has_audio do rl.PauseMusicStream(seg_src(play_clip).music)
-		play_clip = -1
+		stop_timeline_play()
 		return
 	}
 	if st.playhead >= timeline_dur() - 0.03 do seek_global(0)

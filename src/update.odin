@@ -103,7 +103,12 @@ update :: proc() {
 		// (IsMouseButtonPressed) e já chegava zerada no seguinte, então o retângulo não se
 		// movia e o enquadramento só dava para desistir.
 		if modal != .Crop { crop_drag = -1; crop_grab = {} }
-		st.drag = .None; ui_slider_active = -1; player_seek_drag = false; return
+		// sliders do inspector não rodam sob o modal (`hovered` bloqueia). Zerar
+		// ui_slider_active TODO frame matava os sliders DO modal de silêncio: o
+		// draw arma o id no clique e o update seguinte já limpava — só dava para
+		// clicar, não arrastar. Ids 50+ são do cartão de silêncio.
+		if modal != .Silence || ui_slider_active < 50 do ui_slider_active = -1
+		st.drag = .None; player_seek_drag = false; return
 	}
 
 	// exportando: intercepta os cliques nos botões do overlay (pausar/cancelar) ANTES
@@ -622,7 +627,7 @@ update :: proc() {
 				dbg_seek_n -= 1
 				fmt.eprintfln("[seek/SEM-AUDIO] ph=%.3f", f64(st.playhead))
 			}
-			if st.playhead >= timeline_dur() { st.playing = false; play_clip = -1 }
+			if st.playhead >= timeline_dur() { stop_timeline_play(); st.playhead = timeline_dur() }
 			else do show_playhead_frame()
 		} else if seg_speed(a) != 1 {
 			// VELOCIDADE != 1: NÃO usa o áudio da fonte como relógio (a reamostragem
@@ -637,7 +642,7 @@ update :: proc() {
 			if nl >= sg.dur {
 				st.playhead = sg.start + sg.dur
 				// pin sem parar = playhead congelado e playing=true (vídeo "travado")
-				if st.playhead >= timeline_dur() - 0.001 { st.playing = false; play_clip = -1 }
+				if st.playhead >= timeline_dur() - 0.001 { stop_timeline_play(); st.playhead = timeline_dur() }
 			} else { st.playhead = sg.start + nl; show_playhead_frame() }
 			when DBG_SEEK do if dbg_seek_n > 0 {
 				dbg_seek_n -= 1
@@ -656,6 +661,9 @@ update :: proc() {
 			c := seg_src(a)
 			loc0 := (st.playhead - sg.start) * seg_speed(a) + sg.in_off // posição na fonte
 			out0 := seg_run_end(a)                       // fim da CADEIA contígua, na fonte
+			// se o relógio caiu (cauda de 0.25s, janela velha), tenta uma janela
+			// melhor ANTES de desistir — e NÃO pede chunk da própria cauda.
+			if c.has_audio && !audio_clock_ok(c, loc0) do _ = audio_adopt_or_request(c, loc0)
 			if c.has_audio && audio_clock_ok(c, loc0) {
 				// adquire o áudio ao entrar num segmento. Mas se já estamos tocando
 				// a MESMA fonte e o áudio já está na posição certa (atravessamos um
@@ -720,12 +728,13 @@ update :: proc() {
 					nl := (st.playhead - sg.start) + dt
 					if nl >= sg.dur {
 						st.playhead = sg.start + sg.dur
-						if st.playhead >= timeline_dur() - 0.001 { st.playing = false; play_clip = -1 }
+						if st.playhead >= timeline_dur() - 0.001 { stop_timeline_play(); st.playhead = timeline_dur() }
 					} else { st.playhead = sg.start + nl; show_playhead_frame() }
 				} else if !rl.IsMusicStreamPlaying(c.music) || local >= out0 - 0.001 {
 					rl.PauseMusicStream(c.music) // fim da cadeia (a fonte pode continuar)
 					play_clip = -1
 					st.playhead = sg.start + (out0 - sg.in_off) / seg_speed(a) // fim da cadeia, na timeline
+					if st.playhead >= timeline_dur() - 0.001 { stop_timeline_play(); st.playhead = timeline_dur() }
 				} else {
 					// GRAVA um SALTO do playhead: o relógio de áudio mandou o playhead
 					// pular > 2s num único frame de playback contínuo (não é seek). É o
@@ -743,7 +752,9 @@ update :: proc() {
 					// pré-busca: perto do fim da janela ativa e a próxima área ainda sem
 					// parte pronta -> encomenda o chunk seguinte JÁ (troca sem gap na borda)
 					cend := c.music_base + f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
-					if cend < out0 && local > cend - 15 {
+					// completo = única janela; prefetch da cauda só extraía o fim e
+					// a adoção no último instante picotava o áudio.
+					if !c.music_full && cend < out0 && local > cend - 15 {
 						if int((cend + 1) / FULL_PART) >= intrinsics.atomic_load(&c.parts_done) {
 							chunk_request(c, cend - 1)
 						}
@@ -752,17 +763,18 @@ update :: proc() {
 					show_playhead_frame()
 				}
 			} else {
-				// sem relógio de áudio na região: adota a parte pronta ou o chunk no
-				// bolso; senão encomenda um chunk. O frame seguinte adquire e o som volta.
-				if c.has_audio && !try_part_open(c, loc0) && !try_chunk_open(c, loc0) do chunk_request(c, loc0)
-				if play_clip >= 0 {
+				// sem relógio: a adoção já rodou acima. Na cauda da janela ABERTA
+				// deixa o buffer terminar (UpdateMusicStream no rodapé) — pausar
+				// aqui e pedir chunk era o picote no fim do vídeo.
+				keep_tail := play_clip == a && audio_in_open_window(c, loc0)
+				if !keep_tail && play_clip >= 0 {
 					if seg_src(play_clip).has_audio do rl.PauseMusicStream(seg_src(play_clip).music)
 					play_clip = -1
 				}
 				local := (st.playhead - sg.start) + dt // avanço no tempo da timeline
 				if local >= sg.dur {
 					st.playhead = sg.start + sg.dur
-					if st.playhead >= timeline_dur() - 0.001 { st.playing = false; play_clip = -1 }
+					if st.playhead >= timeline_dur() - 0.001 { stop_timeline_play(); st.playhead = timeline_dur() }
 				} else { st.playhead = sg.start + local; show_playhead_frame() }
 			}
 		}
