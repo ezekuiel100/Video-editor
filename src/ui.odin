@@ -1976,7 +1976,8 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 		if segs[selected].vfout > 0.01 do vextra += 1
 	}
 	crop_extra := (insp_tab == 0 && !c.is_text && !alike && seg_cropped(selected)) ? f32(30) : f32(0)
-	ch := c.is_text ? f32(388) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(300)))
+	// aba Áudio: sem o botão "Detectar silêncio" (fica só na toolbar da timeline)
+	ch := c.is_text ? f32(388) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(268)))
 	card := rl.Rectangle{ area.x + area.width - cw - 14, area.y + 14, cw, ch }
 	g_insp_card = card // p/ o preview não roubar cliques daqui
 	rl.DrawRectangleRounded(card, 0.06, 8, rl.Color{ 28, 31, 38, 236 })
@@ -2112,8 +2113,6 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	txt("Fade out", x, y, 13, TEXT)
 	txt(rl.TextFormat("%.1fs", f64(sg.fade_out)), vx, y, 13, ACCENT); y += 20
 	ui_slider(3, { x, y, cw - 2*pad, 16 }, &sg.fade_out, 0, fmax)
-	y += 36
-	if ui_btn({ x, y, cw - 2*pad, 28 }, "Detectar silêncio…", false) do open_silence_modal()
 }
 
 
