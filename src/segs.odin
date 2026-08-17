@@ -643,7 +643,7 @@ segs_importing :: proc() -> int {
 // tira UM segmento da timeline (a mídia continua no bin). Compacta o array, então
 // conserta os índices globais que apontam para segmentos (deslocam ao remover).
 // ripple=true (padrão) fecha o buraco; false deixa o vão (segurar Alt ao remover)
-remove_seg :: proc(si: int, ripple := true) {
+remove_seg :: proc(si: int, ripple := true, announce := true) {
 	if si < 0 || si >= nsegs do return
 	src := seg_src(si)
 	if src.has_audio do rl.PauseMusicStream(src.music)
@@ -651,6 +651,19 @@ remove_seg :: proc(si: int, ripple := true) {
 	rs := segs[si].start // início e duração do removido, p/ o ripple
 	rd := segs[si].dur
 	rt := segs[si].track // ripple só desloca a MESMA trilha
+	ph := st.playhead
+	// após um corte (S), o playhead fica na borda: fim da esquerda = início da direita.
+	// se apagamos a metade ESQUERDA com ripple, a direita desliza p/ `rs` e o frame que
+	// estava sob o cursor ia junto — sem acompanhar, o cursor fica no fim da timeline
+	// (parado no mesmo tempo global) e o play não tem o que mostrar.
+	follow_cut := false
+	if ripple && abs(ph - (rs + rd)) <= 0.02 {
+		for k in 0 ..< nsegs {
+			if k == si || segs[k].track != rt do continue
+			if abs(segs[k].start - (rs + rd)) <= 0.02 { follow_cut = true; break }
+		}
+	}
+	inside_removed := ph >= rs && ph < rs + rd - 0.001
 	for k := si; k < nsegs - 1; k += 1 { segs[k] = segs[k + 1]; seg_marked[k] = seg_marked[k + 1] }
 	seg_marked[nsegs - 1] = false // limpa o slot que sobra após a compactação
 	nsegs -= 1
@@ -665,14 +678,17 @@ remove_seg :: proc(si: int, ripple := true) {
 		// os clipes de EFEITO da trilha deslizam junto — senão um segmento escorregava
 		// p/ cima de um efeito (sobreposição que nenhum arrasto permite criar)
 		for k in 0 ..< nfx do if fxsegs[k].track == rt && fxsegs[k].start > rs + 0.001 do fxsegs[k].start -= rd
-		// o playhead é TEMPO GLOBAL, não por trilha: recuá-lo aqui pulava o conteúdo
-		// das outras trilhas (apagar 10s em V2 com o cursor em 30s em V1 jogava p/ 20s).
-		// O seek_global abaixo reposiciona A/V no mesmo instante; o que escorregou
-		// nesta trilha passa por baixo do cursor, o resto não se mexe.
+		// o playhead é TEMPO GLOBAL, não por trilha: recuá-lo em todo ripple pulava o
+		// conteúdo das outras trilhas (apagar 10s em V2 com o cursor em 30s em V1 jogava
+		// p/ 20s). Só acompanha nos casos de borda de corte / interior do removido.
 	}
+	// cursor: no interior do apagado → início do buraco (ou da emenda após ripple).
+	// na borda de um corte contíguo que ripplou → `rs` (mesmo frame, tempo novo).
+	// nos demais casos mantém o tempo global (seek_global clampa se a timeline encolheu).
+	if inside_removed || follow_cut do ph = rs
 	st.playing = false
-	seek_global(st.playhead)
-	set_toast(rl.TextFormat(ripple ? "%s removido" : "%s removido (deixou vão)", cs(name)))
+	seek_global(ph)
+	if announce do set_toast(rl.TextFormat(ripple ? "%s removido" : "%s removido (deixou vão)", cs(name)))
 }
 
 alt_down :: proc() -> bool { return rl.IsKeyDown(.LEFT_ALT) || rl.IsKeyDown(.RIGHT_ALT) }

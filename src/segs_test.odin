@@ -187,6 +187,48 @@ remove_com_ripple :: proc(t: ^testing.T) {
 	testing.expect(t, selected == 1, "índice selecionado corrigido após a compactação")
 }
 
+// Cortar no playhead e apagar a metade ESQUERDA: a direita rippla p/ o início e o
+// cursor tem que ir junto (senão fica no fim da timeline, no mesmo tempo global).
+@(test)
+cut_delete_esquerda_segue_playhead :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10)
+	st.playhead = 4
+	testing.expect(t, split_seg_at(a, 4), "corta em 4s")
+	// [0,4) e [4,10); playhead na borda
+	testing.expect(t, t_feq(st.playhead, 4), "playhead no corte")
+	remove_seg(0) // apaga a esquerda com ripple
+	testing.expect(t, nsegs == 1, "sobra a metade direita")
+	testing.expect(t, t_feq(segs[0].start, 0), "direita desliza p/ 0")
+	testing.expect(t, t_feq(segs[0].dur, 6), "duração da direita intacta")
+	testing.expect(t, t_feq(st.playhead, 0), "cursor acompanha a emenda (mesmo frame, tempo novo)")
+}
+
+// Apagar a metade DIREITA depois do corte: o cursor já está no fim da esquerda — fica.
+@(test)
+cut_delete_direita_mantem_borda :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10)
+	st.playhead = 4
+	testing.expect(t, split_seg_at(a, 4), "corta em 4s")
+	remove_seg(1) // apaga a direita
+	testing.expect(t, nsegs == 1, "sobra a esquerda")
+	testing.expect(t, t_feq(st.playhead, 4), "cursor fica na borda (fim do que sobrou)")
+}
+
+// Playhead DENTRO do pedaço apagado: vai pro início do buraco/emenda.
+@(test)
+remove_playhead_dentro_vai_pro_inicio :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 0, 0, 10)
+	add_seg(0, 10, 0, 5) // [10,15) removido com playhead no meio
+	add_seg(0, 15, 0, 5) // contíguo: desliza p/ 10
+	st.playhead = 12
+	remove_seg(1)
+	testing.expect(t, t_feq(st.playhead, 10), "cursor no início da emenda após ripple")
+	testing.expect(t, t_feq(segs[1].start, 10), "vizinho da direita fechou o buraco")
+}
+
 @(test)
 remove_sem_ripple_deixa_vao :: proc(t: ^testing.T) {
 	t_reset()

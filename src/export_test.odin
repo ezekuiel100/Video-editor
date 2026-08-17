@@ -307,6 +307,26 @@ graph_mp3_e_so_audio :: proc(t: ^testing.T) {
 	export_fmt = .MP4
 }
 
+// Sem -t o muxer espera vídeo depois que o color=d=total acabou (áudio do atempo
+// passa uns ms) e a exportação NÃO TERMINA. -nostdin evita o ffmpeg ficar à espera
+// de 'q' no stdin herdado da janela.
+@(test)
+export_tem_teto_de_duracao_e_nostdin :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	args, _ := t_build(t)
+	testing.expect(t, t_has(args, "-nostdin"), "sem -nostdin o ffmpeg pode travar no stdin da GUI")
+	testing.expect(t, t_has(args, "-t"), "sem -t a exportação pode nunca fechar o arquivo")
+	testing.expect(t, t_has(args, "-max_muxing_queue_size"), "fila pequena trava com prévia+áudio")
+	// opção de SAÍDA: antes do 1º -i o ffmpeg aborta ("cannot be applied to input url")
+	ii, qi := -1, -1
+	for a, i in args {
+		if a == "-i" && ii < 0 do ii = i
+		if a == "-max_muxing_queue_size" && qi < 0 do qi = i
+	}
+	testing.expect(t, qi > ii && ii >= 0, "max_muxing_queue_size tem de vir DEPOIS dos -i")
+}
+
 // Dissolver: a cabeça do clipe de entrada estica d/2 e o -ss tem de acompanhar, senão o
 // trim pede material que o input não entregou — a transição sai curta, sem erro nenhum.
 @(test)

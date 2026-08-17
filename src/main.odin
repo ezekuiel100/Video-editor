@@ -209,7 +209,7 @@ preview_ar :: proc() -> f32 {
 
 
 // --- modais (exportar / screenshot / conclusão) ---
-Modal :: enum { None, Export, Shot, Done, Confirm, Crop, ProjSettings }
+Modal :: enum { None, Export, Shot, Done, Confirm, Crop, ProjSettings, Silence }
 // ação adiada até o usuário responder o "salvar alterações?" (modal Confirm)
 Pending :: enum { None, Close, New, Open }
 pending_action: Pending

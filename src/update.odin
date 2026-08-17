@@ -68,6 +68,7 @@ update :: proc() {
 	}
 	if toast_t > 0 do toast_t -= dt
 	if save_flash_t > 0 do save_flash_t -= dt
+	if sil_eat && !rl.IsMouseButtonDown(.LEFT) && !rl.IsMouseButtonPressed(.LEFT) do sil_eat = false
 	// gravar DEPOIS de um frame com "Salvando..." na tela (o write é síncrono e instantâneo)
 	if save_pending && proj_path != "" {
 		save_pending = false
@@ -233,17 +234,21 @@ update :: proc() {
 	//  S = dividir no playhead | B = ferramenta lâmina | F = ajustar à janela | Esc = sair da lâmina
 	if rl.IsKeyPressed(.F3) do prof_show = !prof_show // HUD do profiler (global, mede o custo da main thread)
 	if rl.IsKeyPressed(.F4) do dbg_toggle() // liga/desliga o log de diagnóstico do decoder (arquivo ao lado do .exe)
-	if rl.IsKeyPressed(.SPACE) && !txt_edit && !search_focus do toggle_play() // espaço: ciente do modo prévia
+	if rl.IsKeyPressed(.SPACE) && !txt_edit && !search_focus {
+		if modal == .Silence do sil_play = !sil_play // no editor de silêncio: toca o RESULTADO
+		else do toggle_play()
+	}
 	if rl.IsKeyPressed(.ESCAPE) {
 		if search_focus do search_focus = false // sai da busca primeiro
 		else if txt_edit do txt_edit = false // depois da edição de texto
+		else if modal == .Silence do sil_close()
 		else if crop_mode do set_crop_mode(false) // sai do modo recorte
 		else if fullscreen_preview do toggle_fullscreen_preview()
 		else if src_preview >= 0 do exit_src_preview()
 		else if sel_trans >= 0 do sel_trans = -1 // Esc desseleciona a transição
 		blade_mode = false
 	}
-	if src_preview < 0 && !ctrl && !txt_edit && !search_focus { // atalhos de edição da timeline (não digitando; Ctrl reservado)
+	if modal == .None && src_preview < 0 && !ctrl && !txt_edit && !search_focus { // atalhos de edição da timeline (não digitando; Ctrl reservado)
 		if rl.IsKeyPressed(.S) do split_at_playhead()
 		if rl.IsKeyPressed(.B) do blade_mode = !blade_mode
 		if rl.IsKeyPressed(.F) do tl_fit(g_view_w) // ajusta o zoom p/ o conteúdo caber na janela

@@ -92,6 +92,32 @@ export_dims :: proc() -> (w, h: int) { return proj_w, proj_h } // resolução do
 // stream de saída. Sem aceitar dígito, essa linha era classificada como erro e sobrescrevia
 // o export_err a cada intervalo — o toast de falha mostrava "stream_0_0_q=29.0" no lugar da
 // causa, e export_err_n > 0 ficava sempre verdadeiro.)
+// atualiza export_pct a partir de uma linha `-progress`. Aceita out_time_us e
+// out_time_ms (ffmpeg troca conforme a versão) e ignora N/A / parse falho.
+export_apply_progress :: proc(s: string) -> bool {
+	us_key :: "out_time_us="
+	ms_key :: "out_time_ms="
+	val: f64
+	ok: bool
+	if strings.has_prefix(s, us_key) {
+		if v, p := strconv.parse_i64(s[len(us_key):]); p {
+			val = f64(v) / 1e6
+			ok = true
+		}
+	} else if strings.has_prefix(s, ms_key) {
+		// ffmpeg: out_time_ms é o mesmo valor em microsegundos (nome legado)
+		if v, p := strconv.parse_i64(s[len(ms_key):]); p {
+			val = f64(v) / 1e6
+			ok = true
+		}
+	} else {
+		return false
+	}
+	if !ok || export_total <= 0 || val < 0 do return true
+	export_pct = clamp(f32(val / f64(export_total)), 0, 1)
+	return true
+}
+
 progress_line :: proc(s: string) -> bool {
 	for c, i in s {
 		if c == '=' do return i > 0
@@ -111,10 +137,9 @@ export_worker :: proc() {
 				ch := buf[k]
 				if ch == '\n' {
 					s := string(line[0:ll])
-					if strings.has_prefix(s, "out_time_us=") {
-						if v, ok := strconv.parse_i64(s[len("out_time_us="):]); ok && export_total > 0 {
-							export_pct = clamp(f32(f64(v)/1e6) / export_total, 0, 1)
-						}
+					if len(s) > 0 && s[len(s)-1] == '\r' do s = s[:len(s)-1] // Windows: -progress usa CRLF
+					if export_apply_progress(s) {
+						// out_time_* atualizou o %
 					} else if !progress_line(s) {
 						// guarda a ÚLTIMA linha que não é progresso: é o erro do ffmpeg, a
 						// única pista da causa (o app não tem console p/ onde olhar)
@@ -309,7 +334,12 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	want_video := export_fmt != .MP3 // MP3 = só áudio: pula todo o ramo de vídeo do filtro
 
 	args = make([dynamic]string, context.temp_allocator)
-	append(&args, "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:2", "-nostats") // progresso no stderr; stdout = frames da prévia
+	// -nostdin: app GUI não tem stdin útil; sem isto o ffmpeg às vezes fica à espera
+	// de um 'q' no handle herdado e a exportação nunca acaba.
+	// max_muxing_queue_size vai NAS SAÍDAS (não aqui): é opção de output; antes do
+	// 1º -i o ffmpeg recusa com "cannot be applied to input url".
+	append(&args, "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+		"-progress", "pipe:2", "-nostats")
 
 	// clipes de TEXTO: renderiza cada um num PNG RGBA do tamanho do canvas (já
 	// posicionado/estilizado) p/ virar overlay. Feito ANTES de montar os inputs.
@@ -682,6 +712,11 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	append(&args, "-filter_complex_script", fg_path)
 	if want_video do append(&args, "-map", "[vout]")
 	if ac > 0     do append(&args, "-map", "[aout]")
+	// TETO DE DURAÇÃO no arquivo: se o áudio (amix/atempo) passar de `total` por
+	// arredondamento, o muxer espera frames de vídeo que o `color=d=total` já não
+	// emite — e a exportação não termina. -t fecha o arquivo na duração da timeline.
+	tlim := fmt.tprintf("%.3f", total + 0.05)
+	append(&args, "-t", tlim, "-max_muxing_queue_size", "4096")
 
 	// QUALIDADE: CQ (NVENC) / CRF (x264/x265/VP9) — nº maior = arquivo menor. Auto = alta
 	// qualidade LIMITADA por teto de bitrate ≈ o da fonte (não incha além do original).
@@ -723,7 +758,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	}
 	append(&args, out)
 	// 2ª saída (só formatos de vídeo): frames rgb24 da prévia ao vivo pelo stdout (pipe:1)
-	if want_video do append(&args, "-map", "[vpout]", "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1")
+	if want_video do append(&args, "-map", "[vpout]", "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-t", tlim, "-max_muxing_queue_size", "4096", "pipe:1")
 	// REDE DE SEGURANÇA: com o grafo fora da linha, sobram os inputs (um -i por segmento, com
 	// o caminho inteiro). Ainda dá p/ estourar com muitos clipes de caminho longo, e o erro do
 	// os.process_start seria de novo um "Falha ao iniciar ffmpeg" mudo. Melhor dizer a causa.

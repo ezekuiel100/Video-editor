@@ -31,6 +31,10 @@ hovered :: proc(r: rl.Rectangle) -> bool {
 	if ctx_open || ctx_ate do return false
 	// menu Arquivo cobre as abas (y>=34). A barra de título (Arquivo/Editar/…) continua clicável.
 	if file_menu_open && !g_file_menu_draw && rl.GetMousePosition().y >= 34 do return false
+	// modal aberto: a UI de trás não recebe hover/clique (senão o silêncio fechava
+	// porque o clique caía na timeline e desmarcava o clipe)
+	if modal != .None && !g_modal_draw do return false
+	if sil_eat do return false // 1º frame depois de abrir: o clique que abriu ainda está down
 	return rl.CheckCollisionPointRec(rl.GetMousePosition(), r)
 }
 // clique válido; quando há modal aberto, só conta se for DENTRO do modal (g_modal_draw)
@@ -402,6 +406,7 @@ draw_modal :: proc(sw, sh: f32) {
 	defer g_modal_draw = false
 	if modal == .Crop { draw_crop_modal(sw, sh); return } // modal próprio (frame + retângulo)
 	if modal == .ProjSettings { draw_projset_modal(sw, sh); return } // proporção + resolução do projeto
+	if modal == .Silence { draw_silence_modal(sw, sh); return }
 	rl.DrawRectangleRec({0,0,sw,sh}, rl.Color{0,0,0,150}) // backdrop escuro
 	cw: f32 = modal == .Export ? 700 : 540
 	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : 430))
@@ -1721,7 +1726,7 @@ ui_slider :: proc(id: int, r: rl.Rectangle, val: ^f32, lo, hi: f32) -> bool {
 	rl.DrawRectangleRounded({r.x, cy - 2, kx - r.x, 4}, 1, 4, ACCENT)
 	hot := ui_slider_active == id || hovered(r)
 	rl.DrawCircleV({kx, cy}, hot ? 7 : 6, hot ? rl.WHITE : rl.Color{205, 210, 220, 255})
-	if rl.IsMouseButtonPressed(.LEFT) && hovered(r) && modal == .None do ui_slider_active = id
+	if rl.IsMouseButtonPressed(.LEFT) && hovered(r) && (modal == .None || g_modal_draw) do ui_slider_active = id
 	if ui_slider_active == id {
 		if rl.IsMouseButtonReleased(.LEFT) { ui_slider_active = -1 }
 		else {
@@ -1742,7 +1747,7 @@ ui_vslider :: proc(id: int, r: rl.Rectangle, val: ^f32, lo, hi: f32) -> bool {
 	rl.DrawRectangleRounded({cx - 2, ky, 4, (r.y + r.height) - ky}, 1, 4, ACCENT) // preenche do knob p/ baixo
 	hot := ui_slider_active == id || hovered(r)
 	rl.DrawCircleV({cx, ky}, hot ? 7 : 6, hot ? rl.WHITE : rl.Color{205, 210, 220, 255})
-	if rl.IsMouseButtonPressed(.LEFT) && hovered(r) && modal == .None do ui_slider_active = id
+	if rl.IsMouseButtonPressed(.LEFT) && hovered(r) && (modal == .None || g_modal_draw) do ui_slider_active = id
 	if ui_slider_active == id {
 		if rl.IsMouseButtonReleased(.LEFT) { ui_slider_active = -1 }
 		else {
@@ -1971,7 +1976,7 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 		if segs[selected].vfout > 0.01 do vextra += 1
 	}
 	crop_extra := (insp_tab == 0 && !c.is_text && !alike && seg_cropped(selected)) ? f32(30) : f32(0)
-	ch := c.is_text ? f32(388) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(260)))
+	ch := c.is_text ? f32(388) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(300)))
 	card := rl.Rectangle{ area.x + area.width - cw - 14, area.y + 14, cw, ch }
 	g_insp_card = card // p/ o preview não roubar cliques daqui
 	rl.DrawRectangleRounded(card, 0.06, 8, rl.Color{ 28, 31, 38, 236 })
@@ -2107,6 +2112,8 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	txt("Fade out", x, y, 13, TEXT)
 	txt(rl.TextFormat("%.1fs", f64(sg.fade_out)), vx, y, 13, ACCENT); y += 20
 	ui_slider(3, { x, y, cw - 2*pad, 16 }, &sg.fade_out, 0, fmax)
+	y += 36
+	if ui_btn({ x, y, cw - 2*pad, 28 }, "Detectar silêncio…", false) do open_silence_modal()
 }
 
 

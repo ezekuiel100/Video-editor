@@ -78,6 +78,24 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	}
 	ix += 30
 
+	// Detectar silêncio: ao lado de Cortar e Ampliar (mesmo tamanho/estilo)
+	sz_ok := selected >= 0 && selected < nsegs && seg_ready(selected) &&
+		(seg_src(selected).src_audio || seg_src(selected).has_audio) && !seg_src(selected).is_text
+	sz := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
+	if sz_ok && clicked(sz) do open_silence_modal()
+	rl.DrawRectangleRounded(sz, 0.3, 4, (hovered(sz) && sz_ok) ? HOVER : PANEL2)
+	{ // ícone: onda com vão no meio (silêncio)
+		icx := sz.x + 13; icy := tb.y + tb.height/2; icol := sz_ok ? TEXT : rl.Color{ 92,96,104,255 }
+		rl.DrawLineEx({icx-8, icy}, {icx-5, icy-5}, 1.6, icol)
+		rl.DrawLineEx({icx-5, icy-5}, {icx-2, icy+4}, 1.6, icol)
+		rl.DrawLineEx({icx-2, icy+4}, {icx-0.5, icy}, 1.6, icol)
+		rl.DrawLineEx({icx+0.5, icy}, {icx+2, icy+4}, 1.6, icol)
+		rl.DrawLineEx({icx+2, icy+4}, {icx+5, icy-5}, 1.6, icol)
+		rl.DrawLineEx({icx+5, icy-5}, {icx+8, icy}, 1.6, icol)
+		rl.DrawLineEx({icx-1.5, icy}, {icx+1.5, icy}, 1.4, MUTED) // hiato = silêncio
+	}
+	ix += 30
+
 	view_w := r.width - f32(LANE_X)
 	g_view_w = view_w // guardado p/ o atalho F (ajustar à janela), tratado no update
 	// botão "Ajustar": enquadra todo o conteúdo na janela (atalho F)
@@ -380,6 +398,15 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		if w > 40 { // nome cortado (…) p/ CABER no clipe, sem vazar pro vizinho
 			name_r := vr.x + w - 6 - xbtn_room // limite direito do nome (reserva p/ o botão x)
 			if name_r - name_x > 12 do txt(elide(c.name, 11, name_r - name_x), name_x, vr.y + 1, 11, rl.WHITE)
+		}
+		// marcas de silêncio detectado (modal aberto): faixa âmbar sobre o vão
+		if modal == .Silence && i == sil_si {
+			for k in 0 ..< sil_n {
+				sx0 := tl_x(sil_hits[k].t0)
+				sx1 := tl_x(sil_hits[k].t1)
+				sr := rl.Rectangle{ sx0, vr.y, sx1 - sx0, vr.height }
+				rl.DrawRectangleRec(sr, rl.Color{ 220, 170, 50, 70 })
+			}
 		}
 		sel := i == selected
 		mk := seg_marked[i] // parte de uma seleção múltipla
@@ -735,7 +762,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	}
 
 	// clique: pegar um segmento (mover/aparar) tem prioridade; senão, mover o playhead
-	if !blade_mode && rl.IsMouseButtonPressed(.LEFT) && st.drag == .None && !consumed {
+	if modal == .None && !blade_mode && rl.IsMouseButtonPressed(.LEFT) && st.drag == .None && !consumed {
 		mp := rl.GetMousePosition()
 		// alças de áudio do segmento SELECIONADO têm prioridade sobre mover/aparar
 		near :: proc(a, b: rl.Vector2) -> bool { return abs(a.x-b.x) < 8 && abs(a.y-b.y) < 8 }
@@ -749,7 +776,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			}
 		}
 	}
-	if !blade_mode && rl.IsMouseButtonPressed(.LEFT) && st.drag == .None && !consumed {
+	if modal == .None && !blade_mode && rl.IsMouseButtonPressed(.LEFT) && st.drag == .None && !consumed {
 		mp := rl.GetMousePosition()
 		hit := -1
 		edge := 0
@@ -850,11 +877,19 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		}
 	}
 
-	// tooltip do botão de recorte: por cima da régua/trilhas, só no hover
+	// tooltips dos ícones: por cima da régua/trilhas, só no hover
 	if hovered(cz) {
 		tip: cstring = "Cortar e Ampliar"
 		tw := txt_w(tip, 12) + 16
 		tr := rl.Rectangle{ cz.x, cz.y + cz.height + 6, tw, 22 }
+		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
+		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
+		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
+	}
+	if hovered(sz) {
+		tip: cstring = "Detectar silêncio"
+		tw := txt_w(tip, 12) + 16
+		tr := rl.Rectangle{ sz.x, sz.y + sz.height + 6, tw, 22 }
 		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
 		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
 		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
