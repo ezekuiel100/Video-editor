@@ -450,19 +450,18 @@ update_src_preview :: proc(dt: f32) {
 seek_drag_hush :: proc() {
 	if src_preview >= 0 && src_preview < nclips {
 		c := &clips[src_preview]
-		if !c.closed && c.has_audio do rl.PauseMusicStream(c.music)
-	} else if play_clip >= 0 && seg_src(play_clip).has_audio {
-		rl.PauseMusicStream(seg_src(play_clip).music)
+		if !c.closed && c.has_audio do rl.StopMusicStream(c.music)
+	} else {
+		hush_all_music()
+		seek_rearm_si = -1
 	}
 }
 
 // para o playback da timeline e silencia o stream-relógio. Sem o Pause, os
 // ~0.7s de buffer já enfileirados continuam saindo depois que o vídeo acabou.
 stop_timeline_play :: proc() {
-	if play_clip >= 0 && play_clip < nsegs && seg_src(play_clip).has_audio {
-		rl.PauseMusicStream(seg_src(play_clip).music)
-	}
-	play_clip = -1
+	hush_all_music()
+	seek_rearm_si = -1
 	st.playing = false
 }
 

@@ -840,8 +840,12 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		// acima). Antes isto rodava em qualquer clique da janela — zoom, aba,
 		// maximizar — pausando o áudio; o update via o stream parado, achava que
 		// o clipe tinha acabado e cravava o playhead no fim.
-		if st.drag != .None && st.playing && play_clip >= 0 && seg_src(play_clip).has_audio {
-			rl.PauseMusicStream(seg_src(play_clip).music) // silencia enquanto arrasta
+		if st.drag != .None && st.playing {
+			// Stop de todo mundo (não só o master): Pause deixava ~0.7s de
+			// secundário/spv por cima do seek. play_clip=-1 evita o Update
+			// do rodapé reencher o buffer velho durante o arrasto.
+			hush_all_music()
+			seek_rearm_si = -1
 		}
 	}
 

@@ -30,6 +30,7 @@ t_reset :: proc() {
 	g_lanes_top = 0; g_track_h = 72; g_track_gap = 3
 	st = State{}
 	selected = -1; play_clip = -1; drag_clip = -1; sel_trans = -1; bin_sel = -1
+	seek_rearm_si = -1; audio_hush_at = -1
 	src_preview = -1
 	player_seek_drag = false
 	aud_prev = -1

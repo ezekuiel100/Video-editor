@@ -369,6 +369,12 @@ play_clip: int = -1 // SEGMENTO cujo áudio (da fonte) é o relógio durante o p
 // jogava o playhead pro fim).
 seek_pending:     bool
 seek_pending_loc: f32
+// após um seek: o Play da posição nova espera o PRÓXIMO frame. Stop+Play no
+// mesmo instante deixava o sub-buffer velho (~0.7s, 2×16384) no mixer SOMANDO
+// com o pré-enchimento do ponto novo = dois áudios por um instante.
+seek_rearm_si:  int = -1
+seek_rearm_loc: f32
+audio_hush_at:  i64 = -1 // g_frame_no do último hush_all_music
 clip_seq:  int      // contador p/ ids únicos
 
 // ---------- probe ----------

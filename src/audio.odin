@@ -334,10 +334,32 @@ audio_full_window_ready :: proc(c: ^Clip) -> bool {
 	return f32(c.music.frameCount) / f32(c.music.stream.sampleRate) >= c.dur - 1.0
 }
 
+// descarta a fila de TODOS os rl.Music. Pause só marca paused: o mixer ainda
+// despeja o sub-buffer corrente (~341ms, os dois chegam a ~0.7s). No clique-
+// seek isso SOMA com o Play da posição nova — “dois áudios ao mesmo tempo”.
+hush_all_music :: proc() {
+	for i in 0 ..< nclips {
+		if clips[i].closed || !clips[i].has_audio do continue
+		rl.StopMusicStream(clips[i].music)
+		clips[i].mix_on = false
+	}
+	for i in 0 ..< nsegs {
+		for s in 0 ..< 2 {
+			if !spv[i][s].on do continue
+			rl.StopMusicStream(spv[i][s].music)
+			spv[i][s].on = false
+		}
+	}
+	play_clip = -1
+	audio_hush_at = g_frame_no
+}
+
+audio_hush_cooling :: proc() -> bool { return g_frame_no == audio_hush_at }
+
 // define o segmento que fornece o áudio-relógio e o inicia em `local` (na FONTE)
 set_play_clip :: proc(si: int, local: f32) {
 	if play_clip >= 0 && play_clip != si && seg_src(play_clip).has_audio {
-		rl.PauseMusicStream(seg_src(play_clip).music)
+		rl.StopMusicStream(seg_src(play_clip).music)
 	}
 	play_clip = si
 	aud_prev = -1; smooth_bad = 0 // relógio suave recomeça após seek/aquisição (âncora = loc0 no bloco)
@@ -375,6 +397,15 @@ audio_edit_drag :: proc() -> bool {
 
 audio_secondary :: proc() {
 	pt := prof_beg(.Audio); defer prof_end(.Audio, pt)
+	// frame do seek: não religa mix — senão o master ainda não existe (play_clip=-1)
+	// e TODO clipe sob o playhead virava secundário, por cima do buffer velho.
+	if audio_hush_cooling() || player_seek_drag || st.drag == .Playhead {
+		for s in 0 ..< nclips {
+			c := &clips[s]
+			if c.mix_on && c.has_audio { rl.StopMusicStream(c.music); c.mix_on = false }
+		}
+		return
+	}
 	// passada 1: elege, POR FONTE, o segmento que a toca neste frame (1 rl.Music não
 	// toca 2 posições — mesma fonte 2x sob o playhead: o de trilha mais baixa vence,
 	// o outro fica mudo). Sem eleição, um seg fora do playhead pausava o stream que
@@ -730,7 +761,7 @@ audio_speed_preview :: proc() {
 		}
 		sg := &segs[i]
 		inside := st.playhead >= sg.start && st.playhead < sg.start + sg.dur
-		want := st.playing && (st.drag == .None || audio_edit_drag()) && inside && !sg.muted && !track_muted[sg.track]
+		want := st.playing && (st.drag == .None || audio_edit_drag()) && inside && !sg.muted && !track_muted[sg.track] && !audio_hush_cooling() && !player_seek_drag
 		tl_local := clamp(st.playhead - sg.start, 0, sg.dur) // posição no tempo do SEGMENTO
 		ci := clamp(int(tl_local / SPV_CHUNK), 0, spv_nchunks(i) - 1)
 		e := &spv[i][ci & 1]

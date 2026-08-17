@@ -1213,11 +1213,10 @@ do_redo :: proc() {
 seek_global :: proc(t: f32) {
 	tt := clamp(t, 0, timeline_dur())
 	st.playhead = tt
-	for i in 0 ..< nclips do if !clips[i].closed && clips[i].has_audio { rl.PauseMusicStream(clips[i].music); clips[i].mix_on = false }
-	for i in 0 ..< nsegs do for s in 0 ..< 2 do if spv[i][s].on { rl.PauseMusicStream(spv[i][s].music); spv[i][s].on = false } // pausa spv (reposiciona no frame seguinte)
-	play_clip = -1
+	hush_all_music() // Stop (não Pause): sem isso o buffer velho cobre o seek
 	show_playhead_frame() // vídeo: frame da trilha de topo sob o playhead
 	a := audio_seg_at(tt)  // áudio: relógio do topo COM áudio não-mudo
+	seek_rearm_si = -1
 	if a < 0 do return // sem áudio na região (vazio ou só vídeo): nada a adquirir
 	local := seg_local(a, tt)
 	src := seg_src(a)
@@ -1228,5 +1227,10 @@ seek_global :: proc(t: f32) {
 	// preservado) e o laço de playback já força play_clip = -1 nesse caso. Adquirir aqui
 	// recarregava o OGG e dava Resume no tom ORIGINAL — um estalo a cada seek, pausado só
 	// no frame seguinte.
-	if st.playing && src.has_audio && seg_speed(a) == 1 do set_play_clip(a, local)
+	// Play só no PRÓXIMO frame (audio_hush_cooling): Stop+Play no mesmo instante
+	// deixava o sub-buffer velho somando com o ponto novo.
+	if st.playing && src.has_audio && seg_speed(a) == 1 {
+		seek_rearm_si = a
+		seek_rearm_loc = local
+	}
 }

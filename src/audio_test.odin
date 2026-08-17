@@ -19,6 +19,7 @@ package main
 //
 //   audio_clock_ok           -> puro, qualquer caso serve
 //   audio_full_window_ready  -> puro, qualquer caso serve
+//   audio_hush_cooling       -> puro
 //   audio_window_end / audio_in_open_window -> puros
 //   audio_adopt_or_request   -> só caminhos que NÃO chegam no corpo do chunk_request
 //   try_part_open            -> só até o `if c.has_audio { rl.UnloadMusicStream }`
@@ -51,6 +52,15 @@ t_aud :: proc(dur, base, cover: f32) -> ^Clip {
 }
 
 // ---------------------------------------------------------------- audio_clock_ok
+
+@(test)
+hush_cooling_vale_so_o_frame_atual :: proc(t: ^testing.T) {
+	t_reset()
+	audio_hush_at = g_frame_no
+	testing.expect(t, audio_hush_cooling(), "no frame do hush o Play novo ainda não pode entrar")
+	g_frame_no += 1
+	testing.expect(t, !audio_hush_cooling(), "no frame seguinte o mixer já largou o buffer velho")
+}
 
 @(test)
 clock_sem_audio_nunca_vale :: proc(t: ^testing.T) {

@@ -608,7 +608,15 @@ update :: proc() {
 	// (não a duração da fonte). Espaços vazios / sem áudio avançam pelo relógio de parede.
 	// arrastos de volume/fade NÃO movem o playhead — deixa tocar p/ ouvir a mudança ao vivo
 	audio_edit := audio_edit_drag()
-	if st.playing && (st.drag == .None || audio_edit) {
+	// 1 frame depois do hush do seek: agora sim adquire. No frame do clique o
+	// mixer ainda esvazia o sub-buffer velho — Play aqui virava dois áudios.
+	if seek_rearm_si >= 0 && st.playing && !audio_hush_cooling() && st.drag == .None && !player_seek_drag {
+		if seek_rearm_si < nsegs && seg_ready(seek_rearm_si) do set_play_clip(seek_rearm_si, seek_rearm_loc)
+		seek_rearm_si = -1
+	} else if seek_rearm_si >= 0 && !st.playing {
+		seek_rearm_si = -1
+	}
+	if st.playing && (st.drag == .None || audio_edit) && !audio_hush_cooling() {
 		a := audio_seg_at(st.playhead) // RELÓGIO = topo com áudio não-mudo (pode não ser o vídeo)
 		when DBG_PLAY { // LOG TEMPORÁRIO de diagnóstico do congelamento
 			mp := a >= 0 && seg_src(a).has_audio ? rl.IsMusicStreamPlaying(seg_src(a).music) : false
@@ -783,7 +791,7 @@ update :: proc() {
 	// segmento SOB O PLAYHEAD (não o dono da cadeia: num run contíguo cada pedaço
 	// tem o seu próprio ganho). SetMusicVolume age no stream compartilhado da fonte,
 	// mas só um segmento toca por vez, então não há conflito.
-	if st.playing && play_clip >= 0 && seg_src(play_clip).has_audio {
+	if st.playing && play_clip >= 0 && seg_src(play_clip).has_audio && st.drag == .None && !player_seek_drag && !audio_hush_cooling() {
 		rl.SetMusicVolume(seg_src(play_clip).music, seg_gain(play_clip, st.playhead) * player_vol) // × volume do player (monitor)
 		rl.UpdateMusicStream(seg_src(play_clip).music)
 	}
