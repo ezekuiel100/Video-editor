@@ -24,12 +24,62 @@ sil_done:  bool // já rodou "Começar" — o resultado está na faixa de baixo
 sil_dirty: bool // sliders mudaram depois do último Começar
 sil_play:  bool
 sil_play_t: f32 // tempo no RESULTADO (silêncios já pulados)
+sil_wave_t: f32 // tempo na FONTE p/ o preview de vídeo quando não está tocando o resultado
 sil_run_pct, sil_run_min, sil_run_pad: f32 // parâmetros do último Começar (é o que o Aplicar usa)
 sil_eat: bool // ignora o clique que ABRIU o cartão (ainda está down no mesmo frame)
 
+SIL_HYST :: f32(1.4)  // sai do silêncio só acima de thresh×isto (evita tremer na borda)
+SIL_GLUE :: f32(0.12) // funde vãos separados por um clique/respiração mais curta que isto
+
 sil_thresh :: proc(pct: f32) -> f32 { return clamp(pct, 1, 90) / 100 }
 
+// limiar ABSOLUTO a partir do % do slider: relativo ao volume da FALA do trecho
+// (média dos buckets altos), não a 1.0. Sem isto, 25% = RMS 0.25 e ou apagava
+// o clipe inteiro (fala quieta) ou não achava nada (fala alta).
+sil_rel_thresh :: proc(c: ^Clip, src0, src1, pct: f32) -> f32 {
+	if c == nil || len(c.wave_rms) == 0 do return sil_thresh(pct)
+	n := len(c.wave_rms)
+	i0 := clamp(int(src0 * WAVE_PPS), 0, n - 1)
+	i1 := clamp(int(src1 * WAVE_PPS), 0, n - 1)
+	if i1 < i0 do return sil_thresh(pct)
+	mx: f32 = 0
+	for i := i0; i <= i1; i += 1 do if c.wave_rms[i] > mx do mx = c.wave_rms[i]
+	if mx < 0.008 do return 0.004
+	floor := mx * 0.30
+	sum: f32 = 0
+	cnt := 0
+	for i := i0; i <= i1; i += 1 {
+		if c.wave_rms[i] >= floor { sum += c.wave_rms[i]; cnt += 1 }
+	}
+	ref := cnt > 0 ? sum / f32(cnt) : mx
+	return max(f32(0.004), sil_thresh(pct) * ref)
+}
+
+sil_seg_thresh :: proc(si: int, pct: f32) -> f32 {
+	if si < 0 || si >= nsegs do return sil_thresh(pct)
+	sg := segs[si]
+	spd := seg_speed(si)
+	return sil_rel_thresh(seg_src(si), sg.in_off, sg.in_off + sg.dur * spd, pct)
+}
+
+// mediana de até 5 buckets (~50 ms) — um estalo não parte o vão
+sil_smooth_at :: proc(rms: []f32, i, i0, i1: int) -> f32 {
+	v: [5]f32
+	n := 0
+	a := max(i - 2, i0)
+	b := min(i + 2, i1)
+	for k := a; k <= b; k += 1 { v[n] = rms[k]; n += 1 }
+	// insertion sort pequenininho
+	for p in 1 ..< n {
+		x, q := v[p], p
+		for q > 0 && v[q - 1] > x { v[q] = v[q - 1]; q -= 1 }
+		v[q] = x
+	}
+	return v[n / 2]
+}
+
 // preenche `out` com intervalos de silêncio em [src0, src1] na fonte. Devolve a contagem.
+// thresh é RMS absoluto. Suaviza, usa histerese e cola vãos vizinhos antes do pad.
 detect_silences :: proc(c: ^Clip, src0, src1, thresh, min_dur, pad: f32, out: []Silence) -> int {
 	if c == nil || !intrinsics.atomic_load(&c.wave_ready) || len(c.wave_rms) == 0 do return 0
 	if src1 - src0 < min_dur || thresh <= 0 || len(out) == 0 do return 0
@@ -37,28 +87,51 @@ detect_silences :: proc(c: ^Clip, src0, src1, thresh, min_dur, pad: f32, out: []
 	i0 := clamp(int(src0 * WAVE_PPS), 0, n - 1)
 	i1 := clamp(int(src1 * WAVE_PPS), 0, n - 1)
 	if i1 < i0 do return 0
-	nfound := 0
+	RAW :: 128
+	raw: [RAW]Silence
+	nraw := 0
 	run := -1
-	flush :: proc(c: ^Clip, run, i, i0, i1: int, src0, src1, min_dur, pad: f32, out: []Silence, nfound: ^int) {
-		if run < 0 || nfound^ >= len(out) do return
-		a := f32(run) / WAVE_PPS
-		b := f32(i) / WAVE_PPS
-		a = max(a, src0); b = min(b, src1)
-		if b - a < min_dur do return
-		a += pad; b -= pad
-		if b - a < 0.05 do return
-		out[nfound^] = Silence{ a, b }
-		nfound^ += 1
+	in_sil := false
+	leave := thresh * SIL_HYST
+	push :: proc(run, i: int, src0, src1: f32, raw: []Silence, nraw: ^int) {
+		if run < 0 || nraw^ >= len(raw) do return
+		a := max(f32(run) / WAVE_PPS, src0)
+		b := min(f32(i) / WAVE_PPS, src1)
+		if b - a < 0.02 do return
+		raw[nraw^] = Silence{ a, b }
+		nraw^ += 1
 	}
 	for i := i0; i <= i1; i += 1 {
-		if c.wave_rms[i] < thresh {
-			if run < 0 do run = i
-		} else {
-			flush(c, run, i, i0, i1, src0, src1, min_dur, pad, out, &nfound)
-			run = -1
+		v := sil_smooth_at(c.wave_rms, i, i0, i1)
+		if !in_sil {
+			if v < thresh { in_sil = true; run = i }
+		} else if v > leave {
+			push(run, i, src0, src1, raw[:], &nraw)
+			in_sil = false; run = -1
 		}
 	}
-	flush(c, run, i1 + 1, i0, i1, src0, src1, min_dur, pad, out, &nfound)
+	if in_sil do push(run, i1 + 1, src0, src1, raw[:], &nraw)
+	// cola vãos com um fiapo de “fala” no meio (clique, “hm”, respiração)
+	glue := max(SIL_GLUE, pad)
+	w := 0
+	for k in 0 ..< nraw {
+		if w > 0 && raw[k].t0 - raw[w - 1].t1 <= glue {
+			raw[w - 1].t1 = raw[k].t1
+		} else {
+			if w != k do raw[w] = raw[k]
+			w += 1
+		}
+	}
+	nfound := 0
+	for k in 0 ..< w {
+		if nfound >= len(out) do break
+		a, b := raw[k].t0, raw[k].t1
+		if b - a < min_dur do continue
+		a += pad; b -= pad
+		if b - a < 0.05 do continue
+		out[nfound] = Silence{ a, b }
+		nfound += 1
+	}
 	return nfound
 }
 
@@ -104,7 +177,7 @@ sil_build_keeps :: proc(si: int, hits: []Silence, n: int) {
 
 sil_run :: proc() {
 	if sil_si < 0 || sil_si >= nsegs do return
-	sil_n = detect_seg_silences(sil_si, sil_thresh(sil_pct), sil_min, sil_pad, sil_hits[:])
+	sil_n = detect_seg_silences(sil_si, sil_seg_thresh(sil_si, sil_pct), sil_min, sil_pad, sil_hits[:])
 	sil_build_keeps(sil_si, sil_hits[:], sil_n)
 	sil_done = true
 	sil_dirty = false
@@ -142,8 +215,98 @@ open_silence_modal :: proc() {
 	st.playing = false
 	sil_done = false; sil_dirty = false; sil_play = false; sil_play_t = 0
 	sil_n = 0; sil_nk = 0; sil_si = selected
+	sil_wave_t = segs[selected].in_off
 	sil_eat = true // o clique do ícone ainda está down — não pode cair no cartão
 	modal = .Silence
+}
+
+// forma de onda do segmento: RMS+pico, linha do limiar e faixas âmbar.
+// `hits` em tempo de TIMELINE. overlay=true: desenha POR CIMA do vídeo (fundo translúcido).
+draw_sil_wave :: proc(r: rl.Rectangle, si: int, thresh: f32, hits: []Silence, nh: int, overlay := false) {
+	if si < 0 || si >= nsegs do return
+	sg := segs[si]
+	c := seg_src(si)
+	if overlay {
+		rl.DrawRectangleRec(r, rl.Color{ 8, 14, 12, 140 })
+	} else {
+		rl.DrawRectangleRec(r, rl.Color{ 22, 40, 36, 255 })
+		rl.DrawRectangleLinesEx(r, 1, rl.Color{ 48, 64, 58, 255 })
+	}
+	if sg.dur < 0.001 do return
+	// vãos detectados (por baixo da onda) — o pad já está aplicado nos hits
+	for k in 0 ..< nh {
+		u0 := clamp((hits[k].t0 - sg.start) / sg.dur, 0, 1)
+		u1 := clamp((hits[k].t1 - sg.start) / sg.dur, 0, 1)
+		if u1 <= u0 do continue
+		xr := rl.Rectangle{ r.x + u0 * r.width, r.y + 1, max(f32(1), (u1 - u0) * r.width), r.height - 2 }
+		rl.DrawRectangleRec(xr, rl.Color{ 220, 170, 50, 60 })
+	}
+	STEP :: f32(2)
+	base := r.y + r.height - 2
+	amp := r.height - 4
+	wcol := rl.Color{ 95, 180, 150, 235 }
+	pcol := rl.Color{ 95, 180, 150, 90 }
+	spd := seg_speed(si)
+	for wx := r.x; wx < r.x + r.width; wx += STEP {
+		u0 := (wx - r.x) / r.width
+		u1 := (wx + STEP - r.x) / r.width
+		ta := sg.in_off + u0 * sg.dur * spd
+		tb := sg.in_off + u1 * sg.dur * spd
+		p := wave_peak(c, ta, tb)
+		if p < 0 {
+			rl.DrawRectangleRec({ wx, base - 2, STEP, 2 }, rl.Color{ 70, 100, 92, 130 })
+		} else {
+			hp := max(f32(1), clamp(p, 0, 1) * amp)
+			rl.DrawRectangleRec({ wx, base - hp, STEP, hp }, pcol)
+			if rms := wave_rms_at(c, ta, tb); rms > 0 {
+				hr := max(f32(1), min(clamp(rms * WAVE_RMS_GAIN, 0, 1) * amp, hp))
+				rl.DrawRectangleRec({ wx, base - hr, STEP, hr }, wcol)
+			}
+		}
+	}
+	// limiar na MESMA escala visual do corpo RMS (ganho de exibição)
+	thy := base - clamp(thresh * WAVE_RMS_GAIN, 0, 1) * amp
+	rl.DrawLineEx({ r.x + 1, thy }, { r.x + r.width - 1, thy }, 1.6, rl.Color{ 236, 72, 60, 220 })
+	// marca do tempo atual do preview (fonte → posição no segmento)
+	if c.dur > 0 {
+		src_t := sil_play && sil_done && sil_nk > 0 ? sil_src_at(sil_play_t) : sil_wave_t
+		u := clamp((src_t - sg.in_off) / max(sg.dur * spd, 0.001), 0, 1)
+		px := r.x + u * r.width
+		rl.DrawLineEx({ px, r.y }, { px, r.y + r.height }, 1.5, PLAYHEAD)
+	}
+	// clique: scrub no original (pausa o play do resultado)
+	if clicked(r) {
+		u := clamp((rl.GetMousePosition().x - r.x) / r.width, 0, 1)
+		sil_wave_t = sg.in_off + u * sg.dur * spd
+		sil_play = false
+	}
+	if !overlay do txt("limiar", r.x + 6, r.y + 3, 10, rl.Color{ 236, 100, 90, 200 })
+}
+
+// onda de um intervalo da FONTE (pedaço do resultado empacotado)
+draw_wave_src :: proc(r: rl.Rectangle, c: ^Clip, src0, src1: f32) {
+	if c == nil || r.width < 2 || src1 - src0 < 0.001 do return
+	STEP :: f32(2)
+	base := r.y + r.height - 1
+	amp := max(f32(2), r.height - 2)
+	wcol := rl.Color{ 95, 180, 150, 235 }
+	pcol := rl.Color{ 95, 180, 150, 80 }
+	span := src1 - src0
+	for wx := r.x; wx < r.x + r.width; wx += STEP {
+		u0 := (wx - r.x) / r.width
+		u1 := (wx + STEP - r.x) / r.width
+		p := wave_peak(c, src0 + u0 * span, src0 + u1 * span)
+		if p < 0 {
+			rl.DrawRectangleRec({ wx, base - 2, STEP, 2 }, rl.Color{ 70, 100, 92, 120 })
+		} else {
+			hp := max(f32(1), clamp(p, 0, 1) * amp)
+			rl.DrawRectangleRec({ wx, base - hp, STEP, hp }, pcol)
+			if rms := wave_rms_at(c, src0 + u0 * span, src0 + u1 * span); rms > 0 {
+				hr := max(f32(1), min(clamp(rms * WAVE_RMS_GAIN, 0, 1) * amp, hp))
+				rl.DrawRectangleRec({ wx, base - hr, STEP, hr }, wcol)
+			}
+		}
+	}
 }
 
 // reconstrói o segmento: tira os vãos de silêncio e fecha o buraco (ripple na trilha).
@@ -224,7 +387,7 @@ draw_silence_modal :: proc(sw, sh: f32) {
 	}
 
 	rl.DrawRectangleRec({0, 0, sw, sh}, rl.Color{0, 0, 0, 150})
-	cw: f32 = 680; ch: f32 = 420
+	cw: f32 = 680; ch: f32 = 460
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
 	rl.DrawRectangleRounded(card, 0.03, 8, rl.Color{ 30, 33, 40, 255 })
@@ -239,7 +402,7 @@ draw_silence_modal :: proc(sw, sh: f32) {
 	x := cx + 20; y := cy + 48; w := f32(230)
 	old_pct, old_min, old_pad := sil_pct, sil_min, sil_pad
 	txt("Limite de volume", x, y, 12, TEXT)
-	txt(rl.TextFormat("%.0f %%", f64(sil_pct)), x + w - 4, y, 12, ACCENT); y += 18
+	txt(rl.TextFormat("%.0f %% da fala", f64(sil_pct)), x + w - 48, y, 12, ACCENT); y += 18
 	ui_slider(50, { x, y, w, 14 }, &sil_pct, 5, 80); y += 30
 	txt("Duração mínima", x, y, 12, TEXT)
 	txt(rl.TextFormat("%.2f s", f64(sil_min)), x + w - 4, y, 12, ACCENT); y += 18
@@ -255,13 +418,23 @@ draw_silence_modal :: proc(sw, sh: f32) {
 	else if sil_n == 0 do txt("Nenhum silêncio nesse limiar.", x, y, 11, MUTED)
 	else do txt(rl.TextFormat("%d vão(s)  ·  −%.1f s", i32(sil_n), f64(sg.dur - sil_keep_total)), x, y, 12, ACCENT)
 
-	// direita: preview pequeno
+	// direita: só o quadro (a onda vai na faixa de resultado, como na timeline)
+	live: [SIL_MAX]Silence
+	live_thr := sil_seg_thresh(sil_si, sil_pct)
+	live_n := detect_seg_silences(sil_si, live_thr, sil_min, sil_pad, live[:])
+	if live_n > 0 && !sil_done {
+		rem: f32 = 0
+		for k in 0 ..< live_n do rem += live[k].t1 - live[k].t0
+		txt(rl.TextFormat("âmbar = silêncio  ·  %d vão(s)  ·  −%.1f s", i32(live_n), f64(rem)),
+			x, y, 11, ACCENT)
+	}
+
 	pv := rl.Rectangle{ cx + 268, cy + 48, cw - 288, 168 }
 	rl.DrawRectangleRec(pv, rl.BLACK)
 	ensure_tex(c)
 	src_t: f32
-	if sil_done && sil_nk > 0 do src_t = sil_src_at(sil_play_t)
-	else do src_t = clamp(sg.in_off, 0, c.dur)
+	if sil_play && sil_done && sil_nk > 0 do src_t = sil_src_at(sil_play_t)
+	else do src_t = clamp(sil_wave_t, 0, c.dur)
 	clip_frame(c, clamp(src_t, 0, c.dur))
 	if c.tex_ok {
 		cr := dec_content_rect(c)
@@ -280,35 +453,46 @@ draw_silence_modal :: proc(sw, sh: f32) {
 		rl.DrawTriangle({ play_r.x + 9, play_r.y + 5 }, { play_r.x + 9, play_r.y + 17 }, { play_r.x + 20, play_r.y + 11 }, TEXT)
 	}
 
-	// resultado + aplicar
-	lane := rl.Rectangle{ cx + 20, cy + 232, cw - 40, 112 }
+	// resultado = clipe da timeline: filmstrip + onda no rodapé (limiar e âmbar na onda)
+	lane := rl.Rectangle{ cx + 20, cy + 236, cw - 40, 148 }
 	txt("Resultado (ainda não na timeline)", lane.x, lane.y - 16, 11, MUTED)
 	rl.DrawRectangleRec(lane, rl.Color{ 36, 42, 78, 255 })
 	if !sil_done {
-		txt_c("Clique em Começar para ver os pedaços que ficam.", lane.x + lane.width/2, lane.y + 46, 12, MUTED)
+		// antes de Começar: onda do original + limiar, para acertar o corte
+		draw_sil_wave({ lane.x + 4, lane.y + 4, lane.width - 8, lane.height - 8 },
+			sil_si, live_thr, live[:], live_n)
 	} else if sil_nk == 0 {
-		txt_c("Tudo silêncio — nada restaria.", lane.x + lane.width/2, lane.y + 46, 12, MUTED)
+		txt_c("Tudo silêncio — nada restaria.", lane.x + lane.width/2, lane.y + 64, 12, MUTED)
 	} else {
 		gap: f32 = 3
 		total_w := lane.width - gap * f32(sil_nk + 1)
 		px := lane.x + gap
 		acc: f32 = 0
+		film_h := f32(52)
 		for k in 0 ..< sil_nk {
 			kw := max(f32(6), sil_keep[k].dur / max(sil_keep_total, 0.001) * total_w)
 			kr := rl.Rectangle{ px, lane.y + 5, kw, lane.height - 10 }
 			hot := sil_play_t >= acc && sil_play_t < acc + sil_keep[k].dur
 			rl.DrawRectangleRounded(kr, 0.08, 4, hot ? rl.Color{ 72, 88, 150, 255 } : rl.Color{ 56, 70, 128, 255 })
-			if c.thumbs_ready && c.nthumbs > 0 && c.thumb_dt > 0 && kw > 20 {
+			// tira de vídeo em cima, onda do pedaço embaixo (igual ao clipe na timeline)
+			if c.thumbs_ready && c.nthumbs > 0 && c.thumb_dt > 0 && kw > 20 && !c.is_audio {
+				th := min(film_h, kr.height * 0.45)
 				mid := (sil_keep[k].src0 + sil_keep[k].src1) * 0.5
 				ti := clamp(int(mid / c.thumb_dt), 0, c.nthumbs - 1)
 				if c.thumbs[ti].id > 0 {
-					th := kr.height - 6
 					tw := min(th * 16 / 9, kw - 4)
 					rl.DrawTexturePro(c.thumbs[ti], {0, 0, f32(c.thumbs[ti].width), f32(c.thumbs[ti].height)},
 						{ kr.x + 2, kr.y + 3, tw, th }, {0, 0}, 0, rl.WHITE)
 				}
+				wr := rl.Rectangle{ kr.x + 2, kr.y + th + 4, kr.width - 4, kr.height - th - 6 }
+				rl.DrawRectangleRec(wr, rl.Color{ 24, 46, 40, 220 })
+				draw_wave_src(wr, c, sil_keep[k].src0, sil_keep[k].src1)
+			} else {
+				wr := rl.Rectangle{ kr.x + 2, kr.y + 4, kr.width - 4, kr.height - 8 }
+				rl.DrawRectangleRec(wr, rl.Color{ 24, 46, 40, 220 })
+				draw_wave_src(wr, c, sil_keep[k].src0, sil_keep[k].src1)
 			}
-			if clicked(kr) { sil_play_t = acc; sil_play = false }
+			if clicked(kr) { sil_play_t = acc; sil_play = false; sil_wave_t = sil_keep[k].src0 }
 			acc += sil_keep[k].dur
 			px += kw + gap
 		}
@@ -343,7 +527,6 @@ draw_silence_modal :: proc(sw, sh: f32) {
 
 silence_apply_selection :: proc() {
 	if !sil_done { set_toast("Clique em Começar para ver o resultado"); return }
-	thresh := sil_thresh(sil_run_pct)
 	// índices estáveis: processa da DIREITA p/ a esquerda (o rebuild mexe nos que estão depois)
 	idx: [MAX_SEGS]int
 	nn := 0
@@ -364,7 +547,7 @@ silence_apply_selection :: proc() {
 	for k in 0 ..< nn {
 		si := idx[k]
 		if si < 0 || si >= nsegs do continue
-		cuts += silence_apply_seg(si, thresh, sil_run_min, sil_run_pad)
+		cuts += silence_apply_seg(si, sil_seg_thresh(si, sil_run_pct), sil_run_min, sil_run_pad)
 	}
 	sil_close()
 	if cuts == 0 do set_toast("Nenhum silêncio nesse limiar")
