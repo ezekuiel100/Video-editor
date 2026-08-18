@@ -62,7 +62,10 @@ save_project_text :: proc() -> string {
 	for i in 0 ..< nclips {
 		if intrinsics.atomic_load(&clips[i].failed) || clips[i].closed do continue
 		idx[i] = len(medias)
-		if clips[i].is_text { // clipe de texto: "#TXT<tab>size<tab>r<tab>g<tab>b<tab>fonte<tab>texto"
+		if clips[i].is_caps { // faixa de legendas: estilo + duração; as falas vão na seção `cues`
+			tc := clips[i].text_color
+			append(&medias, fmt.tprintf("#CAP\t%.4f\t%d\t%d\t%d\t%d\t%.4f", clips[i].text_size, tc.r, tc.g, tc.b, clips[i].text_font, clips[i].dur))
+		} else if clips[i].is_text { // clipe de texto: "#TXT<tab>size<tab>r<tab>g<tab>b<tab>fonte<tab>texto"
 			tc := clips[i].text_color
 			append(&medias, fmt.tprintf("#TXT\t%.4f\t%d\t%d\t%d\t%d\t%s", clips[i].text_size, tc.r, tc.g, tc.b, clips[i].text_font, clips[i].text))
 		} else {
@@ -114,6 +117,15 @@ save_project_text :: proc() -> string {
 	for i in 0 ..< nfx {
 		e := fxsegs[i]
 		fmt.sbprintf(&b, "%d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d\n", e.kind, e.start, e.dur, e.amount, e.radius, e.cx, e.cy, e.wobble, e.speed, e.angle, e.track)
+	}
+	// falas das faixas de legendas: `cues <idx-de-mídia> <n>` + n linhas `t0 t1 texto`
+	for i in 0 ..< nclips {
+		if idx[i] < 0 || !clips[i].is_caps || len(clips[i].caps) == 0 do continue
+		fmt.sbprintf(&b, "cues %d %d\n", idx[i], len(clips[i].caps))
+		for q in clips[i].caps {
+			body, _ := strings.replace_all(q.text, "\n", " ", context.temp_allocator)
+			fmt.sbprintf(&b, "%.3f %.3f %s\n", q.t0, q.t1, body)
+		}
 	}
 	return strings.to_string(b)
 }
@@ -270,6 +282,8 @@ load_project :: proc(path: string) {
 	Seg2 :: struct { fields: [OVP_SEG_N]f32 }
 	segd := make([dynamic]Seg2, context.temp_allocator)
 	fxd  := make([dynamic]FxSeg, context.temp_allocator)
+	CueLoad :: struct { mi: int, t0, t1: f32, text: string }
+	cueload := make([dynamic]CueLoad, context.temp_allocator)
 	li := 1
 	for li < len(lines) {
 		ln := strings.trim_space(lines[li]); li += 1
@@ -313,6 +327,22 @@ load_project :: proc(path: string) {
 				for k in 0 ..< min(OVP_SEG_N, len(ft)) do s.fields[k] = f32(strconv.parse_f64(ft[k]) or_else 0)
 				append(&segd, s)
 			}
+		case "cues": // falas de uma faixa de legendas (idx = ordem da seção media)
+			mi := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else -1) : -1
+			n := len(toks) >= 3 ? (strconv.parse_int(toks[2]) or_else 0) : 0
+			for _ in 0 ..< n {
+				if li >= len(lines) do break
+				lnc := strings.trim_space(lines[li]); li += 1
+				sp1 := strings.index_byte(lnc, ' ')
+				if sp1 < 0 do continue
+				rest := lnc[sp1 + 1:]
+				sp2 := strings.index_byte(rest, ' ')
+				if sp2 < 0 do continue
+				t0 := f32(strconv.parse_f64(lnc[:sp1]) or_else 0)
+				t1 := f32(strconv.parse_f64(rest[:sp2]) or_else 0)
+				body := strings.trim_space(rest[sp2 + 1:])
+				if body != "" do append(&cueload, CueLoad{ mi, t0, t1, body })
+			}
 		case "fx": // clipes de efeito da faixa
 			n := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else 0) : 0
 			for _ in 0 ..< n {
@@ -337,7 +367,20 @@ load_project :: proc(path: string) {
 	// aplica: limpa, reimporta (slots 0..N-1 na ordem), recria segmentos
 	clear_project()
 	for p in mpaths {
-		if strings.has_prefix(p, "#TXT\t") { // clipe de texto: recria do registro salvo
+		if strings.has_prefix(p, "#CAP\t") { // faixa de legendas (falas vêm em `cues`)
+			f := strings.split(p, "\t", context.temp_allocator)
+			size := len(f) >= 2 ? f32(strconv.parse_f64(f[1]) or_else 0.05) : 0.05
+			col := rl.WHITE
+			if len(f) >= 5 {
+				col.r = u8(strconv.parse_int(f[2]) or_else 255)
+				col.g = u8(strconv.parse_int(f[3]) or_else 255)
+				col.b = u8(strconv.parse_int(f[4]) or_else 255)
+			}
+			font := len(f) >= 6 ? (strconv.parse_int(f[5]) or_else 0) : 0
+			dur := len(f) >= 7 ? f32(strconv.parse_f64(f[6]) or_else 5.0) : IMG_DUR
+			slot := new_caps_clip({}, size, col, dur)
+			if slot >= 0 do clips[slot].text_font = font
+		} else if strings.has_prefix(p, "#TXT\t") { // clipe de texto: recria do registro salvo
 			f := strings.split(p, "\t", context.temp_allocator)
 			size := len(f) >= 2 ? f32(strconv.parse_f64(f[1]) or_else 0.10) : 0.10
 			col := rl.WHITE
@@ -353,6 +396,16 @@ load_project :: proc(path: string) {
 			if slot >= 0 do clips[slot].text_font = font
 		} else {
 			import_media(p, false)
+		}
+	}
+	for q in cueload {
+		if q.mi < 0 || q.mi >= nclips do continue
+		c := &clips[q.mi]
+		if !c.is_caps do continue
+		append(&c.caps, CapCue{ q.t0, q.t1, strings.clone(q.text) })
+		if c.text == "" || c.text == "Legendas" {
+			delete(c.text)
+			c.text = strings.clone(q.text)
 		}
 	}
 	for s in segd {

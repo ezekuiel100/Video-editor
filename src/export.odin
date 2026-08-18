@@ -374,11 +374,15 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		clear(&export_tmp_files)
 	}
 	text_png: [MAX_SEGS]string
+	CapOv :: struct { inp: int, t0, t1: f32, png: string }
+	cap_ovs: [MAX_SEGS][dynamic]CapOv
+	for i in 0 ..< MAX_SEGS do cap_ovs[i] = make([dynamic]CapOv, context.temp_allocator)
 	for i in 0 ..< nsegs {
 		if !want_video do break // MP3: sem overlay de texto
 		if !seg_ready(i) do continue
 		c := &clips[segs[i].src]
 		if !c.is_text do continue
+		if c.is_caps do continue // legendas: um PNG por fala, montado com os inputs
 		p := fmt.tprintf("%s_%d_%d_txt%d.png", AUDIO_BASE, u32(win.GetCurrentProcessId()), c.aid, i)
 		if dry || render_text_png(c, segs[i], p) { // dry: sem GL, finge que o PNG saiu
 			text_png[i] = p
@@ -421,6 +425,32 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		if !seg_ready(i) do continue
 		c := &clips[segs[i].src]
 		if !want_video && !c.src_audio do continue // MP3: só fontes com áudio viram input
+		if c.is_text && c.is_caps && len(c.caps) > 0 {
+			// uma entrada por fala visível neste segmento (PNG WYSIWYG + enable)
+			sgc := segs[i]
+			spd := sgc.speed <= 0 ? f32(1) : sgc.speed
+			src0 := sgc.in_off
+			src1 := sgc.in_off + sgc.dur * spd
+			for qi in 0 ..< len(c.caps) {
+				q := c.caps[qi]
+				if q.t1 <= src0 + 0.01 || q.t0 >= src1 - 0.01 do continue
+				t0 := sgc.start + (max(q.t0, src0) - src0) / spd
+				t1 := sgc.start + (min(q.t1, src1) - src0) / spd
+				if t1 - t0 < 0.04 do continue
+				p := fmt.tprintf("%s_%d_%d_cap%d_%d.png", AUDIO_BASE, u32(win.GetCurrentProcessId()), c.aid, i, qi)
+				tmp := c^
+				tmp.is_caps = false
+				tmp.text = q.text
+				if dry || render_text_png(&tmp, sgc, p) {
+					append(&args, "-loop", "1", "-framerate", "30", "-t", fmt.tprintf("%.3f", t1 - t0))
+					append(&args, "-i", p)
+					append(&cap_ovs[i], CapOv{ inp, t0, t1, p })
+					inp += 1
+					if !dry do append(&export_tmp_files, strings.clone(p))
+				}
+			}
+			continue
+		}
 		if c.is_text { // overlay de texto = PNG estático (como imagem); pula se o render falhou
 			if text_png[i] == "" do continue
 			append(&args, "-loop", "1", "-framerate", "30", "-t", fmt.tprintf("%.3f", segs[i].dur + thead[i] + ttail[i]))
@@ -517,7 +547,8 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	for t in 0 ..< g_nv {
 		if track_hidden[t] do continue // trilha oculta (olho): fora do vídeo exportado (áudio segue mixado)
 		for i in 0 ..< nsegs {
-			if seg_inp[i] < 0 || segs[i].track != t || clips[segs[i].src].is_audio || segs[i].aonly do continue
+			if segs[i].track != t || clips[segs[i].src].is_audio || segs[i].aonly do continue
+			if seg_inp[i] < 0 && !(clips[segs[i].src].is_caps && len(cap_ovs[i]) > 0) do continue
 			sg := segs[i]
 			cc := &clips[sg.src]
 			hd := thead[i]; tl := ttail[i]                        // esticões da transição (cabeça/cauda)
@@ -525,7 +556,20 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			                                 // são rampas independentes, com origens diferentes
 			start2 := sg.start - hd              // começa `hd` s antes (metade do dissolver de entrada)
 			tend := sg.start + sg.dur + tl       // termina `tl` s depois (metade do dissolver de saída)
-			if cc.is_text { // PNG full-canvas já posicionado: overlay em 0:0
+			if cc.is_caps && len(cap_ovs[i]) > 0 {
+				for ov in cap_ovs[i] {
+					fmt.sbprintf(&fb, "[%d:v]trim=0:%.3f,setpts=PTS-STARTPTS+%.3f/TB,scale=%d:%d,format=rgba",
+						ov.inp, ov.t1 - ov.t0, ov.t0, W, H)
+					export_trans_fades(&fb, ov.t0, ov.t1, 0, 0, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
+					fmt.sbprintf(&fb, "[v%d];", vc)
+					nb := fmt.tprintf("c%d", vc)
+					fmt.sbprintf(&fb, "[%s][v%d]overlay=0:0:enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
+						vlabel, vc, ov.t0, ov.t1, nb)
+					vlabel = nb; vc += 1
+				}
+				continue
+			}
+			if cc.is_text { // PNG full-canvas já posicionado: overlay em 0:0}
 				fmt.sbprintf(&fb, "[%d:v]trim=0:%.3f,setpts=PTS-STARTPTS+%.3f/TB,scale=%d:%d,format=rgba",
 					seg_inp[i], sg.dur+hd+tl, start2, W, H)
 				export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)

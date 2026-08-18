@@ -357,6 +357,16 @@ Clip :: struct {
 	text_size:  f32,      // altura da fonte como fração da altura do canvas (0.10 = 10%)
 	text_color: rl.Color,
 	text_font:  int,      // índice em text_fonts (0 = Segoe UI)
+	// faixa de LEGENDAS: um clipe de texto com várias falas cronometradas (tempo de FONTE).
+	// Evita estourar MAX_CLIPS/MAX_SEGS — voz-pra-texto vira UMA faixa, não 80 títulos.
+	is_caps: bool,
+	caps:    [dynamic]CapCue,
+}
+
+// uma fala da faixa de legendas. t0/t1 são tempo na FONTE do vídeo transcrito.
+CapCue :: struct {
+	t0, t1: f32,
+	text:   string, // heap, dono
 }
 
 clips:     [MAX_CLIPS]Clip
@@ -662,6 +672,47 @@ new_text_clip :: proc(content: string, size: f32, color: rl.Color) -> int {
 	c.aid = clip_seq; clip_seq += 1
 	c.dur = IMG_DUR
 	intrinsics.atomic_store(&c.probed, true) // sem decode: pronto imediatamente
+	return slot
+}
+
+caps_free :: proc(c: ^Clip) {
+	for q in c.caps do delete(q.text)
+	delete(c.caps)
+	c.caps = nil
+	c.is_caps = false
+}
+
+// fala visível em `src_t` (tempo da fonte). Faixa vazia / fora de qualquer cue = "".
+clip_text_at :: proc(c: ^Clip, src_t: f32) -> string {
+	if c.is_caps && len(c.caps) > 0 {
+		for q in c.caps {
+			if src_t + 0.001 >= q.t0 && src_t < q.t1 do return q.text
+		}
+		return ""
+	}
+	return c.text
+}
+
+// cria a faixa de legendas no bin (is_text + is_caps). `cues` é copiado (textos clonados).
+new_caps_clip :: proc(cues: []CapCue, size: f32, color: rl.Color, dur: f32) -> int {
+	label := len(cues) > 0 ? cues[0].text : "Legendas"
+	slot := new_text_clip(label, size, color)
+	if slot < 0 do return -1
+	c := &clips[slot]
+	delete(c.name)
+	c.name = strings.clone("Legendas")
+	c.is_caps = true
+	c.dur = max(dur, 0.1)
+	c.caps = make([dynamic]CapCue)
+	for q in cues {
+		t := strings.trim_space(q.text)
+		if t == "" do continue
+		append(&c.caps, CapCue{ q.t0, q.t1, strings.clone(t) })
+	}
+	if len(c.caps) > 0 {
+		delete(c.text)
+		c.text = strings.clone(c.caps[0].text)
+	}
 	return slot
 }
 
@@ -2023,6 +2074,7 @@ clip_close :: proc(c: ^Clip) {
 	delete(c.name)
 	delete(c.name_el)
 	delete(c.vcodec)
+	caps_free(c)
 	delete(c.text)
 	delete(c.aud_path)
 	delete(c.aud_head)

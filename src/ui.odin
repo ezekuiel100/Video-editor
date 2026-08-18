@@ -34,7 +34,7 @@ hovered :: proc(r: rl.Rectangle) -> bool {
 	// modal aberto: a UI de trás não recebe hover/clique (senão o silêncio fechava
 	// porque o clique caía na timeline e desmarcava o clipe)
 	if modal != .None && !g_modal_draw do return false
-	if sil_eat do return false // 1º frame depois de abrir: o clique que abriu ainda está down
+	if sil_eat || stt_eat do return false // 1º frame depois de abrir: o clique que abriu ainda está down
 	return rl.CheckCollisionPointRec(rl.GetMousePosition(), r)
 }
 // clique válido; quando há modal aberto, só conta se for DENTRO do modal (g_modal_draw)
@@ -407,6 +407,7 @@ draw_modal :: proc(sw, sh: f32) {
 	if modal == .Crop { draw_crop_modal(sw, sh); return } // modal próprio (frame + retângulo)
 	if modal == .ProjSettings { draw_projset_modal(sw, sh); return } // proporção + resolução do projeto
 	if modal == .Silence { draw_silence_modal(sw, sh); return }
+	if modal == .STT { draw_stt_modal(sw, sh); return }
 	rl.DrawRectangleRec({0,0,sw,sh}, rl.Color{0,0,0,150}) // backdrop escuro
 	cw: f32 = modal == .Export ? 700 : 540
 	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : 430))
@@ -1587,8 +1588,9 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		if intrinsics.atomic_load(&c.probed) {
 			if c.is_text { // clipe de texto: "T" grande + prévia do conteúdo
 				rl.DrawRectangleRec(box, rl.Color{ 44, 38, 60, 255 })
-				txt_c("T", tx + tw/2, ty + th/2 - 20, 30, rl.Color{ 200, 186, 232, 255 })
-				txt_c(elide(c.text, 12, tw - 12), tx + tw/2, ty + th - 22, 11, rl.Color{ 170, 160, 190, 235 })
+				txt_c(c.is_caps ? "Cc" : "T", tx + tw/2, ty + th/2 - 20, 30, rl.Color{ 200, 186, 232, 255 })
+				prev := c.is_caps ? (len(c.caps) > 0 ? c.caps[0].text : "Legendas") : c.text
+				txt_c(elide(prev, 12, tw - 12), tx + tw/2, ty + th - 22, 11, rl.Color{ 170, 160, 190, 235 })
 			} else if c.is_audio { // sem vídeo: ícone de nota musical
 				mcx := tx + tw/2; mcy := ty + th/2 - 2
 				mc := rl.Color{ 120, 200, 170, 255 }
@@ -1967,6 +1969,50 @@ draw_text_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	txt("Arraste no preview para mover.", x, y, 11, MUTED)
 }
 
+// inspector da faixa de legendas: não edita fala a fala (re-transcreve); só estilo.
+draw_caps_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: f32) {
+	y := card.y + 32
+	if sg.opacity <= 0 do sg.opacity = 1
+	if c.text_size <= 0 do c.text_size = 0.05
+	vx := card.x + cw - pad - 46
+	txt(rl.TextFormat("%d fala(s) transcritas", i32(len(c.caps))), x, y, 13, ACCENT); y += 22
+	txt("Tamanho, cor e posição valem para todas.", x, y, 11, MUTED); y += 20
+	if len(text_fonts) > 1 {
+		txt("Fonte", x, y, 13, TEXT); y += 20
+		fbx := rl.Rectangle{ x, y, cw - 2*pad, 28 }
+		rl.DrawRectangleRounded(fbx, 0.2, 4, PANEL2)
+		rl.DrawRectangleRoundedLinesEx(fbx, 0.2, 4, 1, LINE)
+		if text_fonts_settled() && (c.text_font < 0 || c.text_font >= len(text_fonts)) do c.text_font = 0
+		di := c.text_font; if di < 0 || di >= len(text_fonts) do di = 0
+		la := rl.Rectangle{ fbx.x, fbx.y, 28, 28 }; ra := rl.Rectangle{ fbx.x + fbx.width - 28, fbx.y, 28, 28 }
+		txt_c("<", la.x + 14, la.y + 6, 15, hovered(la) ? TEXT : MUTED)
+		txt_c(">", ra.x + 14, ra.y + 6, 15, hovered(ra) ? TEXT : MUTED)
+		txt_c(text_fonts[di].name, fbx.x + fbx.width/2, fbx.y + 6, 13, TEXT)
+		n := len(text_fonts)
+		if clicked(la) { c.text_font = (di - 1 + n) % n; dirty = true }
+		if clicked(ra) || clicked({ fbx.x + 28, fbx.y, fbx.width - 56, 28 }) { c.text_font = (di + 1) % n; dirty = true }
+		y += 36
+	}
+	txt("Tamanho", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(c.text_size*100 + 0.5)), vx, y, 13, ACCENT); y += 20
+	if ui_slider(11, { x, y, cw - 2*pad, 16 }, &c.text_size, 0.03, 0.4) do dirty = true
+	y += 30
+	txt("Cor", x, y, 13, TEXT); y += 20
+	n := len(TEXT_COLORS)
+	sw := (cw - 2*pad - f32(n-1)*6) / f32(n)
+	for col, ci in TEXT_COLORS {
+		sr := rl.Rectangle{ x + f32(ci)*(sw+6), y, sw, 24 }
+		rl.DrawRectangleRounded(sr, 0.25, 4, col)
+		same := c.text_color.r == col.r && c.text_color.g == col.g && c.text_color.b == col.b
+		rl.DrawRectangleRoundedLinesEx(sr, 0.25, 4, same ? 2 : 1, same ? ACCENT : LINE)
+		if clicked(sr) { c.text_color = col; dirty = true }
+	}
+	y += 34
+	txt("Opacidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(sg.opacity*100 + 0.5)), vx, y, 13, ACCENT); y += 20
+	ui_slider(12, { x, y, cw - 2*pad, 16 }, &sg.opacity, 0, 1)
+	y += 26
+	txt("Arraste no preview para mover.", x, y, 11, MUTED)
+}
+
 // inspector do segmento selecionado — controles de áudio (volume/mudo/fade), estilo
 // NLE. Desenhado como cartão sobre o canto do preview.
 insp_tab: int = 1 // aba do inspector: 0=Vídeo 1=Áudio 2=Velocidade (Áudio é a implementada)
@@ -1975,7 +2021,7 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	if selected < 0 || selected >= nsegs || !seg_ready(selected) { txt_edit = false; return }
 	sg := &segs[selected]
 	c := seg_src(selected)
-	if !c.is_text do txt_edit = false // edição de texto só vale p/ clipe de texto selecionado
+	if !c.is_text || c.is_caps do txt_edit = false // edição de texto só vale p/ título (não faixa de legendas)
 	pad: f32 = 12
 	cw: f32 = 250
 	vextra := 0 // linhas extras na aba Vídeo (fades preto aplicados + botão Remover recorte)
@@ -1986,7 +2032,7 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	}
 	crop_extra := (insp_tab == 0 && !c.is_text && !alike && seg_cropped(selected)) ? f32(30) : f32(0)
 	// aba Áudio: sem o botão "Detectar silêncio" (fica só na toolbar da timeline)
-	ch := c.is_text ? f32(388) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(268)))
+	ch := c.is_text ? (c.is_caps ? f32(280) : f32(388)) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(268)))
 	// o cartão NÃO pode invadir o transporte/timeline: em janela baixa os sliders
 	// caíam em cima da régua e o clique "do playhead" ainda acionava o inspector.
 	ch = min(ch, max(f32(80), area.height - 20))
@@ -1998,7 +2044,8 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	txt(cs(c.name), x, card.y + 8, 12, MUTED)
 
 	if c.is_text { // ---- painel de TEXTO (título/legenda): conteúdo, tamanho, cor, opacidade ----
-		draw_text_inspector(c, sg, card, x, pad, cw)
+		if c.is_caps do draw_caps_inspector(c, sg, card, x, pad, cw)
+		else do draw_text_inspector(c, sg, card, x, pad, cw)
 		return
 	}
 	// abas (estilo NLE): Vídeo | Áudio | Velocidade

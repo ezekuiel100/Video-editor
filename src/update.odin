@@ -252,6 +252,7 @@ update :: proc() {
 		if search_focus do search_focus = false // sai da busca primeiro
 		else if txt_edit do txt_edit = false // depois da edição de texto
 		else if modal == .Silence do sil_close()
+		else if modal == .STT do stt_close()
 		else if crop_mode do set_crop_mode(false) // sai do modo recorte
 		else if fullscreen_preview do toggle_fullscreen_preview()
 		else if src_preview >= 0 do exit_src_preview()

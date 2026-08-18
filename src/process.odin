@@ -170,6 +170,7 @@ close_now :: proc() {
 		if clips[i].job != nil do TerminateJobObject(clips[i].job, 1)
 	}
 	if export_job != nil do TerminateJobObject(export_job, 1)
+	if stt_job != nil do TerminateJobObject(stt_job, 1)
 	// 2) solta os handles de áudio do raylib -> libera o temporário que cada stream toca
 	for i in 0 ..< nclips do if clips[i].has_audio do rl.UnloadMusicStream(clips[i].music)
 	for i in 0 ..< MAX_SEGS do for s in 0 ..< 2 do if spv[i][s].ok do rl.UnloadMusicStream(spv[i][s].music)

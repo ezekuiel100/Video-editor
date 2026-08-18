@@ -96,6 +96,21 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	}
 	ix += 30
 
+	// Voz para texto: ao lado de Detectar silêncio
+	st_ok := selected >= 0 && selected < nsegs && seg_ready(selected) &&
+		(seg_src(selected).src_audio || seg_src(selected).has_audio) && !seg_src(selected).is_text
+	stz := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
+	if st_ok && clicked(stz) do open_stt_modal()
+	rl.DrawRectangleRounded(stz, 0.3, 4, (hovered(stz) && st_ok) ? HOVER : PANEL2)
+	{ // ícone: balão de fala
+		icx := stz.x + 13; icy := tb.y + tb.height/2; icol := st_ok ? TEXT : rl.Color{ 92,96,104,255 }
+		rl.DrawRectangleRounded({ icx-8, icy-7, 16, 11 }, 0.4, 4, icol)
+		rl.DrawTriangle({ icx-3, icy+4 }, { icx+2, icy+4 }, { icx-4, icy+8 }, icol)
+		rl.DrawLineEx({ icx-4, icy-3 }, { icx+4, icy-3 }, 1.4, PANEL2)
+		rl.DrawLineEx({ icx-4, icy }, { icx+2, icy }, 1.4, PANEL2)
+	}
+	ix += 30
+
 	view_w := r.width - f32(LANE_X)
 	g_view_w = view_w // guardado p/ o atalho F (ajustar à janela), tratado no update
 	// botão "Ajustar": enquadra todo o conteúdo na janela (atalho F)
@@ -318,7 +333,8 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		wave_h := alike ? avail : (c.has_audio ? clamp(avail - film, WAVE_H, max(WAVE_H, avail)) : 0)
 		// clipe de texto: mostra o conteúdo centralizado (sem miniaturas)
 		if c.is_text && w > 30 {
-			txt_c(elide(c.text, 12, w - 16), vr.x + vr.width/2, vr.y + vr.height/2 - 4, 12, rl.Color{ 214, 204, 236, 255 })
+			label := c.is_caps ? (len(c.caps) > 0 ? c.caps[0].text : "Legendas") : c.text
+			txt_c(elide(label, 12, w - 16), vr.x + vr.width/2, vr.y + vr.height/2 - 4, 12, rl.Color{ 214, 204, 236, 255 })
 		}
 		// tira de miniaturas (filmstrip) sob a barra do título, só o trecho visível
 		if !c.is_text do ensure_thumbs(c)
@@ -926,6 +942,14 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		tip: cstring = "Detectar silêncio"
 		tw := txt_w(tip, 12) + 16
 		tr := rl.Rectangle{ sz.x, sz.y + sz.height + 6, tw, 22 }
+		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
+		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
+		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
+	}
+	if hovered(stz) {
+		tip: cstring = "Voz para texto"
+		tw := txt_w(tip, 12) + 16
+		tr := rl.Rectangle{ stz.x, stz.y + stz.height + 6, tw, 22 }
 		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
 		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
 		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)

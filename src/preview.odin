@@ -529,24 +529,94 @@ text_font_of :: proc(c: ^Clip) -> rl.Font {
 	return len(text_fonts) > 0 ? text_fonts[i].font : ui_font
 }
 
-draw_text_into :: proc(c: ^Clip, sg: Seg, fx, fy, fw, fh: f32) {
-	if !c.is_text || c.text == "" do return
+// quebra `s` em até 8 linhas que cabem em `max_w` (palavras; linha única se for um título curto).
+text_wrap :: proc(fnt: rl.Font, s: string, fsz, spacing, max_w: f32) -> (lines: [8]string, n: int, dim: rl.Vector2) {
+	if s == "" do return
+	lh := fsz * 1.18
+	push :: proc(lines: ^[8]string, n: ^int, dim: ^rl.Vector2, fnt: rl.Font, line: string, fsz, spacing, lh: f32) {
+		if n^ >= len(lines) || line == "" do return
+		lines[n^] = line
+		w := rl.MeasureTextEx(fnt, cs(line), fsz, spacing).x
+		if w > dim.x do dim.x = w
+		n^ += 1
+		dim.y = f32(n^) * lh
+	}
+	// sem espaço e cabe numa linha: título curto, caminho antigo
+	if strings.index_byte(s, ' ') < 0 && strings.index_byte(s, '\n') < 0 {
+		w := rl.MeasureTextEx(fnt, cs(s), fsz, spacing).x
+		if w <= max_w || max_w < 8 {
+			lines[0] = s; n = 1; dim = { w, lh }
+			return
+		}
+	}
+	start := 0
+	cur := 0
+	i := 0
+	for i <= len(s) && n < 8 {
+		at_end := i == len(s)
+		brk := at_end || s[i] == ' ' || s[i] == '\n'
+		if !brk { i += 1; continue }
+		cand := strings.trim_space(s[start:i])
+		if cand != "" {
+			w := rl.MeasureTextEx(fnt, cs(cand), fsz, spacing).x
+			if w > max_w && cur > start {
+				push(&lines, &n, &dim, fnt, strings.trim_space(s[start:cur]), fsz, spacing, lh)
+				start = cur
+				for start < i && (s[start] == ' ' || s[start] == '\n') do start += 1
+			}
+			cur = i
+		}
+		if at_end || s[i] == '\n' {
+			push(&lines, &n, &dim, fnt, strings.trim_space(s[start:i]), fsz, spacing, lh)
+			start = i + 1
+			cur = start
+		}
+		if at_end do break
+		i += 1
+	}
+	if n == 0 {
+		lines[0] = s; n = 1
+		dim = rl.MeasureTextEx(fnt, cs(s), fsz, spacing)
+		if dim.y < lh do dim.y = lh
+	}
+	return
+}
+
+draw_text_into :: proc(c: ^Clip, sg: Seg, fx, fy, fw, fh: f32, src_t: f32 = 0) {
+	if !c.is_text do return
+	body := clip_text_at(c, src_t)
+	if body == "" do return
 	fnt := text_font_of(c)
 	scl := sg.scale <= 0 ? f32(1) : sg.scale
 	fsz := max(f32(10), c.text_size * fh * scl)
 	spacing := fsz * 0.06
-	t := cs(c.text)
-	dim := rl.MeasureTextEx(fnt, t, fsz, spacing)
+	max_w := fw * 0.86
+	lines, n, dim := text_wrap(fnt, body, fsz, spacing, max_w)
+	if n <= 0 do return
 	cx := fx + fw/2 + sg.px*fw
 	cy := fy + fh/2 + sg.py*fh
 	op := sg.opacity <= 0 ? f32(1) : sg.opacity
 	col := c.text_color; col.a = u8(clamp(op, 0, 1) * 255)
 	sh := rl.Color{ 0, 0, 0, u8(clamp(op, 0, 1) * 150) }
-	origin := rl.Vector2{ dim.x/2, dim.y/2 } // centraliza o texto no ponto (cx,cy)
 	off := max(f32(1), fsz*0.03)
+	lh := fsz * 1.18
 	if sdf_ok do rl.BeginShaderMode(sdf_shader)
-	rl.DrawTextPro(fnt, t, { cx + off, cy + off }, origin, sg.rot, fsz, spacing, sh)
-	rl.DrawTextPro(fnt, t, { cx, cy },             origin, sg.rot, fsz, spacing, col)
+	if n == 1 && abs(sg.rot) > 0.5 {
+		t := cs(lines[0])
+		origin := rl.Vector2{ dim.x/2, dim.y/2 }
+		rl.DrawTextPro(fnt, t, { cx + off, cy + off }, origin, sg.rot, fsz, spacing, sh)
+		rl.DrawTextPro(fnt, t, { cx, cy },             origin, sg.rot, fsz, spacing, col)
+	} else {
+		y0 := cy - dim.y/2
+		for k in 0 ..< n {
+			t := cs(lines[k])
+			lw := rl.MeasureTextEx(fnt, t, fsz, spacing).x
+			px := cx - lw/2
+			py := y0 + f32(k)*lh
+			rl.DrawTextEx(fnt, t, { px + off, py + off }, fsz, spacing, sh)
+			rl.DrawTextEx(fnt, t, { px, py },             fsz, spacing, col)
+		}
+	}
 	if sdf_ok do rl.EndShaderMode()
 }
 
@@ -604,11 +674,14 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	op := (sg.opacity <= 0 ? f32(1) : sg.opacity) * clamp(opac_mul, 0, 1) * bfade
 	if c.is_text { // clipe de texto: desenha a própria fonte (sem textura)
 		sg2 := sg; sg2.opacity = op
-		draw_text_into(c, sg2, fx, fy, fw, fh)
+		src_t := seg_local(i, vt)
+		draw_text_into(c, sg2, fx, fy, fw, fh, src_t)
 		if sel_box && i == selected {
 			scl := sg.scale <= 0 ? f32(1) : sg.scale
 			fsz := max(f32(10), c.text_size*fh*scl); sp := fsz*0.06
-			dim := rl.MeasureTextEx(text_font_of(c), cs(c.text), fsz, sp)
+			body := clip_text_at(c, src_t)
+			if body == "" do body = c.text
+			_, _, dim := text_wrap(text_font_of(c), body, fsz, sp, fw*0.86)
 			bxc := fx + fw/2 + sg.px*fw; byc := fy + fh/2 + sg.py*fh
 			rl.DrawRectangleLinesEx({ bxc - dim.x/2 - 6, byc - dim.y/2 - 4, dim.x + 12, dim.y + 8 }, 1.5, ACCENT)
 		}
