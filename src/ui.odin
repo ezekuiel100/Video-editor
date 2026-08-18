@@ -1735,7 +1735,9 @@ ui_slider :: proc(id: int, r: rl.Rectangle, val: ^f32, lo, hi: f32) -> bool {
 	rl.DrawCircleV({kx, cy}, hot ? 7 : 6, hot ? rl.WHITE : rl.Color{205, 210, 220, 255})
 	if rl.IsMouseButtonPressed(.LEFT) && hovered(r) && (modal == .None || g_modal_draw) do ui_slider_active = id
 	if ui_slider_active == id {
-		if rl.IsMouseButtonReleased(.LEFT) { ui_slider_active = -1 }
+		// !Down (não só Released): se o slider sumir no frame do soltar (fade que
+		// zera, troca de aba) o Released se perde e o id ficava preso pra sempre.
+		if !rl.IsMouseButtonDown(.LEFT) { ui_slider_active = -1 }
 		else {
 			nf := clamp((rl.GetMousePosition().x - r.x) / r.width, 0, 1)
 			val^ = lo + nf * (hi - lo)
@@ -1756,7 +1758,7 @@ ui_vslider :: proc(id: int, r: rl.Rectangle, val: ^f32, lo, hi: f32) -> bool {
 	rl.DrawCircleV({cx, ky}, hot ? 7 : 6, hot ? rl.WHITE : rl.Color{205, 210, 220, 255})
 	if rl.IsMouseButtonPressed(.LEFT) && hovered(r) && (modal == .None || g_modal_draw) do ui_slider_active = id
 	if ui_slider_active == id {
-		if rl.IsMouseButtonReleased(.LEFT) { ui_slider_active = -1 }
+		if !rl.IsMouseButtonDown(.LEFT) { ui_slider_active = -1 }
 		else {
 			nf := clamp(1 - (rl.GetMousePosition().y - r.y) / r.height, 0, 1)
 			val^ = lo + nf * (hi - lo)
@@ -1985,6 +1987,9 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	crop_extra := (insp_tab == 0 && !c.is_text && !alike && seg_cropped(selected)) ? f32(30) : f32(0)
 	// aba Áudio: sem o botão "Detectar silêncio" (fica só na toolbar da timeline)
 	ch := c.is_text ? f32(388) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(268)))
+	// o cartão NÃO pode invadir o transporte/timeline: em janela baixa os sliders
+	// caíam em cima da régua e o clique "do playhead" ainda acionava o inspector.
+	ch = min(ch, max(f32(80), area.height - 20))
 	card := rl.Rectangle{ area.x + area.width - cw - 14, area.y + 14, cw, ch }
 	g_insp_card = card // p/ o preview não roubar cliques daqui
 	rl.DrawRectangleRounded(card, 0.06, 8, rl.Color{ 28, 31, 38, 236 })
@@ -2394,7 +2399,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		rl.DrawLineEx({hx-16, hy}, {hx-4, hy}, 2, col); rl.DrawLineEx({hx+4, hy}, {hx+16, hy}, 2, col)
 		rl.DrawLineEx({hx, hy-16}, {hx, hy-4}, 2, col); rl.DrawLineEx({hx, hy+4}, {hx, hy+16}, 2, col)
 		rl.DrawCircleV({hx, hy}, 3, col)
-		if near_h && !hovered(g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
+		if near_h && rl.CheckCollisionPointRec(m, video) && !hovered(g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
 		   rl.IsMouseButtonPressed(.LEFT) && !ctx_open && !ctx_ate {
 			st.drag = .FxCenter; drag_clip = selected
 		}
@@ -2431,7 +2436,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		rl.DrawLineEx({ccx, ccy-16}, {ccx, ccy-4}, 2, col); rl.DrawLineEx({ccx, ccy+4}, {ccx, ccy+16}, 2, col)
 		rl.DrawCircleV({ccx, ccy}, 3, col)
 		rl.EndScissorMode()
-		if near && !hovered(g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
+		if near && rl.CheckCollisionPointRec(m, video) && !hovered(g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
 		   rl.IsMouseButtonPressed(.LEFT) && !ctx_open && !ctx_ate {
 			st.drag = .FxCtr
 		}
@@ -2441,6 +2446,9 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// arrastar o clipe de vídeo SELECIONADO no preview p/ reposicionar (PiP). Só se ele
 	// está visível sob o playhead e o clique não é no cartão do inspector. (A alça do efeito
 	// tem prioridade: se agarrou o centro acima, st.drag != None e isto não dispara.)
+	// O retângulo de hit SEGUE escala/posição — sem recortar ao `video`, um scale>1
+	// ou py pra baixo cobre a timeline: o clique no playhead virava PreviewMove
+	// (o draw do preview roda ANTES e st.drag != None trava a régua).
 	if !crop_mode && src_preview < 0 && selected >= 0 && selected < nsegs && !seg_audio_like(selected) &&
 	   seg_on_track_at(segs[selected].track, st.playhead) == selected {
 		m := rl.GetMousePosition()
@@ -2450,7 +2458,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		ccy := g_frame.y + g_frame.height/2 + sg.py*g_frame.height
 		hw := g_frame.width*s/2; hh := g_frame.height*s/2
 		inside := abs(m.x-ccx) <= hw && abs(m.y-ccy) <= hh
-		if inside && !hovered(g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
+		if inside && rl.CheckCollisionPointRec(m, video) && !hovered(g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
 		   rl.IsMouseButtonPressed(.LEFT) && !ctx_open && !ctx_ate && !md_split_drag && !tl_split_drag {
 			st.drag = .PreviewMove; drag_clip = selected; prev_grab = { m.x-ccx, m.y-ccy }
 		}

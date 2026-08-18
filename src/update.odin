@@ -69,6 +69,9 @@ update :: proc() {
 	if toast_t > 0 do toast_t -= dt
 	if save_flash_t > 0 do save_flash_t -= dt
 	if sil_eat && !rl.IsMouseButtonDown(.LEFT) && !rl.IsMouseButtonPressed(.LEFT) do sil_eat = false
+	// slider do inspector que desmontou (aba, fade zerado, seleção) sem ver o Released:
+	// o id ficava preso e edit_in_progress() congelava o undo. Sem botão down, solta.
+	if ui_slider_active >= 0 && !rl.IsMouseButtonDown(.LEFT) && !rl.IsMouseButtonPressed(.LEFT) do ui_slider_active = -1
 	// gravar DEPOIS de um frame com "Salvando..." na tela (o write é síncrono e instantâneo)
 	if save_pending && proj_path != "" {
 		save_pending = false
