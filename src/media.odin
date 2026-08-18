@@ -687,8 +687,27 @@ add_text :: proc() {
 	set_toast("Texto adicionado — edite no painel à direita")
 }
 
-// tipos de transição do painel: 0 = dissolver (com o clipe anterior) | 1 = fade de
-// entrada (do preto) | 2 = fade de saída (p/ o preto). Aplica ao segmento selecionado.
+// Dissolve orgânico: se o clipe está encostado no anterior, dissolve custom no corte
+// (opacidade + fumaça + borda irregular). Senão, overlay persistente com a mesma máscara.
+apply_ghost :: proc(si: int) {
+	if si < 0 || si >= nsegs do return
+	if seg_speed(si) != 1 { set_toast("Dissolve orgânico não combina com velocidade alterada"); return }
+	sg := &segs[si]
+	tm := trans_max(si)
+	if tm > 0.01 {
+		sg.trans = min(1.2, tm)
+		sg.trans_mode = 1
+		set_toast("Dissolve orgânico aplicado")
+	} else {
+		sg.trans = 0
+		sg.trans_mode = 1
+		if sg.vfin < 0.15 do sg.vfin = min(1, sg.dur*0.4)
+		set_toast("Dissolve orgânico: overlay com máscara de textura")
+	}
+}
+
+// tipos de transição do painel: 0 = dissolver | 1 = fade de entrada | 2 = fade de saída
+// | 3 = dissolve orgânico (opacidade + fumaça / overlay com máscara).
 apply_transition :: proc(kind: int) {
 	if selected < 0 || selected >= nsegs { set_toast("Selecione um clipe na timeline primeiro"); return }
 	sg := &segs[selected]
@@ -698,7 +717,11 @@ apply_transition :: proc(kind: int) {
 		if seg_speed(selected) != 1 { set_toast("Dissolver não combina com velocidade alterada"); return }
 		tm := trans_max(selected)
 		if tm <= 0.01 { trans_deny_toast(selected); return }
-		sg.trans = min(1, tm); set_toast("Dissolver aplicado")
+		sg.trans = min(1, tm)
+		sg.trans_mode = 0
+		set_toast("Dissolver aplicado")
+	case 3: // dissolve orgânico no corte, ou overlay com máscara se não houver vizinho
+		apply_ghost(selected)
 	case 1: // fade de entrada (do preto)
 		sg.vfin = clamp(1, 0.1, sg.dur*0.8); set_toast("Fade de entrada aplicado")
 	case 2: // fade de saída (p/ o preto)
@@ -720,7 +743,14 @@ apply_transition_at :: proc(si, kind: int, time: f32) {
 		if seg_speed(target) != 1 { set_toast("Dissolver não combina com velocidade alterada"); return }
 		tm := trans_max(target)
 		if tm <= 0.01 { trans_deny_toast(target); return }
-		segs[target].trans = min(1, tm); set_toast("Dissolver aplicado")
+		segs[target].trans = min(1, tm)
+		segs[target].trans_mode = 0
+		set_toast("Dissolver aplicado")
+	} else if kind == 3 {
+		if time > sg.start + sg.dur/2 {
+			if nx := seg_on_track_at(sg.track, sg.start + sg.dur + 0.01); nx >= 0 do target = nx
+		}
+		apply_ghost(target)
 	} else if kind == 1 {
 		segs[target].vfin = clamp(1, 0.1, sg.dur*0.8); set_toast("Fade de entrada aplicado")
 	} else {

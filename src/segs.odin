@@ -42,10 +42,13 @@ Seg :: struct {
 	// velocidade de reprodução: dur é SEMPRE tempo de timeline; a fonte consumida é
 	// dur*speed (a partir de in_off). speed 2 = 2x (mais rápido); 0.5 = câmera lenta.
 	speed:    f32,  // 1 = normal; 0 no zero-value tratado como 1
-	// TRANSIÇÃO (dissolver): blend de `trans` segundos com o clipe anterior adjacente
-	// na mesma trilha. Usa o "handle" da fonte (footage antes de in_off): durante
-	// [start-trans, start] o clipe anterior some enquanto ESTE entra. 0 = sem transição.
-	trans:    f32,
+	// TRANSIÇÃO (dissolver / dissolve orgânico): blend de `trans` segundos com o clipe
+	// anterior adjacente na mesma trilha. Usa o "handle" da fonte (footage antes de in_off):
+	// durante [start-trans, start] ESTE entra. 0 = sem transição.
+	// trans_mode: 0 = dissolver limpo (A some × B entra) | 1 = dissolve orgânico
+	// (opacidade + máscara de fumaça/tinta — a imagem apaga por partes).
+	trans:      f32,
+	trans_mode: int,
 	// FADE PRETO: o clipe surge do preto nos primeiros `vfin` s e some no preto nos
 	// últimos `vfout` s (rampa de opacidade; na trilha base = preto de verdade).
 	vfin:     f32,
@@ -905,6 +908,15 @@ trans_max :: proc(bi: int) -> f32 {
 seg_trans :: proc(bi: int) -> f32 {
 	if segs[bi].trans <= 0.001 || seg_speed(bi) != 1 do return 0
 	return clamp(segs[bi].trans, 0, trans_max(bi))
+}
+
+// true se a transição válida de bi é o dissolve orgânico (custom no corte).
+seg_ghost :: proc(bi: int) -> bool {
+	return seg_trans(bi) > 0.01 && segs[bi].trans_mode == 1
+}
+// overlay persistente: o clipe (em trilha de cima) entra à direita sobre o B-roll.
+seg_ghost_overlay :: proc(bi: int) -> bool {
+	return segs[bi].trans_mode == 1 && segs[bi].trans <= 0.01
 }
 
 // explica POR QUE o dissolver foi recusado no corte de bi (só sobra motivo estrutural agora

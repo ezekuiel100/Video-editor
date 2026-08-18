@@ -13,6 +13,7 @@ bulge_ok: bool
 bulge_loc_uv0, bulge_loc_uv1, bulge_loc_center, bulge_loc_strength, bulge_loc_radius, bulge_loc_aspect: i32
 fx_loc_bright, fx_loc_contrast, fx_loc_satur, fx_loc_look, fx_loc_vignette, fx_loc_temp: i32 // uniforms de COR
 fx_loc_rgb: i32 // uniform da separação RGB
+fx_loc_wipe_edge, fx_loc_wipe_feather, fx_loc_wipe_inv: i32 // dissolve orgânico (fumaça + opacidade)
 BULGE_R_DEF :: f32(0.5) // raio padrão do efeito (quando bulge_r==0)
 WOBBLE_HZ_DEF :: f32(2) // frequência padrão do wobble (Hz, quando wobble_speed==0)
 // desloca a coord de textura em direção ao (bulge>0) ou p/ longe do (bulge<0) centro,
@@ -35,6 +36,18 @@ uniform float look;     // COR: 0 nenhum | 1 P&B | 2 sépia | 3 inverter
 uniform float vignette; // COR: vinheta 0..1
 uniform float temp;     // COR: temperatura -1(frio)..1(quente)
 uniform vec2  rgb;      // EFEITO: separação RGB (deslocamento em coords de textura; 0 = desligado)
+uniform float wipeEdge;    // progresso 0..1 do dissolve orgânico
+uniform float wipeFeather; // 0 = desligado; maciez da fumaça/tinta
+uniform float wipeInv;     // 1 = clipe que SAI (máscara invertida)
+float vn(vec2 p, vec2 seed) {
+    vec2 i = floor(p); vec2 f = fract(p);
+    f = f*f*(3.0-2.0*f);
+    float n00 = fract(sin(dot(i,               seed)) * 43758.5453);
+    float n10 = fract(sin(dot(i+vec2(1.0,0.0), seed)) * 43758.5453);
+    float n01 = fract(sin(dot(i+vec2(0.0,1.0), seed)) * 43758.5453);
+    float n11 = fract(sin(dot(i+vec2(1.0,1.0), seed)) * 43758.5453);
+    return mix(mix(n00,n10,f.x), mix(n01,n11,f.x), f.y);
+}
 out vec4 finalColor;
 void main() {
     vec2 span = uv1 - uv0;
@@ -76,7 +89,23 @@ void main() {
         c *= mix(1.0, v, vignette);
     }
     c = clamp(c, 0.0, 1.0);
-    finalColor = vec4(c, src.a)*colDiffuse*fragColor;
+    float a = src.a;
+    if (wipeFeather > 0.001) {
+        // Os 9 frames: A fica opaca; B entra POR CIMA como fantasma no quadro todo;
+        // A só some no fim. Sem janela, sem círculo, sem buracos — isso é que
+        // deixava o efeito "completamente diferente" do vídeo.
+        float p = wipeEdge;
+        float n = vn(local*vec2(2.1, 1.7), vec2(127.1, 311.7));
+        float wob = (n - 0.5) * 0.08;
+        if (wipeInv > 0.5) {
+            a *= clamp((1.0 - smoothstep(0.38, 0.98, p)) + wob * p, 0.0, 1.0);
+        } else {
+            float fade = smoothstep(0.00, 0.70, p);
+            a *= clamp(fade + wob * 0.10, 0.0, 1.0);
+            c = mix(c, c*0.98 + vec3(0.03, 0.032, 0.035), fade*(1.0-fade)*0.30);
+        }
+    }
+    finalColor = vec4(c, a)*colDiffuse*fragColor;
 }`
 
 // força efetiva do bulge no tempo local `t` (s): base + oscilação do wobble. Usado no
@@ -561,7 +590,8 @@ scrub_player_uses_thumb :: proc(c: ^Clip, lt: f32) -> bool {
 // desenha UM segmento de vídeo/texto no canvas com um multiplicador de opacidade
 // (usado pelo blend da transição: clipe que sai × (1-p), clipe que entra × p).
 // `vt` é o tempo de EXIBIÇÃO (view_t), não o playhead cru — ver view_t.
-draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: bool) {
+// wipe_feather>0 = dissolve orgânico (fumaça + opacidade). wipe_inv>0 = clipe que SAI.
+draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: bool, wipe_edge: f32 = 0, wipe_feather: f32 = 0, wipe_inv: f32 = 0) {
 	c := seg_src(i)
 	sg := segs[i]
 	// fade preto (rampa de opacidade) — só na região NORMAL do clipe (não no lead-in de dissolver)
@@ -644,7 +674,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 			rgb_off = fx_rgb_offset(fs)
 		}
 	}
-	use_fx := bulge_ok && (fx_any(sg) || af >= 0)
+	use_fx := bulge_ok && (fx_any(sg) || af >= 0 || wipe_feather > 0.01)
 	if use_fx {
 		br := b_r
 		uv0 := [2]f32{ src.x/tw_, src.y/th_ } // src no espaço da textura EM USO (c.tex ou miniatura)
@@ -668,6 +698,10 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		rl.SetShaderValue(bulge_shader, fx_loc_vignette, &cvg, .FLOAT)
 		rl.SetShaderValue(bulge_shader, fx_loc_temp, &ctp, .FLOAT)
 		rl.SetShaderValue(bulge_shader, fx_loc_rgb, &rgb_off, .VEC2)
+		we := wipe_edge; wf := wipe_feather; wi := wipe_inv
+		rl.SetShaderValue(bulge_shader, fx_loc_wipe_edge, &we, .FLOAT)
+		rl.SetShaderValue(bulge_shader, fx_loc_wipe_feather, &wf, .FLOAT)
+		rl.SetShaderValue(bulge_shader, fx_loc_wipe_inv, &wi, .FLOAT)
 		rl.BeginShaderMode(bulge_shader)
 	}
 	rl.DrawTexturePro(tex, src, { ccx, ccy, dw, dh }, { dw/2, dh/2 }, sg.rot, tint)
@@ -681,6 +715,12 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		rl.DrawLineEx(p0, p1, 1.5, ACCENT); rl.DrawLineEx(p1, p2, 1.5, ACCENT)
 		rl.DrawLineEx(p2, p3, 1.5, ACCENT); rl.DrawLineEx(p3, p0, 1.5, ACCENT)
 	}
+}
+
+// progresso do dissolve orgânico: p=0 A inteiro; p=1 B inteiro.
+// feather = maciez da fumaça (a tinta da borda é mais seca no shader).
+ghost_wipe_edge :: proc(p: f32) -> (edge, feather: f32) {
+	return clamp(p, 0, 1), 0.14
 }
 
 // segmento B cuja transição CENTRADA no corte cobre `time` na trilha t. A janela é
@@ -713,11 +753,25 @@ composite_video :: proc(fx, fy, fw, fh: f32, sel_box: bool) -> bool {
 			a := trans_prev(tb)
 			half := seg_trans(tb)/2; cut := segs[tb].start
 			p := clamp((vt - (cut - half)) / (2*half), 0, 1) // 0 no início do overlap, 1 no fim
-			if a >= 0 { any = true; draw_seg_composited(a, vt, 1-p, fx, fy, fw, fh, sel_box) } // SAI (cauda)
-			any = true; draw_seg_composited(tb, vt, p, fx, fy, fw, fh, sel_box)                // ENTRA (cabeça)
+			if seg_ghost(tb) {
+				// linear: o easing (B rápido, A segura) vive no shader, como no vídeo-ref.
+				edge, feather := ghost_wipe_edge(p)
+				if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box, edge, feather, 1) }
+				any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, edge, feather, 0)
+			} else {
+				if a >= 0 { any = true; draw_seg_composited(a, vt, 1-p, fx, fy, fw, fh, sel_box) } // SAI (cauda)
+				any = true; draw_seg_composited(tb, vt, p, fx, fy, fw, fh, sel_box)                // ENTRA (cabeça)
+			}
 		} else {
 			cur := seg_on_track_at(t, vt)
-			if cur >= 0 { any = true; draw_seg_composited(cur, vt, 1, fx, fy, fw, fh, sel_box) }
+			if cur >= 0 {
+				// overlay persistente: manchas já abertas (~meio da rampa)
+				if segs[cur].trans_mode == 1 && segs[cur].trans <= 0.01 {
+					any = true; draw_seg_composited(cur, vt, 1, fx, fy, fw, fh, sel_box, 0.35, 0.14)
+				} else {
+					any = true; draw_seg_composited(cur, vt, 1, fx, fy, fw, fh, sel_box)
+				}
+			}
 		}
 	}
 	return any

@@ -85,8 +85,8 @@ save_project_text :: proc() -> string {
 	for i in 0 ..< nsegs {
 		if idx[segs[i].src] < 0 do continue
 		s := segs[i]
-		fmt.sbprintf(&b, "%d %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
-			idx[s.src], s.track, s.start, s.in_off, s.dur, s.vol, s.muted ? 1 : 0, s.fade_in, s.fade_out, s.scale, s.px, s.py, s.rot, s.opacity, s.speed <= 0 ? 1 : s.speed, s.trans, s.vfin, s.vfout, s.crop_x, s.crop_y, s.crop_w, s.crop_h, s.zoom_anim ? 1 : 0, s.crop2_x, s.crop2_y, s.crop2_w, s.crop2_h, s.aonly ? 1 : 0, s.fx_bright, s.fx_contrast, s.fx_satur, s.fx_look, s.fx_vignette, s.fx_temp, s.bulge, s.bulge_x, s.bulge_y, s.bulge_r, s.wobble, s.wobble_speed)
+		fmt.sbprintf(&b, "%d %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d\n",
+			idx[s.src], s.track, s.start, s.in_off, s.dur, s.vol, s.muted ? 1 : 0, s.fade_in, s.fade_out, s.scale, s.px, s.py, s.rot, s.opacity, s.speed <= 0 ? 1 : s.speed, s.trans, s.vfin, s.vfout, s.crop_x, s.crop_y, s.crop_w, s.crop_h, s.zoom_anim ? 1 : 0, s.crop2_x, s.crop2_y, s.crop2_w, s.crop2_h, s.aonly ? 1 : 0, s.fx_bright, s.fx_contrast, s.fx_satur, s.fx_look, s.fx_vignette, s.fx_temp, s.bulge, s.bulge_x, s.bulge_y, s.bulge_r, s.wobble, s.wobble_speed, s.trans_mode)
 	}
 	// LAYOUT do editor: divisórias (frações da janela) + altura de cada trilha. Não afeta o
 	// vídeo exportado, mas o usuário monta o espaço de trabalho e espera reencontrá-lo.
@@ -119,7 +119,7 @@ save_project_text :: proc() -> string {
 }
 
 // campos numéricos de uma linha `seg` (projetos antigos têm 34; os 6 últimos são bulge/wobble)
-OVP_SEG_N :: 40
+OVP_SEG_N :: 41
 
 OvpParsed :: struct {
 	muted, locked, hidden: [MAXTRACKS]bool,
@@ -191,6 +191,7 @@ seg_apply_ovp_fields :: proc(sg: ^Seg, f: [OVP_SEG_N]f32) {
 	sg.aonly = f[27] > 0.5
 	sg.fx_bright = f[28]; sg.fx_contrast = f[29]; sg.fx_satur = f[30]; sg.fx_look = f[31]; sg.fx_vignette = f[32]; sg.fx_temp = f[33]
 	sg.bulge = f[34]; sg.bulge_x = f[35]; sg.bulge_y = f[36]; sg.bulge_r = f[37]; sg.wobble = f[38]; sg.wobble_speed = f[39]
+	sg.trans_mode = int(f[40] + 0.5)
 }
 
 // caminho do .ovp aberto/salvo (heap). Vazio = ainda sem arquivo → Ctrl+S abre o diálogo.

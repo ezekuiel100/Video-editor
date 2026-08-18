@@ -538,12 +538,14 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			hw2 := clamp(td/2 * pps(), 8, 600)
 			cut := vr.x // x do corte (início do clipe que entra)
 			ext := rl.Rectangle{ cut - hw2, vr.y, hw2*2, vr.height }
-			is_sel := sel_trans == i && sel_trans_kind == 0
-			dragging := st.drag == .TransDur && drag_clip == i && sel_trans_kind == 0
+			ghost := segs[i].trans_mode == 1
+			tk := ghost ? 3 : 0
+			is_sel := sel_trans == i && (sel_trans_kind == 0 || sel_trans_kind == 3) && (ghost ? sel_trans_kind == 3 : sel_trans_kind == 0)
+			dragging := st.drag == .TransDur && drag_clip == i && (sel_trans_kind == 0 || sel_trans_kind == 3)
 			bw := f32(26); bh := min(vr.height - 8, 26)
 			badge := rl.Rectangle{ cut - bw/2, vr.y + (vr.height - bh)/2, bw, bh }
 			hb := hovered(badge) && st.drag == .None
-			amber := rl.Color{ 248, 214, 122, 255 }
+			amber := ghost ? rl.Color{ 200, 214, 230, 255 } : rl.Color{ 248, 214, 122, 255 }
 			// extensão real do crossfade: visível só no hover/seleção/arrasto (não polui)
 			if hb || is_sel || dragging {
 				on := is_sel || dragging
@@ -551,14 +553,20 @@ draw_timeline :: proc(r: rl.Rectangle) {
 				rl.DrawRectangleLinesEx(ext, on ? 1.6 : 1, rl.Color{ 248, 214, 122, on ? 235 : 140 })
 			}
 			// pastilha: fundo escuro arredondado + duas rampas cruzadas (símbolo de crossfade)
-			rl.DrawRectangleRounded(badge, 0.35, 6, is_sel ? rl.Color{ 96, 78, 30, 250 } : rl.Color{ 33, 36, 43, 240 })
-			rl.DrawRectangleRoundedLinesEx(badge, 0.35, 6, is_sel ? 1.8 : 1.2, rl.Color{ 248, 214, 122, (hb || is_sel) ? 255 : 185 })
+			rl.DrawRectangleRounded(badge, 0.35, 6, is_sel ? (ghost ? rl.Color{ 40, 52, 68, 250 } : rl.Color{ 96, 78, 30, 250 }) : rl.Color{ 33, 36, 43, 240 })
+			rl.DrawRectangleRoundedLinesEx(badge, 0.35, 6, is_sel ? 1.8 : 1.2, rl.Color{ amber.r, amber.g, amber.b, (hb || is_sel) ? 255 : 185 })
 			pd := f32(6)
 			ix0 := badge.x + pd; ix1 := badge.x + bw - pd
 			iy0 := badge.y + pd; iy1 := badge.y + bh - pd
-			rc := rl.Color{ 252, 224, 138, 150 }
-			rl.DrawTriangle({ ix0, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc) // rampa que desce (clipe que sai)
-			rl.DrawTriangle({ ix1, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc) // rampa que sobe (clipe que entra)
+			rc := ghost ? rl.Color{ 210, 220, 232, 160 } : rl.Color{ 252, 224, 138, 150 }
+			if ghost {
+				// silhueta: retângulo crescente (overlay, não cruzamento)
+				rl.DrawRectangleRec({ ix0, iy0 + (iy1-iy0)*0.15, (ix1-ix0)*0.45, (iy1-iy0)*0.7 }, rl.Color{ 90, 120, 150, 180 })
+				rl.DrawRectangleRec({ ix0 + (ix1-ix0)*0.38, iy0, (ix1-ix0)*0.62, iy1-iy0 }, rc)
+			} else {
+				rl.DrawTriangle({ ix0, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc) // rampa que desce (clipe que sai)
+				rl.DrawTriangle({ ix1, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc) // rampa que sobe (clipe que entra)
+			}
 			if is_sel || dragging {
 				// alças nas bordas da extensão: arrastar ajusta a duração (simétrica no corte)
 				eL := rl.Rectangle{ ext.x - 5, vr.y, 10, vr.height }
@@ -569,7 +577,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 				txt_c(rl.TextFormat("%.1fs", f64(td)), cut, badge.y + bh + 3, 11, amber)
 				if xbtn({ cut - 7, vr.y + 2, 14, 14 }) {
 					if track_locked[segs[i].track] { set_toast("Trilha bloqueada") }
-					else { segs[i].trans = 0; sel_trans = -1; set_toast("Transição removida") }
+					else { segs[i].trans = 0; segs[i].trans_mode = 0; sel_trans = -1; set_toast("Transição removida") }
 					consumed = true
 				}
 				if !consumed && !track_locked[segs[i].track] && st.drag == .None && rl.IsMouseButtonPressed(.LEFT) && (hovered(eL) || hovered(eR)) {
@@ -580,7 +588,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			}
 			// clique na pastilha = seleciona a transição (tira a seleção de clipe/bin)
 			if !consumed && st.drag == .None && clicked(badge) {
-				sel_trans = i; sel_trans_kind = 0; selected = -1; bin_sel = -1; consumed = true
+				sel_trans = i; sel_trans_kind = tk; selected = -1; bin_sel = -1; consumed = true
 			}
 		}
 		white := rl.Color{ 235, 238, 244, 235 }
@@ -632,6 +640,30 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			if !consumed && !track_locked[segs[i].track] && st.drag == .None && rl.IsMouseButtonPressed(.LEFT) && hovered(grip) {
 				sel_trans = i; sel_trans_kind = 2; selected = -1; bin_sel = -1
 				st.drag = .TransDur; drag_clip = i; consumed = true
+			}
+		}
+		// overlay persistente (aparição sem corte): faixa prateada no clipe
+		if segs[i].trans_mode == 1 && segs[i].trans <= 0.01 {
+			is_sel := sel_trans == i && sel_trans_kind == 3
+			ov := rl.Rectangle{ vr.x, vr.y, vr.width, vr.height }
+			rl.DrawRectangleRec(ov, rl.Color{ 180, 200, 220, is_sel ? 40 : 22 })
+			// degradê: mais marcado à direita
+			rl.DrawRectangleRec({ vr.x + vr.width*0.45, vr.y, vr.width*0.55, vr.height }, rl.Color{ 210, 220, 232, is_sel ? 55 : 28 })
+			bw := f32(26); bh := min(vr.height - 8, 26)
+			badge := rl.Rectangle{ vr.x + vr.width - bw - 6, vr.y + (vr.height - bh)/2, bw, bh }
+			rl.DrawRectangleRounded(badge, 0.35, 6, is_sel ? rl.Color{ 40, 52, 68, 250 } : rl.Color{ 33, 36, 43, 240 })
+			rl.DrawRectangleRoundedLinesEx(badge, 0.35, 6, 1.2, rl.Color{ 200, 214, 230, 220 })
+			rl.DrawRectangleRec({ badge.x + 6, badge.y + 6, 8, bh - 12 }, rl.Color{ 90, 120, 150, 180 })
+			rl.DrawRectangleRec({ badge.x + 12, badge.y + 4, 8, bh - 8 }, rl.Color{ 210, 220, 232, 160 })
+			if is_sel {
+				if xbtn({ badge.x - 18, vr.y + 2, 14, 14 }) {
+					if track_locked[segs[i].track] { set_toast("Trilha bloqueada") }
+					else { segs[i].trans_mode = 0; sel_trans = -1; set_toast("Dissolve orgânico removido") }
+					consumed = true
+				}
+			}
+			if !consumed && st.drag == .None && clicked(badge) {
+				sel_trans = i; sel_trans_kind = 3; selected = -1; bin_sel = -1; consumed = true
 			}
 		}
 	}

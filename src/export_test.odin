@@ -446,6 +446,7 @@ ovp_guarda_flags_de_trilha_e_bulge :: proc(t: ^testing.T) {
 	testing.expect(t, t_feq(p.fields[0][37], 0.35), "bulge_r")
 	testing.expect(t, t_feq(p.fields[0][38], 0.15), "wobble")
 	testing.expect(t, t_feq(p.fields[0][39], 2.5), "wobble_speed")
+	testing.expect(t, t_feq(p.fields[0][40], 0), "trans_mode padrão = dissolver")
 
 	apply_parsed_project(p)
 	testing.expect(t, nsegs == 1 && t_feq(segs[0].bulge, 0.45) && t_feq(segs[0].wobble, 0.15), "apply restaura bulge/wobble")
@@ -627,4 +628,24 @@ fade_preto_sozinho_nao_ganha_enable :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(g, "fade=t=in:st=0.000:d=1.000:alpha=1"), "a rampa sai")
 	// (o `enable` do overlay sai em todo seg — aqui só interessa o do fade)
 	testing.expect(t, !strings.contains(g, "alpha=1:enable="), "mas sem enable")
+}
+
+// Dissolve orgânico: A e B recebem geq (opacidade + fumaça). Sem fade do dissolver
+// limpo — o mix 40/60 e a máscara invertida de A estão no geq.
+@(test)
+export_aparicao_nao_some_o_clipe_de_saida :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)  // A
+	b := add_seg(1, 4, 0, 3) // B
+	segs[b].trans = 1
+	segs[b].trans_mode = 1
+	testing.expect(t, seg_ghost(b), "dissolve orgânico válido")
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "geq="), "máscara no grafo")
+	testing.expect(t, strings.count(g, "geq=") >= 2, "A (segura) e B (fantasma) têm geq")
+	testing.expect(t, strings.contains(g, "0.38"), "A segura até o meio")
+	testing.expect(t, strings.contains(g, "0.70"), "B entra como overlay")
+	testing.expect(t, !strings.contains(g, "hypot"), "não é íris/raio")
+	testing.expect(t, !strings.contains(g, "fade=t=out"), "opacidade vai no geq, não no fade")
+	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.500"), "sem fade-in cheio de dissolver")
 }

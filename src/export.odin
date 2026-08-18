@@ -217,6 +217,29 @@ export_trans_fades :: proc(fb: ^strings.Builder, start2, tend, din, dout: f32, s
 	if vout > 0.01 do fmt.sbprintf(fb, ",fade=t=out:st=%.3f:d=%.3f:alpha=1", send-vout, vout)
 }
 
+// Dissolve orgânico = os 9 frames: A segura; B entra como overlay fantasma no
+// quadro inteiro; A some no fim. Sem janela/íris. invert=true = clipe que SAI.
+export_ghost_mask :: proc(fb: ^strings.Builder, start2, d: f32, persist: bool, invert := false) {
+	P: string
+	if persist {
+		P = "0.35"
+	} else {
+		du := max(d, 0.001)
+		P = fmt.tprintf("min(1\\,max(0\\,(T-%.3f)/%.3f))", start2, du)
+	}
+	if invert {
+		// hold até 38%, some até 98%
+		U := fmt.tprintf("min(1\\,max(0\\,((%s)-0.38)/0.60))", P)
+		M := fmt.tprintf("(1-((%s)*(%s)*(3-2*(%s))))", U, U, U)
+		fmt.sbprintf(fb, ",format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*(%s)'", M)
+		return
+	}
+	// B: fade-in nos primeiros 70%
+	U := fmt.tprintf("min(1\\,max(0\\,(%s)/0.70))", P)
+	M := fmt.tprintf("((%s)*(%s)*(3-2*(%s)))", U, U, U)
+	fmt.sbprintf(fb, ",format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*(%s)'", M)
+}
+
 // EFEITOS DE COR no export: espelha o BULGE_FS (brilho/contraste/saturação -> eq; visual
 // P&B/sépia/inverter -> hue/colorchannelmixer/negate; vinheta -> vignette). Aproxima o
 // preview (não é pixel-exato, mas visualmente consistente). Nada é adicionado se neutro.
@@ -365,12 +388,24 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 
 	// transições CENTRADAS: cada B com d=trans estica a cabeça `d/2` (thead) e o clipe de
 	// saída A estica a cauda `d/2` (ttail); os dois fazem crossfade sobre `d` s no corte.
+	// Dissolve orgânico: A e B esticam a janela, mas o mix (opacidade + fumaça) vai no
+	// geq — sem fade=t=in/out do dissolver limpo. ghost_out_* marca o clipe que SAI.
 	thead: [MAX_SEGS]f32; ttail: [MAX_SEGS]f32; tfin: [MAX_SEGS]f32; tfout: [MAX_SEGS]f32
+	ghost_out_d: [MAX_SEGS]f32; ghost_out_t0: [MAX_SEGS]f32
 	for i in 0 ..< nsegs {
 		d := seg_trans(i)
 		if d > 0 {
-			thead[i] = max(thead[i], d/2); tfin[i] = max(tfin[i], d)
-			if a := trans_prev(i); a >= 0 { ttail[a] = max(ttail[a], d/2); tfout[a] = max(tfout[a], d) }
+			thead[i] = max(thead[i], d/2)
+			if seg_ghost(i) {
+				if a := trans_prev(i); a >= 0 {
+					ttail[a] = max(ttail[a], d/2)
+					ghost_out_d[a] = max(ghost_out_d[a], d)
+					ghost_out_t0[a] = segs[i].start - d/2
+				}
+			} else {
+				tfin[i] = max(tfin[i], d)
+				if a := trans_prev(i); a >= 0 { ttail[a] = max(ttail[a], d/2); tfout[a] = max(tfout[a], d) }
+			}
 		}
 	}
 
@@ -494,6 +529,11 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				fmt.sbprintf(&fb, "[%d:v]trim=0:%.3f,setpts=PTS-STARTPTS+%.3f/TB,scale=%d:%d,format=rgba",
 					seg_inp[i], sg.dur+hd+tl, start2, W, H)
 				export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
+				if sg.trans_mode == 1 {
+					if td := seg_trans(i); td > 0.01 do export_ghost_mask(&fb, start2, td, false)
+					else do export_ghost_mask(&fb, start2, 1, true)
+				}
+				if ghost_out_d[i] > 0.01 do export_ghost_mask(&fb, ghost_out_t0[i], ghost_out_d[i], false, true)
 				fmt.sbprintf(&fb, "[v%d];", vc)
 				nb := fmt.tprintf("c%d", vc)
 				fmt.sbprintf(&fb, "[%s][v%d]overlay=0:0:enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
@@ -608,6 +648,11 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			}
 			if op < 0.999 do fmt.sbprintf(&fb, ",colorchannelmixer=aa=%.3f", op)
 			export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
+			if sg.trans_mode == 1 {
+				if td := seg_trans(i); td > 0.01 do export_ghost_mask(&fb, start2, td, false)
+				else do export_ghost_mask(&fb, start2, 1, true)
+			}
+			if ghost_out_d[i] > 0.01 do export_ghost_mask(&fb, ghost_out_t0[i], ghost_out_d[i], false, true)
 			fmt.sbprintf(&fb, "[v%d];", vc)
 			nb := fmt.tprintf("c%d", vc)
 			fmt.sbprintf(&fb, "[%s][v%d]overlay=x='(main_w-overlay_w)/2+(%.4f)*main_w':y='(main_h-overlay_h)/2+(%.4f)*main_h':enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
@@ -770,14 +815,18 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 }
 
 // NVENC disponível? Roda 1× no startup (depois de init_paths). Codifica 1 frame preto
-// 64×64 — se o encoder abrir, a placa e o driver respondem. Sem isto o checkbox vinha
+// — se o encoder abrir, a placa e o driver respondem. Sem isto o checkbox vinha
 // ligado por padrão e em máquina sem NVIDIA o ffmpeg morria no primeiro frame com um
 // toast críptico ("Cannot load nvcuda.dll" / "No NVENC capable devices found").
+// NÃO usar 64×64 (nem 128×128): o NVENC da série 40 recusa com
+// "Frame Dimension less than the minimum supported value" e o probe mentia
+// "GPU indisponível" numa RTX 4070. Mínimo real do h264_nvenc é ~145×49; 256×144
+// fica bem acima e ainda é 1 frame barato.
 probe_nvenc :: proc() -> bool {
 	state, _, _, e := os.process_exec(os.Process_Desc{
 		command = []string{
 			"ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-			"-i", "color=c=black:s=64x64:d=0.04", "-frames:v", "1",
+			"-i", "color=c=black:s=256x144:d=0.04", "-frames:v", "1",
 			"-c:v", "h264_nvenc", "-f", "null", "-",
 		},
 	}, context.temp_allocator)

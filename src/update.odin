@@ -127,6 +127,7 @@ update :: proc() {
 			switch sel_trans_kind {
 			case 1: valid = segs[sel_trans].vfin  > 0.01
 			case 2: valid = segs[sel_trans].vfout > 0.01
+			case 3: valid = segs[sel_trans].trans_mode == 1
 			case:   valid = seg_trans(sel_trans)  > 0.01
 			}
 		}
@@ -212,7 +213,8 @@ update :: proc() {
 				switch sel_trans_kind {
 				case 1: segs[sel_trans].vfin = 0;  set_toast("Fade de entrada removido")
 				case 2: segs[sel_trans].vfout = 0; set_toast("Fade de saída removido")
-				case:   segs[sel_trans].trans = 0; set_toast("Transição removida")
+				case 3: segs[sel_trans].trans = 0; segs[sel_trans].trans_mode = 0; set_toast("Dissolve orgânico removido")
+				case:   segs[sel_trans].trans = 0; segs[sel_trans].trans_mode = 0; set_toast("Transição removida")
 				}
 				sel_trans = -1
 			}

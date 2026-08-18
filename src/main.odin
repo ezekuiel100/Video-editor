@@ -446,6 +446,9 @@ main :: proc() {
 		fx_loc_vignette    = rl.GetShaderLocation(bulge_shader, "vignette")
 		fx_loc_temp        = rl.GetShaderLocation(bulge_shader, "temp")
 		fx_loc_rgb         = rl.GetShaderLocation(bulge_shader, "rgb")
+		fx_loc_wipe_edge   = rl.GetShaderLocation(bulge_shader, "wipeEdge")
+		fx_loc_wipe_feather= rl.GetShaderLocation(bulge_shader, "wipeFeather")
+		fx_loc_wipe_inv    = rl.GetShaderLocation(bulge_shader, "wipeInv")
 	}
 	// fontes dos clipes de texto: Segoe UI (=ui_font) + um conjunto do Windows carregado
 	// em THREAD (2 estágios, ver tf_cpu) — síncrono custava ~2.7s e dominava o startup.

@@ -831,14 +831,14 @@ draw :: proc() {
 	// fantasma da TRANSIÇÃO sendo arrastada + guia no corte alvo
 	if st.drag == .Trans && trans_drag >= 0 {
 		m := rl.GetMousePosition()
-		names := []cstring{ "Dissolver", "Fade de entrada", "Fade de saída" }
+		names := []cstring{ "Dissolver", "Fade de entrada", "Fade de saída", "Dissolve orgânico" }
 		over := rl.CheckCollisionPointRec(m, g_vlane)
 		if over { // marca o corte/borda alvo com uma linha vertical âmbar
 			si := seg_on_track_at(track_at_y(m.y), tl_t(m.x))
 			if si >= 0 {
 				sg := segs[si]
-				edge := sg.start // dissolver esquerda / fade entrada
-				if trans_drag == 0 && tl_t(m.x) > sg.start + sg.dur/2 do edge = sg.start + sg.dur // dissolver direita
+				edge := sg.start // dissolver/aparição esquerda / fade entrada
+				if (trans_drag == 0 || trans_drag == 3) && tl_t(m.x) > sg.start + sg.dur/2 do edge = sg.start + sg.dur // direita
 				if trans_drag == 2 do edge = sg.start + sg.dur // fade saída
 				ex := tl_x(edge)
 				rl.DrawLineEx({ ex, g_vlane.y }, { ex, g_vlane.y + g_vlane.height }, 2.5, rl.Color{ 245, 200, 90, 235 })
@@ -1241,6 +1241,13 @@ draw_trans_icon :: proc(box: rl.Rectangle, kind: int) {
 		for k in 0 ..< 8 { a := u8(f32(k)/7*255); rl.DrawRectangleRec({ ix + f32(k)*(iw/8), iy, iw/8+1, ih }, rl.Color{ 205, 208, 216, a }) }
 	case 2: // fade de saída: claro -> preto
 		for k in 0 ..< 8 { a := u8((1-f32(k)/7)*255); rl.DrawRectangleRec({ ix + f32(k)*(iw/8), iy, iw/8+1, ih }, rl.Color{ 205, 208, 216, a }) }
+	case 3: // dissolve orgânico: fundo + manchas de fumaça (não círculo)
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, rl.Color{ 70, 110, 140, 255 })
+		blob := rl.Color{ 200, 150, 130, 200 }
+		rl.DrawRectangleRec({ ix + iw*0.08, iy + ih*0.18, iw*0.28, ih*0.32 }, blob)
+		rl.DrawRectangleRec({ ix + iw*0.42, iy + ih*0.08, iw*0.22, ih*0.24 }, rl.Color{ 200, 150, 130, 150 })
+		rl.DrawRectangleRec({ ix + iw*0.55, iy + ih*0.40, iw*0.36, ih*0.42 }, blob)
+		rl.DrawRectangleRec({ ix + iw*0.18, iy + ih*0.58, iw*0.24, ih*0.28 }, rl.Color{ 200, 150, 130, 170 })
 	}
 }
 
@@ -1435,9 +1442,9 @@ draw_color_panel :: proc(r: rl.Rectangle) {
 
 draw_transitions_panel :: proc(r: rl.Rectangle) {
 	txt("Transições", r.x + 14, r.y + 12, 15, TEXT)
-	txt("Arraste até a junção dos clipes (ou clique p/ o selecionado).",
+	txt("Dissolve orgânico: a cena nova entra por cima (fantasma); a antiga só some no fim.",
 		r.x + 14, r.y + 38, 12, MUTED)
-	items := []struct{ name: cstring, kind: int }{ {"Dissolver", 0}, {"Fade de entrada", 1}, {"Fade de saída", 2} }
+	items := []struct{ name: cstring, kind: int }{ {"Dissolver", 0}, {"Fade de entrada", 1}, {"Fade de saída", 2}, {"Dissolve orgânico", 3} }
 	tw: f32 = 132; th: f32 = 74; gap: f32 = 12
 	cols := max(1, int((r.width - gap) / (tw + gap)))
 	x0 := r.x + gap; y0 := r.y + 64
