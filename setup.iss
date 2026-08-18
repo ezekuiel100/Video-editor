@@ -1,7 +1,7 @@
 ; ============================================================================
 ;  Instalador do Editor de Vídeo (Inno Setup 6.3+)
-;  Empacota: editor.exe + ffmpeg.exe + ffprobe.exe (ao lado do exe, achados via
-;  PATH no startup por init_paths) + a licença GPL do ffmpeg.
+;  Empacota: editor.exe + ffmpeg/ffprobe + Whisper (stt\ : cli + small/Maximo)
+;  ao lado do exe (init_paths acha o ffmpeg no PATH; o STT procura EXE_DIR\stt).
 ;
 ;  Como gerar o instalador:
 ;    1) Instale o Inno Setup 6 (https://jrsoftware.org/isdl.php)
@@ -50,6 +50,8 @@ Source: "editor.exe";               DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\ffmpeg.exe";          DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\ffprobe.exe";         DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\LICENSE-ffmpeg.txt";  DestDir: "{app}"; Flags: ignoreversion
+; Whisper: motor + ggml-small. skipifsourcedoesntexist se o fetch-stt ainda nao rodou.
+Source: "stt\*"; DestDir: "{app}\stt"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#MyAppName}";               Filename: "{app}\{#MyAppExeName}"

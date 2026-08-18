@@ -16,7 +16,7 @@ Editor de vídeo não-linear, escrito em **[Odin](https://odin-lang.org/)** com 
 - **Transições e fades** — dissolver entre clipes, fade de vídeo (preto) de entrada/saída, fades de áudio.
 - **Transform no preview** — mover, escalar, recorte (crop), distorção; tudo WYSIWYG com o export.
 - **Controles de áudio por segmento** — volume (0–200%), mudo, fade in/out.
-- **Voz para texto** — transcreve o áudio do clipe selecionado (Whisper local) e cria uma faixa de legendas sincronizada. Na primeira vez baixa o motor + modelo (~80 MB) para `%LOCALAPPDATA%\OdinVideoEditor\stt`.
+- **Voz para texto** — transcreve o áudio do clipe (Whisper local, modelo **Máximo** / `small`) e cria uma faixa de legendas sincronizada. GPU NVIDIA se houver; vocabulário opcional. Depois de transcrever (ou no inspector da faixa → **Editar falas**) dá para corrigir, apagar ou acrescentar falas. Motor + `ggml-small.bin` vêm em `stt/` (instalador / `fetch-stt.ps1`); o pacote CUDA baixa na primeira vez.
 - **Prévia em tela cheia** — só o vídeo ocupando o monitor inteiro, com controles no rodapé (progresso, play/pause, tempo, volume, sair) que somem sozinhos e reaparecem ao mexer o mouse perto.
 - **Vídeos longos** — clipes de até ~5 h via *streaming* (decode ao vivo) + áudio sob demanda em janela móvel.
 - **Decode por GPU** — usa `h264_cuvid` em placas NVIDIA no *streaming* e no *scrub*, com *fallback* automático por software. O cache em RAM é **sempre por software** de propósito: o NVDEC entrega alguns frames a mais em certos arquivos (1221 em vez de 1218 num teste), e o cache indexa por `int(t*fps)` assumindo frames uniformes — o desencontro virava *judder*.
@@ -87,6 +87,7 @@ Produz um `Setup.exe` único que instala o editor com o **ffmpeg embutido** — 
 
 - **[Inno Setup](https://jrsoftware.org/isdl.php) 6.3+** — `winget install JRSoftware.InnoSetup`
 - **`dist/ffmpeg.exe`** e **`dist/ffprobe.exe`** — um build **GPL win64** do ffmpeg (com `nvenc`/`nvdec`/`libx264`/`libvorbis`), copiados para a pasta `dist/`.
+- **`stt/`** — Whisper (cli + `ggml-small.bin`). Se faltar, o `build-installer.ps1` chama `fetch-stt.ps1`.
 - **rc.exe** (Windows SDK) — compila o recurso do ícone.
 
 **Gerar (um comando faz tudo):**
@@ -174,6 +175,8 @@ src/                # package main (odin build src)
 editor.exe          # build release (sai na raiz)
 editor_debug.exe    # build debug
 build-installer.ps1 # recompila e gera o instalador (1 comando)
+fetch-stt.ps1       # baixa whisper-cli + ggml-small para stt/
+stt/                # Whisper empacotado (nao versionado)
 setup.iss           # script do Inno Setup (empacota editor + ffmpeg)
 make_icon.py        # gera icon.ico / src/icon.png (Pillow)
 icon.rc / icon.ico  # recurso do ícone embutido no .exe (instalador)

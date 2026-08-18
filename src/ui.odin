@@ -408,6 +408,7 @@ draw_modal :: proc(sw, sh: f32) {
 	if modal == .ProjSettings { draw_projset_modal(sw, sh); return } // proporção + resolução do projeto
 	if modal == .Silence { draw_silence_modal(sw, sh); return }
 	if modal == .STT { draw_stt_modal(sw, sh); return }
+	if modal == .Caps { draw_caps_modal(sw, sh); return }
 	rl.DrawRectangleRec({0,0,sw,sh}, rl.Color{0,0,0,150}) // backdrop escuro
 	cw: f32 = modal == .Export ? 700 : 540
 	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : 430))
@@ -968,6 +969,9 @@ ctx_items :: proc(it: ^[10]CtxItem) -> int {
 		n += 1
 	} else {
 		it[n] = { "Colar aqui  (Ctrl+V)", seg_clipbrd_n > 0, 3 }; n += 1
+		gok, _, _ := find_gap_at(ctx_track, ctx_time)
+		it[n] = { "Fechar vão  (Del)", ctx_track >= 0 && !track_locked[ctx_track] && (sel_gap_ok() || gok), 8 }; n += 1
+		it[n] = { "Fechar todos os vãos", ctx_track >= 0 && !track_locked[ctx_track] && track_has_gap(ctx_track), 9 }; n += 1
 	}
 	return n
 }
@@ -1015,6 +1019,14 @@ ctx_run :: proc(id: int) {
 		} else {
 			remove_seg(ctx_seg, !alt_down()) // Alt = deixa o vão (igual ao Delete)
 		}
+	case 8:
+		if sel_gap_ok() do close_sel_gap()
+		else if ctx_track >= 0 {
+			ok, t0, t1 := find_gap_at(ctx_track, ctx_time)
+			if ok do close_gap(ctx_track, t0, t1)
+		}
+	case 9:
+		if ctx_track >= 0 do close_all_gaps(ctx_track)
 	}
 }
 
@@ -1969,13 +1981,15 @@ draw_text_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	txt("Arraste no preview para mover.", x, y, 11, MUTED)
 }
 
-// inspector da faixa de legendas: não edita fala a fala (re-transcreve); só estilo.
+// inspector da faixa de legendas: estilo + botão para editar fala a fala.
 draw_caps_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: f32) {
 	y := card.y + 32
 	if sg.opacity <= 0 do sg.opacity = 1
 	if c.text_size <= 0 do c.text_size = 0.05
 	vx := card.x + cw - pad - 46
 	txt(rl.TextFormat("%d fala(s) transcritas", i32(len(c.caps))), x, y, 13, ACCENT); y += 22
+	if ui_btn({ x, y, cw - 2*pad, 28 }, "Editar falas", true) do open_caps_editor()
+	y += 36
 	txt("Tamanho, cor e posição valem para todas.", x, y, 11, MUTED); y += 20
 	if len(text_fonts) > 1 {
 		txt("Fonte", x, y, 13, TEXT); y += 20
@@ -2032,7 +2046,7 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	}
 	crop_extra := (insp_tab == 0 && !c.is_text && !alike && seg_cropped(selected)) ? f32(30) : f32(0)
 	// aba Áudio: sem o botão "Detectar silêncio" (fica só na toolbar da timeline)
-	ch := c.is_text ? (c.is_caps ? f32(280) : f32(388)) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(268)))
+	ch := c.is_text ? (c.is_caps ? f32(316) : f32(388)) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(268)))
 	// o cartão NÃO pode invadir o transporte/timeline: em janela baixa os sliders
 	// caíam em cima da régua e o clique "do playhead" ainda acionava o inspector.
 	ch = min(ch, max(f32(80), area.height - 20))

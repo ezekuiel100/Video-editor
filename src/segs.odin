@@ -643,6 +643,125 @@ segs_importing :: proc() -> int {
 	return n
 }
 
+// vão = intervalo vazio numa trilha que tem pelo menos um clipe à direita.
+// Só segmentos ocupam (efeito no meio NÃO parte o vão: o usuário quer colar VÍDEOS).
+GAP_EPS :: f32(0.02)
+
+find_gap_at :: proc(tr: int, t: f32) -> (ok: bool, t0, t1: f32) {
+	tt := max(t, 0)
+	left: f32 = 0
+	right: f32 = 1e30
+	for i in 0 ..< nsegs {
+		if !seg_blocks(i) || segs[i].track != tr do continue
+		s := segs[i].start
+		e := s + segs[i].dur
+		if tt >= s && tt < e do return false, 0, 0 // dentro de um clipe
+		if e <= tt + 0.001 && e > left do left = e
+		if s >= tt - 0.001 && s < right do right = s
+	}
+	if right >= 1e29 do return false, 0, 0 // nada à direita p/ puxar
+	if right - left < GAP_EPS do return false, 0, 0
+	return true, left, right
+}
+
+first_gap_on_track :: proc(tr: int) -> (ok: bool, t0, t1: f32) {
+	earliest: f32 = 1e30
+	has := false
+	for i in 0 ..< nsegs {
+		if !seg_blocks(i) || segs[i].track != tr do continue
+		has = true
+		if segs[i].start < earliest do earliest = segs[i].start
+	}
+	if !has do return false, 0, 0
+	if earliest > GAP_EPS do return true, 0, earliest
+	best0 := f32(1e30)
+	found := false
+	for i in 0 ..< nsegs {
+		if !seg_blocks(i) || segs[i].track != tr do continue
+		gok, g0, g1 := find_gap_at(tr, segs[i].start + segs[i].dur + 0.01)
+		if gok && g0 < best0 { best0 = g0; t0 = g0; t1 = g1; found = true }
+	}
+	return found, t0, t1
+}
+
+track_has_gap :: proc(tr: int) -> bool {
+	ok, _, _ := first_gap_on_track(tr)
+	return ok
+}
+
+sel_gap_ok :: proc() -> bool {
+	return selected < 0 && sel_gap_track >= 0 && sel_gap_t1 - sel_gap_t0 >= GAP_EPS
+}
+
+clear_sel_gap :: proc() { sel_gap_track = -1 }
+
+select_gap :: proc(tr: int, t0, t1: f32) {
+	sel_gap_track = tr
+	sel_gap_t0 = t0
+	sel_gap_t1 = t1
+	selected = -1
+	seg_clear_marks()
+	sel_trans = -1
+	fx_sel = -1
+}
+
+// se o vão selecionado sumiu (arrasto, undo, outro corte), descarta; senão atualiza as bordas.
+sync_sel_gap :: proc() {
+	if sel_gap_track < 0 do return
+	mid := (sel_gap_t0 + sel_gap_t1) * 0.5
+	ok, t0, t1 := find_gap_at(sel_gap_track, mid)
+	if !ok { sel_gap_track = -1; return }
+	sel_gap_t0 = t0
+	sel_gap_t1 = t1
+}
+
+// fecha o vão [t0, t1) na trilha: tudo à direita desliza `t1-t0` p/ a esquerda (ripple do vazio).
+close_gap :: proc(tr: int, t0, t1: f32, announce := true) -> bool {
+	if tr < 0 do return false
+	if track_locked[tr] { if announce do set_toast("Trilha bloqueada"); return false }
+	gap := t1 - t0
+	if gap < GAP_EPS do return false
+	n := 0
+	for k in 0 ..< nsegs {
+		if segs[k].track == tr && segs[k].start >= t1 - 0.001 {
+			segs[k].start -= gap
+			n += 1
+		}
+	}
+	// efeitos da trilha deslizam junto — senão o clipe aterrissa em cima deles
+	for k in 0 ..< nfx {
+		if fxsegs[k].track == tr && fxsegs[k].start >= t1 - 0.001 do fxsegs[k].start -= gap
+	}
+	if st.playhead >= t0 && st.playhead < t1 {
+		st.playhead = t0
+		seek_global(t0)
+	}
+	clear_sel_gap()
+	if n == 0 do return false
+	if announce do set_toast(rl.TextFormat("Vão fechado (−%.2f s)", f64(gap)))
+	return true
+}
+
+close_sel_gap :: proc() -> bool {
+	if !sel_gap_ok() do return false
+	return close_gap(sel_gap_track, sel_gap_t0, sel_gap_t1)
+}
+
+// cola todos os clipes da trilha (fecha um vão de cada vez, da esquerda p/ a direita).
+close_all_gaps :: proc(tr: int) -> int {
+	if track_locked[tr] { set_toast("Trilha bloqueada"); return 0 }
+	n := 0
+	for _ in 0 ..< MAX_SEGS {
+		ok, t0, t1 := first_gap_on_track(tr)
+		if !ok do break
+		if !close_gap(tr, t0, t1, false) do break
+		n += 1
+	}
+	if n == 1 do set_toast("Vão fechado")
+	else if n > 1 do set_toast(rl.TextFormat("%d vãos fechados", i32(n)))
+	return n
+}
+
 // tira UM segmento da timeline (a mídia continua no bin). Compacta o array, então
 // conserta os índices globais que apontam para segmentos (deslocam ao remover).
 // ripple=true (padrão) fecha o buraco; false deixa o vão (segurar Alt ao remover)
@@ -1192,6 +1311,7 @@ history_tick :: proc() {
 restore_after :: proc() { // conserta índices e o preview após aplicar um snapshot
 	if selected >= nsegs do selected = -1
 	if sel_trans >= nsegs do sel_trans = -1
+	clear_sel_gap()
 	seg_clear_marks() // índices do snapshot não batem com as marcas antigas
 	drag_clip = -1; play_clip = -1; st.playing = false; st.drag = .None
 	committed = snap_now()

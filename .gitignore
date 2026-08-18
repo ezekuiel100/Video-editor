@@ -1,6 +1,9 @@
 # ---- Empacotamento / instalador (ffmpeg embutido + Setup gerado — pesado, não versionar) ----
 /dist/
 
+# Whisper empacotado (small ~466 MB; gerar com fetch-stt.ps1)
+/stt/
+
 # ---- Build artifacts ----
 *.exe
 *.res

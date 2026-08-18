@@ -35,15 +35,16 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	ix := tb.x + 12
 	for k in 0 ..< 3 {
 		r2 := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
-		// k==0 desfazer | k==1 refazer | k==2 lixeira (remove selecionado)
-		can := (k == 0 && undo_top > 0) || (k == 1 && redo_top > 0) || (k == 2 && selected >= 0)
+		// k==0 desfazer | k==1 refazer | k==2 lixeira (remove selecionado / fecha vão)
+		can := (k == 0 && undo_top > 0) || (k == 1 && redo_top > 0) || (k == 2 && (selected >= 0 || sel_gap_ok()))
 		if hovered(r2) do rl.DrawRectangleRounded(r2, 0.3, 4, can ? HOVER : PANEL2)
 		if can && clicked(r2) {
 			switch k {
 			case 0: do_undo()
 			case 1: do_redo()
 			case 2:
-				if track_locked[segs[selected].track] { set_toast("Trilha bloqueada") }
+				if sel_gap_ok() do close_sel_gap()
+				else if track_locked[segs[selected].track] { set_toast("Trilha bloqueada") }
 				else do remove_seg(selected, !alt_down())
 			}
 		}
@@ -108,6 +109,28 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		rl.DrawTriangle({ icx-3, icy+4 }, { icx+2, icy+4 }, { icx-4, icy+8 }, icol)
 		rl.DrawLineEx({ icx-4, icy-3 }, { icx+4, icy-3 }, 1.4, PANEL2)
 		rl.DrawLineEx({ icx-4, icy }, { icx+2, icy }, 1.4, PANEL2)
+	}
+	ix += 30
+
+	// Fechar vão: cola o espaço vazio selecionado, ou todos os vãos da trilha do clipe.
+	gz_ok := sel_gap_ok() || (selected >= 0 && selected < nsegs && track_has_gap(segs[selected].track))
+	gz := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
+	if gz_ok && clicked(gz) {
+		if sel_gap_ok() do close_sel_gap()
+		else if selected >= 0 {
+			if close_all_gaps(segs[selected].track) == 0 do set_toast("Nenhum vão nesta trilha")
+		}
+	}
+	rl.DrawRectangleRounded(gz, 0.3, 4, (hovered(gz) && gz_ok) ? HOVER : PANEL2)
+	{
+		icx := gz.x + 13; icy := tb.y + tb.height/2; icol := gz_ok ? TEXT : rl.Color{ 92,96,104,255 }
+		// dois blocos com setas se aproximando (fechar o buraco)
+		rl.DrawRectangleRec({ icx-9, icy-5, 6, 10 }, icol)
+		rl.DrawRectangleRec({ icx+3, icy-5, 6, 10 }, icol)
+		rl.DrawLineEx({ icx-2, icy }, { icx-0.5, icy-3 }, 1.5, icol)
+		rl.DrawLineEx({ icx-2, icy }, { icx-0.5, icy+3 }, 1.5, icol)
+		rl.DrawLineEx({ icx+2, icy }, { icx+0.5, icy-3 }, 1.5, icol)
+		rl.DrawLineEx({ icx+2, icy }, { icx+0.5, icy+3 }, 1.5, icol)
 	}
 	ix += 30
 
@@ -749,6 +772,49 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	}
 
 	draw_fx_on_tracks(rows_clip) // barras de EFEITO por cima dos clipes, na trilha de cada um
+
+	// vão selecionado / hover: retângulo no buraco entre clipes + X p/ fechar
+	sync_sel_gap()
+	if !blade_mode && st.drag == .None && modal == .None && !tl_marquee {
+		gtr := -1
+		gt0, gt1: f32
+		g_sel := sel_gap_ok()
+		if g_sel {
+			gtr = sel_gap_track; gt0 = sel_gap_t0; gt1 = sel_gap_t1
+		} else if hovered(vlane) {
+			mpg := rl.GetMousePosition()
+			htr := track_at_y(mpg.y)
+			if !track_locked[htr] {
+				if hok, h0, h1 := find_gap_at(htr, tl_t(mpg.x)); hok {
+					gtr = htr; gt0 = h0; gt1 = h1
+				}
+			}
+		}
+		if gtr >= 0 {
+			gx0 := tl_x(gt0)
+			gx1 := tl_x(gt1)
+			gr := rl.Rectangle{ gx0, track_y(gtr) + 4, max(gx1 - gx0, 2), th(gtr) - 8 }
+			gold := rl.Color{ 245, 200, 70, 235 }
+			if g_sel {
+				rl.DrawRectangleRec(gr, rl.Color{ 245, 200, 70, 28 })
+				rl.DrawRectangleRoundedLinesEx(gr, 0.06, 4, 2, gold)
+				if gr.width > 26 {
+					xr := rl.Rectangle{ gr.x + gr.width - 18, gr.y + 2, 14, 14 }
+					rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : rl.Color{ 60, 64, 74, 220 })
+					rl.DrawLineEx({ xr.x + 4, xr.y + 4 }, { xr.x + 10, xr.y + 10 }, 1.6, rl.WHITE)
+					rl.DrawLineEx({ xr.x + 10, xr.y + 4 }, { xr.x + 4, xr.y + 10 }, 1.6, rl.WHITE)
+					if clicked(xr) {
+						close_gap(gtr, gt0, gt1)
+						consumed = true
+					}
+				}
+			} else {
+				rl.DrawRectangleRec(gr, rl.Color{ 245, 200, 70, 14 })
+				rl.DrawRectangleRoundedLinesEx(gr, 0.06, 4, 1.2, rl.Color{ 245, 200, 70, 140 })
+			}
+		}
+	}
+
 	// guia da lâmina: linha âmbar + tesourinha no ponto onde o corte vai cair
 	if blade_mode && over_lanes {
 		bx := clamp(rl.GetMousePosition().x, vlane.x, r.x + r.width)
@@ -856,6 +922,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			ctrl := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
 			shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 			bin_sel = -1; bin_clear_marks(); sel_trans = -1; fx_sel = -1 // selecionar seg volta a biblioteca de efeitos
+			clear_sel_gap()
 			if (ctrl || shift) && edge == 0 {
 				// Ctrl/Shift+clique: ALTERNA a marcação (seleção múltipla), sem iniciar arrasto
 				seg_marked[hit] = !seg_marked[hit]
@@ -874,14 +941,15 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		} else if hovered(ruler) {
 			st.drag = .Playhead // arrastar na RÉGUA move o playhead (scrub)
 			selected = -1; seg_clear_marks(); bin_sel = -1; bin_clear_marks(); sel_trans = -1
+			clear_sel_gap()
 		} else if hovered(vlane) {
 			// área VAZIA das trilhas: inicia MARQUEE de seleção (arrastar seleciona vários).
-			// Clique seco (sem arrastar) = move o playhead e desseleciona (tratado no release).
+			// Clique seco (sem arrastar) = seleciona o vão (se houver) e move o playhead.
 			mctrl := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
 			mshift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 			tl_marquee = true; tl_marquee_start = mp; tl_marquee_moved = false
 			tl_marquee_add = mctrl || mshift
-			if !tl_marquee_add { selected = -1; seg_clear_marks() }
+			if !tl_marquee_add { selected = -1; seg_clear_marks(); clear_sel_gap() }
 			bin_sel = -1; bin_clear_marks(); sel_trans = -1
 		}
 		// só silencia se um arrasto REALMENTE começou (st.drag deixou de ser None
@@ -921,9 +989,15 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			rl.DrawRectangleLinesEx(mq, 1, rl.Color{ 150, 190, 245, 220 })
 		}
 		if rl.IsMouseButtonReleased(.LEFT) {
-			if !tl_marquee_moved { // clique seco em área vazia: move o playhead + desseleciona
-				st.playhead = clamp(tl_t(rl.GetMousePosition().x), 0, timeline_dur())
+			if !tl_marquee_moved { // clique seco em área vazia: playhead + seleciona o vão (se houver)
+				mpu := rl.GetMousePosition()
+				st.playhead = clamp(tl_t(mpu.x), 0, timeline_dur())
 				seek_global(st.playhead)
+				gtr := track_at_y(mpu.y)
+				if !track_locked[gtr] {
+					if gok, g0, g1 := find_gap_at(gtr, tl_t(mpu.x)); gok do select_gap(gtr, g0, g1)
+					else do clear_sel_gap()
+				} else do clear_sel_gap()
 			}
 			tl_marquee = false; tl_marquee_moved = false
 		}
@@ -950,6 +1024,14 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		tip: cstring = "Voz para texto"
 		tw := txt_w(tip, 12) + 16
 		tr := rl.Rectangle{ stz.x, stz.y + stz.height + 6, tw, 22 }
+		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
+		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
+		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
+	}
+	if hovered(gz) {
+		tip: cstring = "Fechar vão"
+		tw := txt_w(tip, 12) + 16
+		tr := rl.Rectangle{ gz.x, gz.y + gz.height + 6, tw, 22 }
 		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
 		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
 		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)

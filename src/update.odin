@@ -111,6 +111,15 @@ update :: proc() {
 		// draw arma o id no clique e o update seguinte já limpava — só dava para
 		// clicar, não arrastar. Ids 50+ são do cartão de silêncio.
 		if modal != .Silence || ui_slider_active < 50 do ui_slider_active = -1
+		// ESC do modal: o return abaixo impedia o bloco de atalhos. Sai do campo
+		// da fala primeiro, depois fecha STT / editor de falas / silêncio.
+		if rl.IsKeyPressed(.ESCAPE) {
+			if cue_focus do cue_commit_active()
+			else if stt_focus do stt_focus = false
+			else if modal == .STT do stt_close()
+			else if modal == .Caps do caps_close()
+			else if modal == .Silence do sil_close()
+		}
 		st.drag = .None; player_seek_drag = false; return
 	}
 
@@ -164,10 +173,14 @@ update :: proc() {
 				set_toast("Trilha bloqueada")
 			} else {
 				ctx_seg = si
+				ctx_track = tr
 				ctx_time = max(0, tl_t(mp.x))
 				if si >= 0 { // clique direito também seleciona (age no que se vê)
 					selected = si; sel_trans = -1; bin_sel = -1
+					clear_sel_gap()
 					if !seg_marked[si] do seg_clear_marks() // fora do grupo: menu age só nele
+				} else if !track_locked[tr] {
+					if gok, g0, g1 := find_gap_at(tr, ctx_time); gok do select_gap(tr, g0, g1)
 				}
 				ctx_pos = mp
 				ctx_open = true
@@ -233,6 +246,8 @@ update :: proc() {
 			seg_clear_marks(); selected = -1
 			if n == 0 do set_toast("Trilha bloqueada")
 			else do set_toast(rl.TextFormat("%d clipes removidos", n))
+		} else if sel_gap_ok() {
+			close_sel_gap()
 		} else if selected >= 0 {
 			if track_locked[segs[selected].track] { set_toast("Trilha bloqueada") }
 			else do remove_seg(selected, !alt_down())
@@ -244,13 +259,14 @@ update :: proc() {
 	//  S = dividir no playhead | B = ferramenta lâmina | F = ajustar à janela | Esc = sair da lâmina
 	if rl.IsKeyPressed(.F3) do prof_show = !prof_show // HUD do profiler (global, mede o custo da main thread)
 	if rl.IsKeyPressed(.F4) do dbg_toggle() // liga/desliga o log de diagnóstico do decoder (arquivo ao lado do .exe)
-	if rl.IsKeyPressed(.SPACE) && !txt_edit && !search_focus {
+	if rl.IsKeyPressed(.SPACE) && !txt_edit && !search_focus && !stt_focus {
 		if modal == .Silence do sil_play = !sil_play // no editor de silêncio: toca o RESULTADO
 		else do toggle_play()
 	}
 	if rl.IsKeyPressed(.ESCAPE) {
 		if search_focus do search_focus = false // sai da busca primeiro
 		else if txt_edit do txt_edit = false // depois da edição de texto
+		else if stt_focus do stt_focus = false
 		else if modal == .Silence do sil_close()
 		else if modal == .STT do stt_close()
 		else if crop_mode do set_crop_mode(false) // sai do modo recorte

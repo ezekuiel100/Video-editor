@@ -28,6 +28,14 @@ foreach ($f in @("dist\ffmpeg.exe", "dist\ffprobe.exe")) {
     if (-not (Test-Path $f)) { throw "Faltando $f - copie um build GPL win64 do ffmpeg para dist\." }
 }
 
+# Whisper (small / Maximo): se faltar, baixa agora para a 1a transcricao ja sair pronta
+$sttOk = (Test-Path "stt\whisper-cli.exe") -and (Test-Path "stt\ggml-small.bin")
+if (-not $sttOk) {
+    Write-Host "Whisper nao esta em stt\ — baixando motor + modelos (fetch-stt.ps1)..." -ForegroundColor Cyan
+    & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "fetch-stt.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "Falha ao baixar o Whisper. Rode fetch-stt.ps1 e tente de novo." }
+}
+
 Write-Host "[3/4] Localizando o Inno Setup (ISCC.exe)..." -ForegroundColor Cyan
 $iscc = @(
     "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",

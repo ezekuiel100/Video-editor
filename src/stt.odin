@@ -14,17 +14,22 @@ import win "core:sys/windows"
 // Voz para texto: extrai o áudio do clipe, passa no whisper.cpp (processo separado,
 // como o ffmpeg) e vira UMA faixa de legendas sincronizada na timeline.
 //
-// O binário e o modelo NÃO vão no instalador (~80 MB). Na primeira transcrição o
-// editor baixa whisper-cli + ggml-tiny e guarda em %LOCALAPPDATA%\OdinVideoEditor\stt.
+// Motor + ggml-small (Máximo) vêm em EXE_DIR\stt (fetch-stt.ps1 / instalador).
+// Se faltar (build sem a pasta) ou se o usuário ligar GPU CUDA, baixa sob
+// demanda para %LOCALAPPDATA%\OdinVideoEditor\stt.
 
-STT_WHISPER_ZIP :: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.2/whisper-bin-x64.zip"
-STT_MODEL_URL   :: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
-STT_MODEL_NAME  :: "ggml-tiny.bin"
+STT_CPU_ZIP    :: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.2/whisper-blas-bin-x64.zip"
+STT_CUDA_ZIP   :: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.2/whisper-cublas-11.8.0-bin-x64.zip"
+STT_HF         :: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+STT_MODEL_FILE :: "ggml-small.bin"
+STT_MODEL_MB   :: 466
 
 STTPhase :: enum i32 { Idle, Prep, FetchBin, FetchModel, Extract, Talk, Done, Fail }
 
 stt_si:    int = -1
 stt_lang:  int = 1 // 0=auto 1=pt 2=en 3=es
+stt_gpu:   bool    // usar whisper CUDA se houver NVIDIA
+stt_gpu_set: bool  // já escolheu (senão o default segue export_nvenc_ok)
 stt_phase: STTPhase
 stt_err:   string // heap, dono (só a main lê depois de Done/Fail)
 stt_srt:   string // heap, dono: SRT cru do whisper (offset ainda NÃO aplicado)
@@ -36,10 +41,31 @@ stt_eat:   bool
 stt_in:    f32 // in_off do segmento no Começar (offset das falas)
 stt_src_dur: f32
 stt_scroll: f32
+tf_stt:     TField // vocabulário / nomes para o --prompt
+stt_focus:  bool
+stt_prompt_run: string // cópia do vocabulário no Começar (o worker lê isto)
+tf_cue:     TField // texto da fala em edição (prévia STT ou modal Caps)
+cue_edit:   int = -1
+cue_focus:  bool
+caps_edit_si: int = -1 // segmento da faixa no modal .Caps
+caps_scroll:  f32
+caps_eat:     bool
+stt_note_buf: [200]u8
+stt_note_n:   int
+stt_want_gpu: bool // snapshot no Começar
 
 STT_LANGS := []cstring{ "Auto", "Português", "Inglês", "Espanhol" }
 STT_LANGC := []string{ "auto", "pt", "en", "es" }
 
+stt_set_note :: proc(s: string) {
+	n := min(len(s), len(stt_note_buf))
+	for i in 0 ..< n do stt_note_buf[i] = s[i]
+	intrinsics.atomic_store(&stt_note_n, n)
+}
+stt_note :: proc() -> string {
+	n := clamp(intrinsics.atomic_load(&stt_note_n), 0, len(stt_note_buf))
+	return string(stt_note_buf[:n])
+}
 stt_dir :: proc() -> string {
 	base := os.get_env("LOCALAPPDATA", context.temp_allocator)
 	if base == "" do base = EXE_DIR != "" ? EXE_DIR : "."
@@ -71,16 +97,23 @@ stt_find_named :: proc(root, name: string, depth: int) -> string {
 	return ""
 }
 
-stt_find_cli :: proc() -> string {
+stt_find_cli :: proc(gpu: bool) -> string {
+	if gpu {
+		cuda := fmt.tprintf("%s\\cuda", stt_dir())
+		if p := stt_find_named(cuda, "whisper-cli.exe", 3); p != "" do return p
+	}
 	roots := [3]string{ EXE_DIR, fmt.tprintf("%s\\stt", EXE_DIR), stt_dir() }
 	for r in roots {
 		if r == "" do continue
-		if p := stt_find_named(r, "whisper-cli.exe", 2); p != "" do return p
+		if p := stt_find_named(r, "whisper-cli.exe", 2); p != "" {
+			// a pasta cuda também está sob stt_dir: se pedimos CPU, ignora o binário CUDA
+			if gpu || strings.index(p, "\\cuda\\") < 0 do return p
+		}
 	}
 	return ""
 }
 
-stt_find_model :: proc() -> string {
+stt_find_model :: proc(name: string) -> string {
 	roots := [4]string{
 		EXE_DIR,
 		fmt.tprintf("%s\\stt", EXE_DIR),
@@ -89,7 +122,7 @@ stt_find_model :: proc() -> string {
 	}
 	for r in roots {
 		if r == "" do continue
-		if p := stt_find_named(r, STT_MODEL_NAME, 2); p != "" do return p
+		if p := stt_find_named(r, name, 2); p != "" do return p
 	}
 	return ""
 }
@@ -126,44 +159,90 @@ stt_fail :: proc(msg: string) {
 	intrinsics.atomic_store(&stt_phase, STTPhase.Fail)
 }
 
-stt_ensure_tools :: proc() -> (cli, model: string, ok: bool) {
-	cli = stt_find_cli()
-	model = stt_find_model()
-	if cli != "" && model != "" do return cli, model, true
+stt_download :: proc(url, dest: string) -> bool {
+	os.remove(dest)
+	return stt_spawn_wait([]string{ "curl.exe", "-L", "--fail", "--retry", "2", "-o", dest, url }) && stt_exists(dest)
+}
+
+stt_ensure_cli :: proc(gpu: bool) -> string {
+	if p := stt_find_cli(gpu); p != "" do return p
 	dir := stt_dir()
-	if !stt_mkdirs(dir) {
-		stt_fail("Não deu para criar a pasta do Whisper em AppData")
-		return
+	if !stt_mkdirs(dir) do return ""
+	if gpu {
+		cuda := fmt.tprintf("%s\\cuda", dir)
+		if !stt_mkdirs(cuda) do return ""
+		intrinsics.atomic_store(&stt_phase, STTPhase.FetchBin)
+		stt_set_note("Baixando motor Whisper GPU (~270 MB, só na 1ª vez)…")
+		zip := fmt.tprintf("%s\\whisper-cuda.zip", cuda)
+		if !stt_download(STT_CUDA_ZIP, zip) do return ""
+		_ = stt_spawn_wait([]string{ "tar.exe", "-xf", zip, "-C", cuda })
+		os.remove(zip)
+		return stt_find_named(cuda, "whisper-cli.exe", 3)
+	}
+	intrinsics.atomic_store(&stt_phase, STTPhase.FetchBin)
+	stt_set_note("Baixando motor Whisper (~21 MB, só na 1ª vez)…")
+	zip := fmt.tprintf("%s\\whisper-cpu.zip", dir)
+	if !stt_download(STT_CPU_ZIP, zip) do return ""
+	_ = stt_spawn_wait([]string{ "tar.exe", "-xf", zip, "-C", dir })
+	os.remove(zip)
+	return stt_find_cli(false)
+}
+
+stt_ensure_tools :: proc(want_gpu: bool) -> (cli, model: string, gpu: bool, ok: bool) {
+	model = stt_find_model(STT_MODEL_FILE)
+	gpu = want_gpu
+	cli = stt_ensure_cli(gpu)
+	if gpu && cli == "" {
+		// CUDA falhou (sem internet, driver velho, zip enorme): cai no CPU
+		gpu = false
+		cli = stt_ensure_cli(false)
 	}
 	if cli == "" {
-		intrinsics.atomic_store(&stt_phase, STTPhase.FetchBin)
-		zip := fmt.tprintf("%s\\whisper-bin-x64.zip", dir)
-		if !stt_spawn_wait([]string{ "curl.exe", "-L", "--fail", "--retry", "2", "-o", zip, STT_WHISPER_ZIP }) {
-			stt_fail("Falha ao baixar o whisper-cli. Veja a internet ou coloque whisper-cli.exe em AppData\\OdinVideoEditor\\stt")
-			return
-		}
-		_ = stt_spawn_wait([]string{ "tar.exe", "-xf", zip, "-C", dir })
-		os.remove(zip)
-		cli = stt_find_named(dir, "whisper-cli.exe", 3)
-		if cli == "" {
-			stt_fail("Baixei o pacote, mas não achei whisper-cli.exe dentro dele")
-			return
-		}
+		stt_fail("Falha ao baixar o whisper-cli. Coloque whisper-cli.exe em AppData\\OdinVideoEditor\\stt")
+		return
 	}
 	if model == "" {
-		intrinsics.atomic_store(&stt_phase, STTPhase.FetchModel)
-		dest := fmt.tprintf("%s\\%s", dir, STT_MODEL_NAME)
-		if !stt_spawn_wait([]string{ "curl.exe", "-L", "--fail", "--retry", "2", "-o", dest, STT_MODEL_URL }) {
-			stt_fail("Falha ao baixar o modelo ggml-tiny (~75 MB). Coloque ggml-tiny.bin na pasta stt")
+		dir := stt_dir()
+		if !stt_mkdirs(dir) {
+			stt_fail("Não deu para criar a pasta do Whisper em AppData")
 			return
 		}
-		if !stt_exists(dest) {
-			stt_fail("O download do modelo não gerou o arquivo")
+		intrinsics.atomic_store(&stt_phase, STTPhase.FetchModel)
+		stt_set_note(fmt.tprintf("Baixando modelo Máximo (~%d MB)…", STT_MODEL_MB))
+		dest := fmt.tprintf("%s\\%s", dir, STT_MODEL_FILE)
+		if !stt_download(fmt.tprintf("%s%s", STT_HF, STT_MODEL_FILE), dest) {
+			stt_fail(fmt.tprintf("Falha ao baixar %s. Coloque o arquivo na pasta stt", STT_MODEL_FILE))
 			return
 		}
 		model = strings.clone(dest)
 	}
-	return cli, model, true
+	return cli, model, gpu, true
+}
+
+// prompt enviado ao Whisper: idioma + vocabulário do usuário (nomes, marca).
+stt_build_prompt :: proc(lang: int, extra: string) -> string {
+	ex := strings.trim_space(extra)
+	switch lang {
+	case 1: // pt
+		if ex == "" do return "Transcrição em português do Brasil."
+		return fmt.tprintf("Transcrição em português do Brasil. Vocabulário: %s.", ex)
+	case 3: // es
+		if ex == "" do return "Transcripción en español."
+		return fmt.tprintf("Transcripción en español. Vocabulario: %s.", ex)
+	}
+	if ex == "" do return ""
+	return fmt.tprintf("Vocabulary: %s.", ex)
+}
+
+// [Música], (applause) e afins — o -sns já corta a maior parte; isto limpa o resto.
+cap_is_junk :: proc(s: string) -> bool {
+	t := strings.trim_space(s)
+	if t == "" do return true
+	if len(t) >= 2 {
+		a, b := t[0], t[len(t) - 1]
+		if (a == '[' && b == ']') || (a == '(' && b == ')') do return true
+	}
+	return false
 }
 
 stt_wav_path :: proc() -> string {
@@ -186,7 +265,7 @@ stt_worker :: proc() {
 		stt_fail("Este clipe não tem áudio")
 		return
 	}
-	cli, model, ok := stt_ensure_tools()
+	cli, model, use_gpu, ok := stt_ensure_tools(stt_want_gpu)
 	if !ok do return
 	if intrinsics.atomic_load(&stt_stop) { stt_fail("Cancelado"); return }
 
@@ -206,16 +285,35 @@ stt_worker :: proc() {
 	if intrinsics.atomic_load(&stt_stop) { os.remove(wav); stt_fail("Cancelado"); return }
 
 	intrinsics.atomic_store(&stt_phase, STTPhase.Talk)
+	stt_set_note(fmt.tprintf("Transcrevendo (Máximo%s)… pode levar alguns minutos.",
+		use_gpu ? " · GPU" : ""))
 	pref := stt_srt_prefix()
 	os.remove(fmt.tprintf("%s.srt", pref))
 	lang := STT_LANGC[clamp(stt_lang, 0, len(STT_LANGC) - 1)]
-	if !stt_spawn_wait([]string{
-		cli, "-m", model, "-f", wav, "-l", lang,
-		"-osrt", "-of", pref, "-ml", "48", "-sow", "-np", "-ng", "-t", "4",
-	}) {
-		os.remove(wav)
-		stt_fail("O Whisper falhou ao transcrever. Tente outro idioma ou um trecho menor")
-		return
+	prompt := stt_build_prompt(stt_lang, stt_prompt_run)
+	cmd := make([dynamic]string, context.temp_allocator)
+	append(&cmd, cli, "-m", model, "-f", wav, "-l", lang,
+		"-osrt", "-of", pref, "-ml", "48", "-sow", "-np", "-sns", "-t", "4")
+	if !use_gpu do append(&cmd, "-ng")
+	if prompt != "" do append(&cmd, "--prompt", prompt)
+	if !stt_spawn_wait(cmd[:]) {
+		if intrinsics.atomic_load(&stt_stop) { os.remove(wav); stt_fail("Cancelado"); return }
+		// GPU recusou (CUDA ausente / DLL): uma tentativa por CPU
+		if use_gpu {
+			if cpu := stt_ensure_cli(false); cpu != "" {
+				clear(&cmd)
+				append(&cmd, cpu, "-m", model, "-f", wav, "-l", lang,
+					"-osrt", "-of", pref, "-ml", "48", "-sow", "-np", "-sns", "-ng", "-t", "4")
+				if prompt != "" do append(&cmd, "--prompt", prompt)
+				stt_set_note("GPU falhou — tentando de novo na CPU…")
+				if stt_spawn_wait(cmd[:]) do use_gpu = false
+			}
+		}
+		if use_gpu || !stt_exists(fmt.tprintf("%s.srt", pref)) {
+			os.remove(wav)
+			stt_fail("O Whisper falhou ao transcrever. Tente outro idioma ou um trecho menor")
+			return
+		}
 	}
 	os.remove(wav)
 	data, rerr := os.read_entire_file(fmt.tprintf("%s.srt", pref), context.allocator)
@@ -308,7 +406,7 @@ parse_srt :: proc(s: string, offset: f32, alloc := context.allocator) -> [dynami
 			strings.write_string(&txt, ln)
 		}
 		body := strings.trim_space(strings.to_string(txt))
-		if body == "" do continue
+		if body == "" || cap_is_junk(body) do continue
 		append(&out, CapCue{ t0 + offset, t1 + offset, strings.clone(body, alloc) })
 		if end >= n do break
 	}
@@ -348,7 +446,9 @@ stt_close :: proc() {
 	modal = .None
 	stt_si = -1
 	stt_eat = false
+	stt_focus = false
 	stt_scroll = 0
+	cue_edit_reset()
 	stt_cues_free()
 	if stt_srt != "" { delete(stt_srt); stt_srt = "" }
 	if stt_err != "" { delete(stt_err); stt_err = "" }
@@ -370,6 +470,9 @@ open_stt_modal :: proc() {
 	stt_src_dur = segs[selected].dur * seg_speed(selected)
 	stt_scroll = 0
 	stt_eat = true
+	stt_focus = false
+	cue_edit_reset()
+	if !stt_gpu_set { stt_gpu = export_nvenc_ok; stt_gpu_set = true }
 	intrinsics.atomic_store(&stt_stop, false)
 	intrinsics.atomic_store(&stt_phase, STTPhase.Idle)
 	modal = .STT
@@ -384,11 +487,16 @@ stt_start :: proc() {
 	if stt_busy() do return
 	if stt_si < 0 || stt_si >= nsegs { set_toast("Selecione um clipe com áudio"); return }
 	stt_join()
+	cue_edit_reset()
 	stt_cues_free()
 	if stt_srt != "" { delete(stt_srt); stt_srt = "" }
 	if stt_err != "" { delete(stt_err); stt_err = "" }
 	stt_in = segs[stt_si].in_off
 	stt_src_dur = segs[stt_si].dur * seg_speed(stt_si)
+	if stt_prompt_run != "" do delete(stt_prompt_run)
+	stt_prompt_run = strings.clone(string(tf_stt.buf[:tf_stt.len]))
+	stt_want_gpu = stt_gpu && export_nvenc_ok
+	stt_set_note("Preparando…")
 	intrinsics.atomic_store(&stt_stop, false)
 	intrinsics.atomic_store(&stt_phase, STTPhase.Prep)
 	stt_job = make_kill_job()
@@ -396,6 +504,7 @@ stt_start :: proc() {
 }
 
 stt_apply :: proc() -> int {
+	cue_commit(&stt_cues, nil)
 	if len(stt_cues) == 0 do stt_adopt_srt()
 	if len(stt_cues) == 0 { set_toast("Nenhuma fala para aplicar"); return 0 }
 	if stt_si < 0 || stt_si >= nsegs { set_toast("Clipe de origem sumiu"); return 0 }
@@ -422,12 +531,194 @@ stt_apply_and_close :: proc() {
 	if n > 0 do set_toast(rl.TextFormat("Legendas adicionadas (%d fala(s))", i32(n)))
 }
 
+cue_edit_reset :: proc() {
+	cue_edit = -1
+	cue_focus = false
+	tf_cue.len = 0
+	tf_cue.caret = 0
+	tf_cue.sel = 0
+	tf_cue.scroll = 0
+	tf_cue.drag = false
+}
+
+cue_commit :: proc(cues: ^[dynamic]CapCue, owner: ^Clip) {
+	if cue_edit < 0 { cue_focus = false; return }
+	i := cue_edit
+	s := strings.trim_space(string(tf_cue.buf[:tf_cue.len]))
+	cue_edit = -1
+	cue_focus = false
+	if i >= len(cues^) do return
+	if s == "" {
+		if owner != nil do caps_delete_at(owner, i)
+		else do cap_delete_at(cues, i)
+		return
+	}
+	if owner != nil do caps_set_text(owner, i, s)
+	else do cap_set_text(cues, i, s)
+}
+
+cue_begin :: proc(cues: ^[dynamic]CapCue, owner: ^Clip, i: int) {
+	if i < 0 || i >= len(cues^) do return
+	if cue_edit == i { cue_focus = true; return }
+	if cue_edit >= 0 do cue_commit(cues, owner)
+	if i >= len(cues^) do return
+	cue_edit = i
+	cue_focus = true
+	tf_set(&tf_cue, cues^[i].text)
+}
+
+cue_commit_active :: proc() {
+	if cue_edit < 0 { cue_focus = false; return }
+	if modal == .Caps {
+		if caps_edit_si < 0 || caps_edit_si >= nsegs { cue_edit_reset(); return }
+		c := seg_src(caps_edit_si)
+		if !c.is_caps { cue_edit_reset(); return }
+		cue_commit(&c.caps, c)
+		return
+	}
+	cue_commit(&stt_cues, nil)
+}
+
+// lista de falas editável (prévia do Whisper e modal da faixa).
+draw_cue_list :: proc(lane: rl.Rectangle, cues: ^[dynamic]CapCue, owner: ^Clip, scroll: ^f32, eat: bool) {
+	if len(cues^) == 0 {
+		txt_c("Nenhuma fala. Adicione uma ou transcreva de novo.", lane.x + lane.width/2, lane.y + 40, 12, MUTED)
+		return
+	}
+	row_h: f32 = 32
+	max_scroll := max(f32(0), f32(len(cues^))*row_h - lane.height + 8)
+	if hovered(lane) {
+		scroll^ = clamp(scroll^ - rl.GetMouseWheelMove() * 36, 0, max_scroll)
+	}
+	rl.BeginScissorMode(i32(lane.x+1), i32(lane.y+1), i32(lane.width-2), i32(lane.height-2))
+	i := 0
+	for i < len(cues^) {
+		yy := lane.y + 6 + f32(i)*row_h - scroll^
+		if yy + row_h < lane.y || yy > lane.y + lane.height { i += 1; continue }
+		row := rl.Rectangle{ lane.x + 2, yy, lane.width - 4, row_h - 4 }
+		on := cue_edit == i
+		if on do rl.DrawRectangleRounded(row, 0.15, 4, rl.Color{ 40, 48, 62, 255 })
+		else if !eat && hovered(row) do rl.DrawRectangleRounded(row, 0.15, 4, HOVER)
+		tc := rl.TextFormat("%s–%s", timecode(cues^[i].t0), timecode(cues^[i].t1))
+		txt(tc, lane.x + 8, yy + 6, 11, MUTED)
+		xr := rl.Rectangle{ lane.x + lane.width - 30, yy + 4, 20, 20 }
+		xh := !eat && hovered(xr)
+		txt_c("×", xr.x + 10, xr.y + 2, 14, xh ? rl.Color{ 220, 120, 110, 255 } : MUTED)
+		if !eat && clicked(xr) {
+			if cue_edit == i { cue_edit_reset() }
+			else if cue_edit > i { cue_edit -= 1 }
+			if owner != nil do caps_delete_at(owner, i)
+			else do cap_delete_at(cues, i)
+			continue
+		}
+		fr := rl.Rectangle{ lane.x + 118, yy + 2, lane.width - 154, row_h - 8 }
+		if on {
+			rl.DrawRectangleRounded(fr, 0.2, 4, PANEL2)
+			if tf_field(&tf_cue, fr, &cue_focus, true) {
+				s := strings.trim_space(string(tf_cue.buf[:tf_cue.len]))
+				if s != "" {
+					if owner != nil do caps_set_text(owner, i, s)
+					else do cap_set_text(cues, i, s)
+				}
+			}
+			rl.DrawRectangleRoundedLinesEx(fr, 0.2, 4, 1, cue_focus ? ACCENT : LINE)
+			if !cue_focus {
+				cue_commit(cues, owner)
+				continue
+			}
+			if rl.IsKeyPressed(.ENTER) {
+				cue_commit(cues, owner)
+				continue
+			}
+		} else {
+			txt(elide(cues^[i].text, 12, fr.width), fr.x + 4, yy + 6, 12, TEXT)
+			if !eat && (clicked(fr) || (clicked(row) && !hovered(xr))) {
+				cue_begin(cues, owner, i)
+			}
+		}
+		i += 1
+	}
+	rl.EndScissorMode()
+}
+
+open_caps_editor :: proc() {
+	if selected < 0 || selected >= nsegs { set_toast("Selecione a faixa de legendas"); return }
+	c := seg_src(selected)
+	if !c.is_caps { set_toast("Selecione a faixa de legendas"); return }
+	st.playing = false
+	caps_edit_si = selected
+	caps_scroll = 0
+	caps_eat = true
+	cue_edit_reset()
+	modal = .Caps
+}
+
+caps_close :: proc() {
+	cue_commit_active()
+	caps_edit_si = -1
+	caps_eat = false
+	caps_scroll = 0
+	cue_edit_reset()
+	if modal == .Caps do modal = .None
+}
+
+caps_add_at_playhead :: proc() {
+	if caps_edit_si < 0 || caps_edit_si >= nsegs do return
+	c := seg_src(caps_edit_si)
+	if !c.is_caps do return
+	sg := segs[caps_edit_si]
+	spd := seg_speed(caps_edit_si)
+	t := sg.in_off + (st.playhead - sg.start) * spd
+	t = clamp(t, 0, max(c.dur, sg.in_off + sg.dur * spd))
+	t1 := t + 2
+	for q in c.caps {
+		if q.t0 > t && q.t0 < t1 do t1 = q.t0
+	}
+	if t1 - t < 0.2 do t1 = t + 0.2
+	i := caps_insert(c, t, t1, "Nova fala")
+	if i >= 0 do cue_begin(&c.caps, c, i)
+}
+
+draw_caps_modal :: proc(sw, sh: f32) {
+	if caps_eat && !rl.IsMouseButtonDown(.LEFT) do caps_eat = false
+	if caps_edit_si < 0 || caps_edit_si >= nsegs { caps_close(); return }
+	c := seg_src(caps_edit_si)
+	if !c.is_caps { caps_close(); return }
+
+	rl.DrawRectangleRec({0, 0, sw, sh}, rl.Color{0, 0, 0, 150})
+	cw: f32 = 680; ch: f32 = 520
+	cx := sw/2 - cw/2; cy := sh/2 - ch/2
+	card := rl.Rectangle{ cx, cy, cw, ch }
+	rl.DrawRectangleRounded(card, 0.03, 8, rl.Color{ 30, 33, 40, 255 })
+	rl.DrawRectangleRoundedLinesEx(card, 0.03, 8, 1, LINE)
+	txt("Editar falas", cx + 20, cy + 14, 16, TEXT)
+	txt(rl.TextFormat("%d fala(s)  ·  clique o texto para corrigir  ·  × apaga", i32(len(c.caps))),
+		cx + 20, cy + 38, 12, MUTED)
+	xr := rl.Rectangle{ cx + cw - 36, cy + 12, 22, 22 }
+	if clicked(xr) && !caps_eat do caps_close()
+	rl.DrawLineEx({xr.x+5, xr.y+5}, {xr.x+15, xr.y+15}, 1.8, hovered(xr) ? TEXT : MUTED)
+	rl.DrawLineEx({xr.x+15, xr.y+5}, {xr.x+5, xr.y+15}, 1.8, hovered(xr) ? TEXT : MUTED)
+
+	lane := rl.Rectangle{ cx + 20, cy + 64, cw - 40, ch - 128 }
+	rl.DrawRectangleRec(lane, rl.Color{ 24, 26, 32, 255 })
+	rl.DrawRectangleLinesEx(lane, 1, LINE)
+	draw_cue_list(lane, &c.caps, c, &caps_scroll, caps_eat)
+
+	if ui_btn({ cx + 20, cy + ch - 48, 110, 32 }, "Fechar", false) && !caps_eat do caps_close()
+	if ui_btn({ cx + cw - 170, cy + ch - 48, 150, 32 }, "Nova fala", true) && !caps_eat {
+		caps_add_at_playhead()
+	}
+}
+
 stt_phase_label :: proc(ph: STTPhase) -> cstring {
+	if n := stt_note(); n != "" && (ph == .Prep || ph == .FetchBin || ph == .FetchModel || ph == .Talk) {
+		return cs(n)
+	}
 	switch ph {
 	case .Idle:       return "Pronto para transcrever o clipe selecionado."
 	case .Prep:       return "Preparando…"
-	case .FetchBin:   return "Baixando o motor Whisper (~8 MB, só na 1ª vez)…"
-	case .FetchModel: return "Baixando o modelo de fala (~75 MB, só na 1ª vez)…"
+	case .FetchBin:   return "Baixando o motor Whisper…"
+	case .FetchModel: return "Baixando o modelo de fala…"
 	case .Extract:    return "Extraindo o áudio do clipe…"
 	case .Talk:       return "Transcrevendo… pode levar alguns minutos."
 	case .Done:       return ""
@@ -443,7 +734,7 @@ draw_stt_modal :: proc(sw, sh: f32) {
 	if ph == .Done && len(stt_cues) == 0 && stt_srt != "" do stt_adopt_srt()
 
 	rl.DrawRectangleRec({0, 0, sw, sh}, rl.Color{0, 0, 0, 150})
-	cw: f32 = 640; ch: f32 = 470
+	cw: f32 = 640; ch: f32 = 500
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
 	rl.DrawRectangleRounded(card, 0.03, 8, rl.Color{ 30, 33, 40, 255 })
@@ -465,9 +756,28 @@ draw_stt_modal :: proc(sw, sh: f32) {
 		txt_c(lab, r.x + r.width/2, r.y + 6, 12, on ? rl.WHITE : TEXT)
 		if !busy && !stt_eat && clicked(r) do stt_lang = i
 	}
-	y += 40
-	txt("Usa Whisper (local, sem nuvem). Na primeira vez baixa ~80 MB e guarda no AppData.", x, y, 11, MUTED)
-	y += 22
+	y += 36
+	if export_nvenc_ok {
+		chk := rl.Rectangle{ x, y, 18, 18 }
+		if !busy && !stt_eat && clicked({ x, y, 400, 18 }) {
+			stt_gpu = !stt_gpu
+			stt_gpu_set = true
+		}
+		rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, stt_gpu ? ACCENT : MUTED)
+		if stt_gpu do rl.DrawRectangleRec({ chk.x + 4, chk.y + 4, 10, 10 }, ACCENT)
+		txt("GPU NVIDIA (bem mais rápido)", x + 26, y + 2, 12, TEXT)
+		y += 26
+	}
+	txt("Vocabulário (nomes, marca, termos)", x, y, 12, TEXT); y += 18
+	fr := rl.Rectangle{ x, y, cw - 40, 28 }
+	rl.DrawRectangleRounded(fr, 0.2, 4, PANEL2)
+	if tf_stt.len == 0 && !stt_focus do txt("Ex.: João Silva, Odin, CapCut", fr.x + 8, fr.y + 6, 13, MUTED)
+	if !busy do tf_field(&tf_stt, fr, &stt_focus, true)
+	rl.DrawRectangleRoundedLinesEx(fr, 0.2, 4, 1, stt_focus ? ACCENT : LINE)
+	if stt_focus && rl.IsKeyPressed(.ENTER) do stt_focus = false
+	y += 36
+	txt("Modelo Máximo. Vem em stt\\ com o editor; GPU baixa na primeira vez.", x, y, 11, MUTED)
+	y += 20
 	if ui_btn({ x, y, 160, 30 }, busy ? "Cancelar" : "Transcrever", !busy) {
 		if !stt_eat {
 			if busy do stt_cancel_run()
@@ -481,7 +791,7 @@ draw_stt_modal :: proc(sw, sh: f32) {
 		msg := stt_err != "" ? cs(stt_err) : "Falha na transcrição"
 		txt(msg, x, y, 12, rl.Color{ 220, 120, 110, 255 })
 	case .Done:
-		txt(rl.TextFormat("%d fala(s)  ·  prévia abaixo  ·  Aplicar cria a faixa na timeline", i32(len(stt_cues))),
+		txt(rl.TextFormat("%d fala(s)  ·  clique para editar  ·  × apaga  ·  Aplicar cria a faixa", i32(len(stt_cues))),
 			x, y, 12, ACCENT)
 	case .Idle:
 		txt(stt_phase_label(ph), x, y, 12, MUTED)
@@ -500,20 +810,7 @@ draw_stt_modal :: proc(sw, sh: f32) {
 	if ph == .Done && len(stt_cues) == 0 {
 		txt_c("Nenhuma fala encontrada nesse trecho.", lane.x + lane.width/2, lane.y + 40, 12, MUTED)
 	} else if len(stt_cues) > 0 {
-		row_h: f32 = 22
-		max_scroll := max(f32(0), f32(len(stt_cues))*row_h - lane.height + 8)
-		if hovered(lane) {
-			stt_scroll = clamp(stt_scroll - rl.GetMouseWheelMove() * 36, 0, max_scroll)
-		}
-		rl.BeginScissorMode(i32(lane.x+1), i32(lane.y+1), i32(lane.width-2), i32(lane.height-2))
-		for q, i in stt_cues {
-			yy := lane.y + 6 + f32(i)*row_h - stt_scroll
-			if yy + row_h < lane.y || yy > lane.y + lane.height do continue
-			tc := rl.TextFormat("%s–%s", timecode(q.t0), timecode(q.t1))
-			txt(tc, lane.x + 8, yy, 11, MUTED)
-			txt(elide(q.text, 12, lane.width - 130), lane.x + 118, yy, 12, TEXT)
-		}
-		rl.EndScissorMode()
+		draw_cue_list(lane, &stt_cues, nil, &stt_scroll, stt_eat || stt_busy())
 	} else if ph == .Idle {
 		txt_c("As falas aparecem aqui depois de Transcrever.", lane.x + lane.width/2, lane.y + 40, 12, MUTED)
 	}

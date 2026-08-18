@@ -30,6 +30,7 @@ t_reset :: proc() {
 	g_lanes_top = 0; g_track_h = 72; g_track_gap = 3
 	st = State{}
 	selected = -1; play_clip = -1; drag_clip = -1; sel_trans = -1; bin_sel = -1
+	sel_gap_track = -1; sel_gap_t0 = 0; sel_gap_t1 = 0
 	seek_rearm_si = -1; audio_hush_at = -1
 	src_preview = -1
 	player_seek_drag = false
@@ -796,4 +797,77 @@ scrub_arrasto_pede_camada_mais_atrasada :: proc(t: ^testing.T) {
 	testing.expect(t, scrub_req_c == 1, "overlay está 8s atrasado; a base só 7s")
 	testing.expect(t, t_feq(scrub_req_t, 8), "tempo local do overlay")
 	scrub_req_c = -1
+}
+
+@(test)
+acha_vao_entre_clipes :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 0, 0, 10)  // [0,10)
+	add_seg(0, 20, 0, 5)  // [20,25)
+	ok, t0, t1 := find_gap_at(0, 15)
+	testing.expect(t, ok, "há vão em t=15")
+	testing.expect(t, t_feq(t0, 10) && t_feq(t1, 20), "vão = [10,20)")
+	ok, _, _ = find_gap_at(0, 5)
+	testing.expect(t, !ok, "dentro do clipe não é vão")
+	ok, _, _ = find_gap_at(0, 30)
+	testing.expect(t, !ok, "depois do último não há o que puxar")
+	ok, t0, t1 = find_gap_at(0, 2)
+	testing.expect(t, !ok, "início colado em 0 não é vão")
+}
+
+@(test)
+acha_vao_no_comeco_da_trilha :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 8, 0, 4) // [8,12)
+	ok, t0, t1 := find_gap_at(0, 3)
+	testing.expect(t, ok && t_feq(t0, 0) && t_feq(t1, 8), "vão inicial = [0, 8)")
+}
+
+@(test)
+fecha_vao_desliza_so_a_mesma_trilha :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 0, 0, 10)     // [0,10)
+	add_seg(0, 20, 0, 5)     // [20,25) → 10
+	add_seg(1, 20, 0, 5, 1)  // outra trilha: fica
+	nfx = 1
+	fxsegs[0] = FxSeg{ start = 22, dur = 2, track = 0 } // efeito depois do vão → 12
+	st.playhead = 30
+	testing.expect(t, close_gap(0, 10, 20), "fecha")
+	testing.expect(t, t_feq(segs[1].start, 10), "clipe da direita encostou")
+	testing.expect(t, t_feq(segs[2].start, 20), "outra trilha não mexe")
+	testing.expect(t, t_feq(fxsegs[0].start, 12), "efeito da trilha deslizou")
+	testing.expect(t, t_feq(st.playhead, 30), "playhead fora do vão fica no tempo global")
+}
+
+@(test)
+fecha_vao_playhead_dentro_vai_pro_inicio :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 0, 0, 5)
+	add_seg(0, 15, 0, 5)
+	st.playhead = 10
+	close_gap(0, 5, 15)
+	testing.expect(t, t_feq(st.playhead, 5), "cursor no buraco vai p/ a emenda")
+}
+
+@(test)
+fecha_todos_os_vaos_da_trilha :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 4, 0, 4)   // [4,8)
+	add_seg(0, 12, 0, 3)  // [12,15)
+	add_seg(0, 20, 0, 2)  // [20,22)
+	n := close_all_gaps(0)
+	testing.expect(t, n == 3, "vão inicial + 2 intervalos")
+	testing.expect(t, t_feq(segs[0].start, 0), "primeiro colou em 0")
+	testing.expect(t, t_feq(segs[1].start, 4), "segundo encostou no primeiro")
+	testing.expect(t, t_feq(segs[2].start, 7), "terceiro encostou no segundo")
+}
+
+@(test)
+fecha_vao_trilha_travada :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 0, 0, 5)
+	add_seg(0, 12, 0, 5)
+	track_locked[0] = true
+	testing.expect(t, !close_gap(0, 5, 12), "cadeado recusa")
+	testing.expect(t, t_feq(segs[1].start, 12), "nada moveu")
 }

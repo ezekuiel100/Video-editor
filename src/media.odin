@@ -723,6 +723,69 @@ set_text_clip :: proc(c: ^Clip, s: string) {
 	delete(c.text); c.text = strings.clone(s); dirty = true
 }
 
+// o rótulo do bin / timeline mostra a 1ª fala; mantém c.text alinhado.
+caps_sync_label :: proc(c: ^Clip) {
+	if !c.is_caps do return
+	label := len(c.caps) > 0 ? c.caps[0].text : "Legendas"
+	if c.text == label do return
+	delete(c.text)
+	c.text = strings.clone(label)
+}
+
+// troca o texto da fala `i`. `s` vazio não apaga — use cap_delete_at.
+cap_set_text :: proc(cues: ^[dynamic]CapCue, i: int, s: string) -> bool {
+	if i < 0 || i >= len(cues^) do return false
+	t := strings.trim_space(s)
+	if t == cues^[i].text do return false
+	delete(cues^[i].text)
+	cues^[i].text = strings.clone(t)
+	return true
+}
+
+cap_delete_at :: proc(cues: ^[dynamic]CapCue, i: int) -> bool {
+	if i < 0 || i >= len(cues^) do return false
+	delete(cues^[i].text)
+	ordered_remove(cues, i)
+	return true
+}
+
+// insere em ordem de t0. Devolve o índice novo.
+cap_insert :: proc(cues: ^[dynamic]CapCue, t0, t1: f32, s: string) -> int {
+	a := min(t0, t1)
+	b := max(t0, t1)
+	if b - a < 0.05 do b = a + 2
+	body := strings.trim_space(s)
+	if body == "" do body = "Nova fala"
+	i := 0
+	for i < len(cues^) && cues^[i].t0 <= a do i += 1
+	inject_at(cues, i, CapCue{ a, b, strings.clone(body) })
+	return i
+}
+
+caps_set_text :: proc(c: ^Clip, i: int, s: string) -> bool {
+	if !c.is_caps do return false
+	if !cap_set_text(&c.caps, i, s) do return false
+	caps_sync_label(c)
+	dirty = true
+	return true
+}
+
+caps_delete_at :: proc(c: ^Clip, i: int) -> bool {
+	if !c.is_caps do return false
+	if !cap_delete_at(&c.caps, i) do return false
+	caps_sync_label(c)
+	dirty = true
+	return true
+}
+
+caps_insert :: proc(c: ^Clip, t0, t1: f32, s: string) -> int {
+	if !c.is_caps do return -1
+	i := cap_insert(&c.caps, t0, t1, s)
+	caps_sync_label(c)
+	dirty = true
+	return i
+}
+
 // botão "Texto": cria o clipe e coloca um segmento na trilha de vídeo do TOPO (overlay),
 // no playhead. Já seleciona p/ o usuário editar o conteúdo no inspector.
 add_text :: proc() {

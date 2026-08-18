@@ -129,8 +129,9 @@ g_file_menu_draw: bool     // true enquanto draw_file_menu roda (cliques no menu
 // (antes da timeline reagir) e desenhado por último no draw (por cima de tudo).
 ctx_open: bool
 ctx_pos:  rl.Vector2 // canto do menu (posição do clique)
-ctx_seg:  int = -1   // segmento alvo (-1 = área vazia: só "Colar aqui")
-ctx_time: f32        // tempo da timeline no clique (colar/dividir usam)
+ctx_seg:   int = -1  // segmento alvo (-1 = área vazia: colar / fechar vão)
+ctx_track: int = -1  // trilha do clique (vão / "fechar todos" quando ctx_seg < 0)
+ctx_time:  f32       // tempo da timeline no clique (colar/dividir/vão usam)
 ctx_ate:  bool       // este frame: o press fechou/executou o menu — não vaza p/ a UI de trás
 CTX_W  :: f32(232)
 CTX_IH :: f32(30)
@@ -209,7 +210,7 @@ preview_ar :: proc() -> f32 {
 
 
 // --- modais (exportar / screenshot / conclusão) ---
-Modal :: enum { None, Export, Shot, Done, Confirm, Crop, ProjSettings, Silence, STT }
+Modal :: enum { None, Export, Shot, Done, Confirm, Crop, ProjSettings, Silence, STT, Caps }
 // ação adiada até o usuário responder o "salvar alterações?" (modal Confirm)
 Pending :: enum { None, Close, New, Open }
 pending_action: Pending
@@ -266,6 +267,11 @@ SNAP_PX :: 10.0     // distância (px) para o encaixe magnético
 DROP_LEAD :: f32(64) // ao soltar do bin, a borda esq. do clipe fica ~64px ADIANTADA do mouse
                      // (mais fácil encaixar no início da timeline sem cravar o cursor no canto)
 selected: int = -1  // SEGMENTO com FOCO na timeline (-1 = nenhum) — usado pelo inspector
+// vão (espaço vazio) selecionado na timeline: clicar entre clipes destaca o buraco;
+// Delete / X / menu "Fechar vão" desliza o que está à direita e cola os clipes.
+sel_gap_track: int = -1
+sel_gap_t0:    f32
+sel_gap_t1:    f32
 seg_marked: [MAX_SEGS]bool // segmentos MARCADOS p/ seleção múltipla (Ctrl/Shift+clique, marquee); mover/Delete em grupo
 // --- marquee de seleção na TIMELINE (arrastar em área vazia p/ selecionar vários) ---
 tl_marquee:       bool

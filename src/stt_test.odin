@@ -39,6 +39,23 @@ srt_ignora_bloco_vazio_e_crlf :: proc(t: ^testing.T) {
 }
 
 @(test)
+srt_descarta_marcacao_de_nao_fala :: proc(t: ^testing.T) {
+	src := "1\n00:00:00,000 --> 00:00:01,000\n[Música]\n\n2\n00:00:01,000 --> 00:00:02,000\n(applause)\n\n3\n00:00:02,000 --> 00:00:03,000\nFala de verdade\n"
+	cues := parse_srt(src, 0)
+	defer { for q in cues do delete(q.text); delete(cues) }
+	testing.expect(t, len(cues) == 1, "só a fala real")
+	if len(cues) == 1 do testing.expect(t, cues[0].text == "Fala de verdade")
+}
+
+@(test)
+stt_prompt_junta_idioma_e_vocabulario :: proc(t: ^testing.T) {
+	testing.expect(t, stt_build_prompt(1, "") == "Transcrição em português do Brasil.")
+	testing.expect(t, strings.contains(stt_build_prompt(1, "João, Odin"), "João, Odin"))
+	testing.expect(t, stt_build_prompt(2, "") == "")
+	testing.expect(t, strings.contains(stt_build_prompt(2, "CapCut"), "CapCut"))
+}
+
+@(test)
 clip_text_at_escolhe_fala :: proc(t: ^testing.T) {
 	t_reset()
 	cues := []CapCue{ { 1, 3, "um" }, { 3, 5, "dois" } }
@@ -94,4 +111,51 @@ export_dry_expande_falas :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(graph, "between(t\\,0.000\\,2.000)"), "overlay da 1ª fala")
 	testing.expect(t, strings.contains(graph, "between(t\\,2.000\\,4.000)"), "overlay da 2ª fala")
 	caps_free(&clips[1])
+}
+
+@(test)
+caps_edita_apaga_e_insere :: proc(t: ^testing.T) {
+	raw := make([dynamic]CapCue)
+	defer { for q in raw do delete(q.text); delete(raw) }
+	cap_insert(&raw, 2, 3, "b")
+	cap_insert(&raw, 0, 1, "a")
+	testing.expect(t, len(raw) == 2 && raw[0].text == "a" && raw[1].text == "b")
+	testing.expect(t, cap_set_text(&raw, 1, "B"))
+	testing.expect(t, raw[1].text == "B")
+	testing.expect(t, !cap_set_text(&raw, 1, "B"), "igual não muda")
+	testing.expect(t, cap_delete_at(&raw, 0))
+	testing.expect(t, len(raw) == 1 && raw[0].text == "B")
+
+	t_reset()
+	cues := []CapCue{ { 1, 3, "um" }, { 3, 5, "dois" } }
+	slot := new_caps_clip(cues, 0.05, {255,255,255,255}, 10)
+	testing.expect(t, slot >= 0)
+	if slot < 0 do return
+	c := &clips[slot]
+	if !testing.expect(t, len(c.caps) == 2, "faixa nasceu com 2 falas") {
+		caps_free(c)
+		delete(c.text); c.text = ""
+		delete(c.name); c.name = ""
+		return
+	}
+	testing.expect(t, caps_set_text(c, 0, "olá"))
+	testing.expect(t, c.caps[0].text == "olá", "texto da 1ª")
+	testing.expect(t, c.text == "olá", "rótulo acompanha a 1ª fala")
+	testing.expect(t, clip_text_at(c, 1.5) == "olá")
+	testing.expect(t, caps_delete_at(c, 0))
+	testing.expect(t, len(c.caps) == 1, "sobrou a 2ª")
+	if len(c.caps) > 0 {
+		testing.expect(t, c.caps[0].text == "dois")
+		testing.expect(t, c.text == "dois", "rótulo após apagar a 1ª")
+	}
+	i := caps_insert(c, 0.2, 0.8, "início")
+	testing.expect(t, i == 0, "inseriu no começo por t0")
+	testing.expect(t, len(c.caps) == 2)
+	if len(c.caps) >= 2 {
+		testing.expect(t, c.caps[0].text == "início" && c.caps[1].text == "dois")
+		testing.expect(t, c.text == "início")
+	}
+	caps_free(c)
+	delete(c.text); c.text = ""
+	delete(c.name); c.name = ""
 }
