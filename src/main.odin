@@ -130,10 +130,11 @@ g_file_menu_draw: bool     // true enquanto draw_file_menu roda (cliques no menu
 ctx_open: bool
 ctx_pos:  rl.Vector2 // canto do menu (posição do clique)
 ctx_seg:   int = -1  // segmento alvo (-1 = área vazia: colar / fechar vão)
+ctx_fx:    int = -1  // clipe de efeito alvo (-1 = nenhum; exclusivo com ctx_seg)
 ctx_track: int = -1  // trilha do clique (vão / "fechar todos" quando ctx_seg < 0)
 ctx_time:  f32       // tempo da timeline no clique (colar/dividir/vão usam)
 ctx_ate:  bool       // este frame: o press fechou/executou o menu — não vaza p/ a UI de trás
-CTX_W  :: f32(232)
+CTX_W  :: f32(248)
 CTX_IH :: f32(30)
 g_file_menu_x: f32         // x do menu Arquivo (p/ posicionar o dropdown)
 AspectPreset :: struct { label: cstring, ar: f32 }

@@ -943,10 +943,14 @@ CtxItem :: struct {
 	id:    int,  // ação estável (o layout muda conforme o alvo)
 }
 
-// monta os itens p/ o alvo atual (ctx_seg/-1). Retorna a contagem.
-ctx_items :: proc(it: ^[10]CtxItem) -> int {
+// monta os itens p/ o alvo atual (ctx_seg / ctx_fx / vazio). Retorna a contagem.
+ctx_items :: proc(it: ^[14]CtxItem) -> int {
 	n := 0
-	if ctx_seg >= 0 && ctx_seg < nsegs && seg_ready(ctx_seg) {
+	if ctx_fx >= 0 && ctx_fx < nfx {
+		it[n] = { "Copiar efeito", true, 10 }; n += 1
+		it[n] = { "Colar ajustes aqui", fx_clipbrd_ok(), 11 }; n += 1
+		it[n] = { "Excluir  (Del)", true, 12 }; n += 1
+	} else if ctx_seg >= 0 && ctx_seg < nsegs && seg_ready(ctx_seg) {
 		grp := seg_marks_count() > 1 && seg_marked[ctx_seg] // agir no grupo marcado
 		sg := segs[ctx_seg]
 		if grp do it[n] = { "Copiar grupo  (Ctrl+C)", true, 0 }
@@ -958,7 +962,12 @@ ctx_items :: proc(it: ^[10]CtxItem) -> int {
 		if grp do it[n] = { "Duplicar grupo  (Ctrl+D)", true, 2 }
 		else do it[n] = { "Duplicar  (Ctrl+D)", true, 2 }
 		n += 1
-		it[n] = { "Colar aqui  (Ctrl+V)", seg_clipbrd_n > 0, 3 }; n += 1
+		it[n] = { "Colar aqui  (Ctrl+V)", clipbrd_kind != .None, 3 }; n += 1
+		vid := !seg_audio_like(ctx_seg)
+		it[n] = { "Copiar ajustes", vid, 10 }; n += 1
+		if grp do it[n] = { "Colar ajustes no grupo", vid, 11 }
+		else do it[n] = { "Colar ajustes", vid, 11 }
+		n += 1
 		it[n] = { "Dividir aqui", ctx_time > sg.start + 0.05 && ctx_time < sg.start + sg.dur - 0.05, 4 }; n += 1
 		if sg.muted do it[n] = { "Ativar som", seg_src(ctx_seg).has_audio, 5 }
 		else do it[n] = { "Silenciar", seg_src(ctx_seg).has_audio, 5 }
@@ -968,7 +977,9 @@ ctx_items :: proc(it: ^[10]CtxItem) -> int {
 		else do it[n] = { "Excluir  (Del)", true, 6 }
 		n += 1
 	} else {
-		it[n] = { "Colar aqui  (Ctrl+V)", seg_clipbrd_n > 0, 3 }; n += 1
+		if clipbrd_kind == .Fx do it[n] = { "Colar ajustes aqui", fx_clipbrd_ok(), 3 }
+		else do it[n] = { "Colar aqui  (Ctrl+V)", seg_clipbrd_n > 0, 3 }
+		n += 1
 		gok, _, _ := find_gap_at(ctx_track, ctx_time)
 		it[n] = { "Fechar vão  (Del)", ctx_track >= 0 && !track_locked[ctx_track] && (sel_gap_ok() || gok), 8 }; n += 1
 		it[n] = { "Fechar todos os vãos", ctx_track >= 0 && !track_locked[ctx_track] && track_has_gap(ctx_track), 9 }; n += 1
@@ -988,7 +999,7 @@ ctx_rect :: proc(n: int) -> rl.Rectangle {
 
 // (update) id do item habilitado sob o mouse (-1 = nenhum) + se o mouse está no menu
 ctx_hit :: proc(m: rl.Vector2) -> (id: int, inside: bool) {
-	items: [10]CtxItem
+	items: [14]CtxItem
 	n := ctx_items(&items)
 	r := ctx_rect(n)
 	inside = rl.CheckCollisionPointRec(m, r)
@@ -1005,7 +1016,13 @@ ctx_run :: proc(id: int) {
 	case 0: if sane do copy_segs()
 	case 1: if sane do cut_segs()
 	case 2: if sane do duplicate_segs()
-	case 3: paste_segs(max(0, ctx_time))
+	case 3:
+		if clipbrd_kind == .Fx {
+			if sane do paste_effects_targets(ctx_seg)
+			else do paste_fx_at(ctx_track, max(0, ctx_time))
+		} else {
+			paste_segs(max(0, ctx_time))
+		}
 	case 4: if sane && split_seg_at(ctx_seg, ctx_time) { selected = ctx_seg; set_toast("Clipe dividido") }
 	case 5: if sane do segs[ctx_seg].muted = !segs[ctx_seg].muted
 	case 7: if sane do detach_audio(ctx_seg)
@@ -1027,6 +1044,14 @@ ctx_run :: proc(id: int) {
 		}
 	case 9:
 		if ctx_track >= 0 do close_all_gaps(ctx_track)
+	case 10: // copiar efeitos (do clipe de vídeo ou do clipe de efeito)
+		if ctx_fx >= 0 && ctx_fx < nfx do copy_fx_clip(ctx_fx)
+		else if sane do copy_effects(ctx_seg)
+	case 11: // colar efeitos no clipe (ou grupo) / no tempo do clique
+		if sane do paste_effects_targets(ctx_seg)
+		else do paste_fx_at(ctx_track, max(0, ctx_time))
+	case 12: // excluir clipe de efeito
+		if ctx_fx >= 0 && ctx_fx < nfx { remove_fxseg(ctx_fx); set_toast("Efeito removido") }
 	}
 }
 
@@ -1034,7 +1059,7 @@ ctx_run :: proc(id: int) {
 // hovered() global fica inerte enquanto o menu está aberto.
 draw_ctx_menu :: proc() {
 	if !ctx_open do return
-	items: [10]CtxItem
+	items: [14]CtxItem
 	n := ctx_items(&items)
 	r := ctx_rect(n)
 	rl.DrawRectangleRounded(r, 0.08, 6, rl.Color{ 30, 33, 40, 250 })

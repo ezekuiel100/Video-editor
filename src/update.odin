@@ -147,7 +147,7 @@ update :: proc() {
 
 	// ---- menu de contexto da timeline (botão direito) ----
 	ctx_ate = false
-	if ctx_open && (ctx_seg >= nsegs || (ctx_seg >= 0 && !seg_ready(ctx_seg))) do ctx_open = false // alvo sumiu (undo etc.)
+	if ctx_open && (ctx_fx >= nfx || ctx_seg >= nsegs || (ctx_seg >= 0 && !seg_ready(ctx_seg))) do ctx_open = false // alvo sumiu (undo etc.)
 	if ctx_open {
 		if rl.IsKeyPressed(.ESCAPE) do ctx_open = false
 		if rl.IsMouseButtonPressed(.LEFT) {
@@ -167,15 +167,22 @@ update :: proc() {
 		mp := rl.GetMousePosition()
 		if rl.CheckCollisionPointRec(mp, g_vlane) {
 			tr := track_at_y(mp.y)
+			fi := fx_bar_at(mp)
 			si := seg_on_track_at(tr, tl_t(mp.x))
-			if si >= 0 && track_locked[tr] {
+			if si >= 0 && fi < 0 && track_locked[tr] {
+				set_toast("Trilha bloqueada")
+			} else if fi >= 0 && track_locked[fxsegs[fi].track] {
 				set_toast("Trilha bloqueada")
 			} else {
-				ctx_seg = si
+				ctx_fx = fi
+				ctx_seg = fi >= 0 ? -1 : si
 				ctx_track = tr
 				ctx_time = max(0, tl_t(mp.x))
-				if si >= 0 { // clique direito também seleciona (age no que se vê)
-					selected = si; sel_trans = -1; bin_sel = -1
+				if fi >= 0 { // direito num clipe de efeito: seleciona ele
+					fx_sel = fi; selected = -1; sel_trans = -1; bin_sel = -1
+					clear_sel_gap(); seg_clear_marks()
+				} else if si >= 0 { // clique direito também seleciona (age no que se vê)
+					selected = si; sel_trans = -1; bin_sel = -1; fx_sel = -1
 					clear_sel_gap()
 					if !seg_marked[si] do seg_clear_marks() // fora do grupo: menu age só nele
 				} else if !track_locked[tr] {
@@ -204,9 +211,19 @@ update :: proc() {
 	// Ctrl+V = colar no playhead | Ctrl+D = duplicar logo após o original
 	// (campos de texto têm o próprio Ctrl+C/V/X — gate por txt_edit/search_focus)
 	if ctrl && src_preview < 0 && !txt_edit && !search_focus {
-		if rl.IsKeyPressed(.C) do copy_segs()
+		if rl.IsKeyPressed(.C) {
+			if fx_sel >= 0 && fx_sel < nfx && selected < 0 do copy_fx_clip(fx_sel)
+			else do copy_segs()
+		}
 		if rl.IsKeyPressed(.X) do cut_segs()
-		if rl.IsKeyPressed(.V) do paste_segs(st.playhead)
+		if rl.IsKeyPressed(.V) {
+			if clipbrd_kind == .Fx {
+				if selected >= 0 && selected < nsegs do paste_effects_targets(selected)
+				else do paste_fx_at(0, st.playhead)
+			} else {
+				paste_segs(st.playhead)
+			}
+		}
 		if rl.IsKeyPressed(.D) do duplicate_segs()
 	}
 

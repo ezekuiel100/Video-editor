@@ -504,6 +504,263 @@ check_invariants :: proc() {
 seg_clipbrd:   [MAX_SEGS]Seg
 seg_clipbrd_n: int
 
+// o que o último Copiar colocou na área de transferência: Colar aqui / Ctrl+V
+// seguem isto (senão "Copiar efeito" + "Colar aqui" colava um clipe de vídeo antigo).
+ClipbrdKind :: enum { None, Segs, Fx }
+clipbrd_kind: ClipbrdKind
+
+// ---- copiar/colar AJUSTES do clipe (menu: "Copiar ajustes" / "Colar ajustes") ----
+// snapshot de TUDO que o inspector muda no vídeo (transform, cor, recorte, velocidade,
+// fades, volume) + os clipes de efeito de faixa que o cobriam. Não copia mídia/tempo.
+FxClipbrd :: struct {
+	has_seg:   bool, // tem parâmetros por-clipe (inspector)
+	cover:     bool, // colar fx cobrindo o destino inteiro (veio de um clipe de efeito)
+	src_track: int,  // trilha do clipe-fonte (p/ preservar o offset V1→V2 etc.)
+	attr:      Seg,  // snapshot; src/track/start/in_off/dur/aonly são ignorados no colar
+	nfx: int,
+	fx:  [MAX_FX]FxSeg,
+}
+fx_clipbrd: FxClipbrd
+
+fx_clipbrd_ok :: proc() -> bool { return fx_clipbrd.has_seg || fx_clipbrd.nfx > 0 }
+
+// o clipe tem alguma mudança de inspector (≠ padrão)?
+seg_has_adjustments :: proc(sg: Seg) -> bool {
+	s := sg.scale <= 0 ? 1 : sg.scale
+	o := sg.opacity <= 0 ? 1 : sg.opacity
+	sp := sg.speed <= 0 ? 1 : sg.speed
+	v := sg.vol == 0 ? 1 : sg.vol
+	cropped := sg.crop_w > 0.001 && sg.crop_h > 0.001 && (sg.crop_w < 0.999 || sg.crop_h < 0.999)
+	return fx_any(sg) ||
+		abs(s - 1) > 0.001 || abs(sg.px) > 0.001 || abs(sg.py) > 0.001 || abs(sg.rot) > 0.5 || abs(o - 1) > 0.001 ||
+		cropped || sg.zoom_anim ||
+		abs(sp - 1) > 0.001 ||
+		sg.vfin > 0.01 || sg.vfout > 0.01 || sg.trans > 0.01 ||
+		abs(v - 1) > 0.001 || sg.muted || sg.fade_in > 0.01 || sg.fade_out > 0.01
+}
+
+// o efeito k cobre o segmento si E o rege (trilha do efeito >= trilha do clipe)?
+fx_covers_seg :: proc(k, si: int) -> bool {
+	if k < 0 || k >= nfx || si < 0 || si >= nsegs do return false
+	e := fxsegs[k]; sg := segs[si]
+	if e.track < sg.track do return false
+	ov := min(e.start + e.dur, sg.start + sg.dur) - max(e.start, sg.start)
+	return ov > 0.005
+}
+
+// escolhe uma trilha de VÍDEO livre p/ um efeito colado sobre o clipe `si`.
+// tenta preservar o offset relativo à trilha-fonte; nunca pousa em cima do próprio destino.
+fx_place_track :: proc(si: int, src_fx_track: int, start, dur: f32) -> int {
+	if si < 0 || si >= nsegs do return -1
+	dest := segs[si].track
+	want := dest + (src_fx_track - fx_clipbrd.src_track)
+	if want == dest do want = dest + 1
+	if want < 0 do want = dest + 1
+	free := proc(tr, dest: int, start, dur: f32) -> bool {
+		if tr < 0 || tr >= g_nv || tr == dest || track_locked[tr] do return false
+		return !fx_busy(tr, -1, start, dur)
+	}
+	if free(want, dest, start, dur) do return want
+	if want >= g_nv {
+		if nt := add_video_track(); free(nt, dest, start, dur) do return nt
+	}
+	for t in 0 ..< g_nv do if free(t, dest, start, dur) do return t
+	if nt := add_video_track(); free(nt, dest, start, dur) do return nt
+	return -1
+}
+
+add_fxseg_copy :: proc(src: FxSeg, start: f32, track: int) -> int {
+	if nfx >= MAX_FX { set_toast("Máximo de efeitos na timeline"); return -1 }
+	f := src
+	f.start = max(0, start)
+	f.track = clamp(track, 0, g_nv - 1)
+	if f.dur < 0.3 do f.dur = 0.3
+	fxsegs[nfx] = f
+	nfx += 1
+	return nfx - 1
+}
+
+// captura TODOS os ajustes do clipe (inspector) e os efeitos de faixa que o cobrem
+copy_effects :: proc(si: int) -> bool {
+	if si < 0 || si >= nsegs || !seg_ready(si) { set_toast("Selecione um clipe na timeline"); return false }
+	if seg_audio_like(si) { set_toast("Ajustes só em clipes de vídeo"); return false }
+	fx_clipbrd = {}
+	sg := segs[si]
+	fx_clipbrd.attr = sg
+	fx_clipbrd.has_seg = seg_has_adjustments(sg)
+	fx_clipbrd.src_track = sg.track
+	n := 0
+	for k in 0 ..< nfx {
+		if !fx_covers_seg(k, si) do continue
+		c := fxsegs[k]
+		c.start = fxsegs[k].start - sg.start // relativo ao clipe
+		fx_clipbrd.fx[n] = c
+		n += 1
+	}
+	fx_clipbrd.nfx = n
+	// o drop de um efeito na MESMA trilha do vídeo empurra p/ o vão ao lado
+	// (não pode sobrepor). Sem este fallback o copiar do clipe dizia "não tem
+	// efeitos" e o Colar efeitos ficava cinza.
+	if n == 0 {
+		best := -1; bd := f32(1e30)
+		for k in 0 ..< nfx {
+			if fxsegs[k].track != sg.track do continue
+			d: f32 = 0
+			e1 := fxsegs[k].start + fxsegs[k].dur
+			s1 := sg.start + sg.dur
+			if e1 < sg.start + 0.001 do d = sg.start - e1
+			else if fxsegs[k].start > s1 - 0.001 do d = fxsegs[k].start - s1
+			if d < bd { bd = d; best = k }
+		}
+		if best >= 0 {
+			c := fxsegs[best]
+			c.start = 0
+			fx_clipbrd.fx[0] = c
+			fx_clipbrd.nfx = 1
+			fx_clipbrd.cover = true
+			n = 1
+		}
+	}
+	if !fx_clipbrd.has_seg && n == 0 {
+		fx_clipbrd = {}
+		set_toast("Este clipe não tem ajustes")
+		return false
+	}
+	clipbrd_kind = .Fx
+	set_toast("Ajustes copiados — clique direito no outro clipe e Cole ajustes")
+	return true
+}
+
+// copia UM clipe de efeito da faixa (Distorção / RGB): o colar cobre o vídeo-destino
+copy_fx_clip :: proc(fi: int) -> bool {
+	if fi < 0 || fi >= nfx { set_toast("Nenhum efeito selecionado"); return false }
+	fx_clipbrd = {}
+	e := fxsegs[fi]
+	e.start = 0
+	fx_clipbrd.fx[0] = e
+	fx_clipbrd.nfx = 1
+	fx_clipbrd.cover = true
+	fx_clipbrd.src_track = fxsegs[fi].track
+	clipbrd_kind = .Fx
+	set_toast("Efeito copiado — clique direito no outro clipe e Cole ajustes")
+	return true
+}
+
+apply_seg_fx :: proc(si: int) {
+	if si < 0 || si >= nsegs || !fx_clipbrd.has_seg do return
+	sg := &segs[si]
+	a := fx_clipbrd.attr
+	sg.scale = a.scale <= 0 ? 1 : a.scale
+	sg.px = a.px; sg.py = a.py; sg.rot = a.rot
+	sg.opacity = a.opacity <= 0 ? 1 : a.opacity
+	sg.speed = a.speed <= 0 ? 1 : a.speed
+	sg.crop_x = a.crop_x; sg.crop_y = a.crop_y; sg.crop_w = a.crop_w; sg.crop_h = a.crop_h
+	sg.zoom_anim = a.zoom_anim
+	sg.crop2_x = a.crop2_x; sg.crop2_y = a.crop2_y; sg.crop2_w = a.crop2_w; sg.crop2_h = a.crop2_h
+	sg.vfin = a.vfin; sg.vfout = a.vfout; sg.trans = a.trans; sg.trans_mode = a.trans_mode
+	sg.vol = a.vol == 0 ? 1 : a.vol
+	sg.muted = a.muted; sg.fade_in = a.fade_in; sg.fade_out = a.fade_out
+	sg.fx_bright = a.fx_bright; sg.fx_contrast = a.fx_contrast
+	sg.fx_satur = a.fx_satur; sg.fx_look = a.fx_look
+	sg.fx_vignette = a.fx_vignette; sg.fx_temp = a.fx_temp
+	sg.bulge = a.bulge; sg.bulge_x = a.bulge_x; sg.bulge_y = a.bulge_y
+	sg.bulge_r = a.bulge_r; sg.wobble = a.wobble; sg.wobble_speed = a.wobble_speed
+	clamp_fades(sg)
+	// velocidade não pode pedir mais fonte do que o destino tem
+	c := seg_src(si)
+	if !c.is_img && sg.speed > 0 {
+		left := (c.dur - sg.in_off) / sg.speed
+		if sg.dur > left + 0.001 do sg.dur = speed_fit_dur(si, left, left)
+	}
+}
+
+// cola os efeitos do clipboard no clipe `si`. Retorna quantos clipes de efeito foram criados
+// (-1 = recusou). A correção de cor/bulge é aplicada mesmo sem criar faixa.
+paste_effects :: proc(si: int) -> int {
+	if !fx_clipbrd_ok() { set_toast("Nenhum ajuste copiado ainda"); return -1 }
+	if si < 0 || si >= nsegs || !seg_ready(si) do return -1
+	if seg_audio_like(si) { set_toast("Ajustes só em clipes de vídeo"); return -1 }
+	if track_locked[segs[si].track] { set_toast("Trilha bloqueada"); return -1 }
+	if fx_clipbrd.has_seg do apply_seg_fx(si)
+	sg := segs[si]
+	placed := 0; skipped := 0
+	for k in 0 ..< fx_clipbrd.nfx {
+		e := fx_clipbrd.fx[k]
+		start := fx_clipbrd.cover ? sg.start : sg.start + e.start
+		dur := fx_clipbrd.cover ? sg.dur : e.dur
+		start = max(0, start)
+		if dur < 0.3 do dur = 0.3
+		tr := fx_place_track(si, e.track, start, dur)
+		if tr < 0 { skipped += 1; continue }
+		e.dur = dur
+		if add_fxseg_copy(e, start, tr) >= 0 do placed += 1
+		else { skipped += 1; break }
+	}
+	if placed > 0 || fx_clipbrd.has_seg {
+		if skipped > 0 && placed == 0 do set_toast("Ajustes colados — sem espaço p/ o efeito de faixa")
+		else if skipped > 0 do set_toast(rl.TextFormat("Ajustes colados (%d sem espaço)", skipped))
+		else do set_toast("Ajustes colados")
+	} else if skipped > 0 {
+		set_toast("Sem espaço livre p/ o efeito")
+	}
+	return placed
+}
+
+// cola os clipes de efeito no tempo `at` da trilha `tr` (vão vazio / Ctrl+V sem clipe).
+// se houver um vídeo nesse ponto, aplica nele (cobre o destino).
+paste_fx_at :: proc(tr: int, at: f32) -> int {
+	if !fx_clipbrd_ok() { set_toast("Nenhum ajuste copiado ainda"); return -1 }
+	if si := seg_on_track_at(tr, at); si >= 0 && !seg_audio_like(si) do return paste_effects(si)
+	if fx_clipbrd.nfx == 0 {
+		set_toast("Clique direito num clipe de vídeo p/ colar os ajustes")
+		return -1
+	}
+	if is_audio_track(tr) { set_toast("Efeitos só em trilha de vídeo"); return -1 }
+	if tr >= 0 && tr < MAXTRACKS && track_locked[tr] { set_toast("Trilha bloqueada"); return -1 }
+	placed := 0
+	for k in 0 ..< fx_clipbrd.nfx {
+		e := fx_clipbrd.fx[k]
+		start := max(0, at + (fx_clipbrd.cover ? 0 : e.start))
+		dur := e.dur
+		if dur < 0.3 do dur = 0.3
+		tgt := tr
+		if tgt < 0 || tgt >= g_nv || track_locked[tgt] || fx_busy(tgt, -1, start, dur) {
+			tgt = -1
+			for t in 0 ..< g_nv {
+				if track_locked[t] || fx_busy(t, -1, start, dur) do continue
+				tgt = t; break
+			}
+			if tgt < 0 do tgt = add_video_track()
+			if tgt < 0 || fx_busy(tgt, -1, start, dur) {
+				base := (tr >= 0 && tr < g_nv) ? tr : 0
+				start = fx_free_start(base, -1, start, dur)
+				tgt = base
+			}
+		}
+		e.dur = dur
+		if add_fxseg_copy(e, start, tgt) >= 0 do placed += 1
+	}
+	if placed > 0 do set_toast(placed == 1 ? "Efeito colado" : rl.TextFormat("%d efeitos colados", placed))
+	else do set_toast("Sem espaço livre p/ o efeito")
+	return placed
+}
+
+// cola nos marcados (grupo) ou só no `si`. Um toast só no fim.
+paste_effects_targets :: proc(si: int) {
+	if !fx_clipbrd_ok() { set_toast("Nenhum ajuste copiado ainda"); return }
+	grp := si >= 0 && si < nsegs && seg_marks_count() > 1 && seg_marked[si]
+	ok := 0
+	if grp {
+		for i in 0 ..< nsegs {
+			if !seg_marked[i] || !seg_ready(i) || seg_audio_like(i) || track_locked[segs[i].track] do continue
+			if paste_effects(i) >= 0 do ok += 1
+		}
+	} else if paste_effects(si) >= 0 {
+		ok = 1
+	}
+	if ok > 1 do set_toast(rl.TextFormat("Ajustes colados em %d clipes", ok))
+}
+
 // copia o grupo marcado (se houver) ou o segmento selecionado; retorna quantos
 copy_segs :: proc() -> int {
 	n := 0
@@ -517,6 +774,7 @@ copy_segs :: proc() -> int {
 	}
 	if n > 0 {
 		seg_clipbrd_n = n
+		clipbrd_kind = .Segs
 		if n == 1 do set_toast("Clipe copiado — Ctrl+V cola no playhead")
 		else do set_toast(rl.TextFormat("%d clipes copiados — Ctrl+V cola no playhead", n))
 	} else {
@@ -1339,6 +1597,15 @@ do_redo :: proc() {
 	snap_apply(redo_stack[redo_top])
 	restore_after()
 	set_toast("Refazer")
+}
+
+// clique num clipe: se o playhead NÃO está sobre ele, vai para o início.
+// já em cima (inclusive no frame inicial) = não mexe — o usuário está vendo o clipe.
+seek_to_seg_if_outside :: proc(si: int) {
+	if si < 0 || si >= nsegs || !seg_ready(si) do return
+	sg := segs[si]
+	if st.playhead >= sg.start && st.playhead < sg.start + sg.dur do return
+	seek_global(sg.start)
 }
 
 // reposiciona a timeline inteira para o tempo t (seek instantâneo)

@@ -37,6 +37,8 @@ t_reset :: proc() {
 	aud_prev = -1
 	snap_line = -1
 	seg_clipbrd_n = 0
+	fx_clipbrd = {}
+	clipbrd_kind = .None
 	toast_msg = nil // abandona o toast do teste ANTERIOR: liberar aqui seria "bad free"
 	                // (o rastreador de memória é por-teste). O toast do próprio teste
 	                // aparece como "leak" de ~30B no log — inofensivo; p/ silenciar,
@@ -683,6 +685,24 @@ ripple_nao_puxa_playhead_de_outra_trilha :: proc(t: ^testing.T) {
 }
 
 @(test)
+seek_to_seg_if_outside_pula_so_quando_fora :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10)   // [0,10)
+	b := add_seg(1, 20, 0, 10)  // [20,30)
+	st.playhead = 5
+	seek_to_seg_if_outside(a)
+	testing.expect(t, t_feq(st.playhead, 5), "já está sobre o clipe: cursor fica")
+	seek_to_seg_if_outside(b)
+	testing.expect(t, t_feq(st.playhead, 20), "fora do clipe: cursor vai ao início")
+	st.playhead = 30 // fim EXATO de B — não está DENTRO
+	seek_to_seg_if_outside(b)
+	testing.expect(t, t_feq(st.playhead, 20), "no fim exato não está SOBRE: volta ao início")
+	st.playhead = 25
+	seek_to_seg_if_outside(-1)
+	testing.expect(t, t_feq(st.playhead, 25), "índice inválido não mexe")
+}
+
+@(test)
 view_seg_pula_trilha_oculta_e_usa_view_t :: proc(t: ^testing.T) {
 	t_reset()
 	add_seg(0, 0, 0, 10, 0) // V1
@@ -870,4 +890,112 @@ fecha_vao_trilha_travada :: proc(t: ^testing.T) {
 	track_locked[0] = true
 	testing.expect(t, !close_gap(0, 5, 12), "cadeado recusa")
 	testing.expect(t, t_feq(segs[1].start, 12), "nada moveu")
+}
+
+@(test)
+copiar_colar_efeitos_de_cor :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10, 0)
+	b := add_seg(1, 20, 0, 8, 0)
+	segs[a].fx_bright = 0.4
+	segs[a].fx_look = 2
+	segs[a].fx_vignette = 0.6
+	segs[a].bulge = 0.35
+	testing.expect(t, copy_effects(a), "copia os efeitos do primeiro")
+	testing.expect(t, fx_clipbrd_ok(), "clipboard de efeitos preenchido")
+	testing.expect(t, paste_effects(b) >= 0, "cola no segundo")
+	testing.expect(t, t_feq(segs[b].fx_bright, 0.4) && t_feq(segs[b].fx_look, 2), "cor colada")
+	testing.expect(t, t_feq(segs[b].fx_vignette, 0.6) && t_feq(segs[b].bulge, 0.35), "vinheta/distorção coladas")
+	testing.expect(t, segs[b].src == 1 && t_feq(segs[b].start, 20), "o clipe-destino não muda de mídia nem de tempo")
+}
+
+@(test)
+copiar_colar_ajustes_do_inspector :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10, 0)
+	b := add_seg(1, 20, 0, 8, 0)
+	segs[a].scale = 1.4
+	segs[a].px = 0.2
+	segs[a].py = -0.15
+	segs[a].rot = 12
+	segs[a].opacity = 0.7
+	segs[a].speed = 2
+	segs[a].crop_x = 0.1; segs[a].crop_y = 0.1; segs[a].crop_w = 0.6; segs[a].crop_h = 0.6
+	segs[a].vol = 0.5
+	segs[a].vfin = 0.4
+	testing.expect(t, copy_effects(a), "copia os ajustes do inspector")
+	testing.expect(t, paste_effects(b) >= 0, "cola no segundo")
+	testing.expect(t, t_feq(segs[b].scale, 1.4) && t_feq(segs[b].px, 0.2) && t_feq(segs[b].py, -0.15), "transform")
+	testing.expect(t, t_feq(segs[b].rot, 12) && t_feq(segs[b].opacity, 0.7), "rotação/opacidade")
+	testing.expect(t, t_feq(segs[b].speed, 2) && t_feq(segs[b].vol, 0.5), "velocidade/volume")
+	testing.expect(t, t_feq(segs[b].crop_w, 0.6) && t_feq(segs[b].vfin, 0.4), "recorte e fade")
+	testing.expect(t, segs[b].src == 1 && t_feq(segs[b].start, 20), "não troca o vídeo nem o tempo")
+}
+
+@(test)
+copiar_efeitos_vazio_nao_suja_clipboard :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 5)
+	testing.expect(t, !copy_effects(a), "sem ajustes: recusa")
+	testing.expect(t, !fx_clipbrd_ok(), "clipboard continua vazio")
+}
+
+@(test)
+colar_efeitos_de_faixa_no_outro_video :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10, 0)   // V1 [0,10)
+	b := add_seg(1, 20, 0, 10, 0)  // V1 [20,30)
+	nfx = 1
+	fxsegs[0] = FxSeg{ kind = FX_DISTORT, track = 1, start = 2, dur = 4, amount = 0.7, radius = 0.4 }
+	testing.expect(t, copy_effects(a), "copia o efeito que cobre o 1º clipe")
+	testing.expect(t, fx_clipbrd.nfx == 1, "1 efeito de faixa no clipboard")
+	n0 := nfx
+	testing.expect(t, paste_effects(b) == 1, "cria o efeito sobre o 2º")
+	testing.expect(t, nfx == n0 + 1, "mais um clipe de efeito")
+	e := fxsegs[nfx - 1]
+	testing.expect(t, e.kind == FX_DISTORT && t_feq(e.amount, 0.7), "parâmetros iguais")
+	testing.expect(t, t_feq(e.start, 22) && t_feq(e.dur, 4), "realinhado no destino (offset 2s)")
+	testing.expect(t, e.track != segs[b].track, "não pousa em cima do vídeo-destino")
+	testing.expect(t, e.track >= segs[b].track, "rege o destino (trilha >=)")
+}
+
+@(test)
+copiar_efeito_ao_lado_do_clipe_na_mesma_trilha :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10, 0) // [0,10)
+	b := add_seg(1, 20, 0, 8, 0)
+	nfx = 1
+	fxsegs[0] = FxSeg{ kind = FX_RGB, track = 0, start = 10, dur = 3, amount = 0.8, angle = 0.1 }
+	testing.expect(t, copy_effects(a), "efeito no vão ao lado conta como efeito do clipe")
+	testing.expect(t, fx_clipbrd.nfx == 1 && fx_clipbrd.cover, "vai cobrir o destino")
+	testing.expect(t, paste_effects(b) == 1, "cola no outro vídeo")
+	e := fxsegs[nfx - 1]
+	testing.expect(t, e.kind == FX_RGB && t_feq(e.amount, 0.8), "parâmetros")
+	testing.expect(t, t_feq(e.start, 20) && t_feq(e.dur, 8), "cobre o destino")
+}
+
+@(test)
+colar_efeito_no_vao_vazio :: proc(t: ^testing.T) {
+	t_reset()
+	nfx = 1
+	fxsegs[0] = FxSeg{ kind = FX_DISTORT, track = 1, start = 0, dur = 3, amount = 0.4 }
+	testing.expect(t, copy_fx_clip(0), "copia o clipe de efeito")
+	testing.expect(t, clipbrd_kind == .Fx, "área de transferência é de efeito")
+	testing.expect(t, paste_fx_at(0, 12) == 1, "cola no vão")
+	e := fxsegs[nfx - 1]
+	testing.expect(t, t_feq(e.start, 12) && e.track == 0, "no tempo e trilha do clique")
+}
+
+@(test)
+copiar_clipe_de_efeito_cobre_o_destino :: proc(t: ^testing.T) {
+	t_reset()
+	b := add_seg(0, 15, 0, 6, 0)
+	nfx = 1
+	fxsegs[0] = FxSeg{ kind = FX_RGB, track = 1, start = 0, dur = 3, amount = 0.55, angle = 0.25 }
+	testing.expect(t, copy_fx_clip(0), "copia o clipe de efeito")
+	testing.expect(t, fx_clipbrd.cover, "colar cobre o destino inteiro")
+	testing.expect(t, paste_effects(b) == 1, "cola cobrindo o vídeo")
+	e := fxsegs[nfx - 1]
+	testing.expect(t, e.kind == FX_RGB && t_feq(e.amount, 0.55), "tipo e intensidade")
+	testing.expect(t, t_feq(e.start, 15) && t_feq(e.dur, 6), "cobre [15,21) do destino")
 }
