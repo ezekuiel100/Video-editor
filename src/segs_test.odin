@@ -748,22 +748,22 @@ scrub_thumb_so_se_mais_perto_que_o_frame :: proc(t: ^testing.T) {
 }
 
 @(test)
-scrub_arrasto_nao_usa_filmstrip_no_player :: proc(t: ^testing.T) {
-	// a política do player: arrastando, a thumb NÃO substitui o frame — mesmo quando
-	// scrub_use_thumb diria que ela está mais perto. Senão o canvas estica 256×144.
+scrub_arrasto_usa_filmstrip_quando_frame_atrasado :: proc(t: ^testing.T) {
+	// arrastando um vídeo LONGO o 720p não acompanha: a thumb mais perto do cursor
+	// entra no player (cena certa). Perto do frame nítido (≤4s) o 720p continua.
 	t_reset()
 	c := &clips[0]
 	c.nthumbs = 36
 	c.thumb_dt = 100
 	c.tex_t = 50
-	testing.expect(t, scrub_use_thumb(c, 150), "parado: thumb vence (cena certa)")
 	st.drag = .Playhead
-	testing.expect(t, !scrub_player_uses_thumb(c, 150), "arrasto na régua: fica o 720p")
+	testing.expect(t, scrub_player_uses_thumb(c, 150), "arrasto longe: thumb da cena certa")
+	testing.expect(t, !scrub_player_uses_thumb(c, 53), "arrasto perto: fica o 720p")
 	st.drag = .None
 	player_seek_drag = true
-	testing.expect(t, !scrub_player_uses_thumb(c, 150), "arrasto na barra: fica o 720p")
+	testing.expect(t, scrub_player_uses_thumb(c, 150), "barra longe: mesma regra")
 	player_seek_drag = false
-	testing.expect(t, scrub_player_uses_thumb(c, 150), "parado de novo: thumb pode entrar")
+	testing.expect(t, scrub_player_uses_thumb(c, 150), "parado longe: thumb também")
 }
 
 @(test)

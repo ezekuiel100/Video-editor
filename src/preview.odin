@@ -690,10 +690,11 @@ scrub_use_thumb :: proc(c: ^Clip, lt: f32) -> bool {
 	return abs(lt - thumb_t) < err_tex
 }
 
-// o player só cai no filmstrip com o cursor PARADO. Arrasto (régua ou barra) mantém
-// o último frame nítido — esticar 256×144 no canvas era a queda de qualidade.
+// player e arrasto usam a MESMA regra: frame nítido se está perto; senão a miniatura
+// mais próxima do cursor. Barrar o filmstrip no arrasto deixava o 720p CONGELADO o
+// gesto inteiro num vídeo de horas (o worker não alcança). 256×144 é borrado, mas
+// a cena CERTA — e o worker substitui pelo 720p quando chega.
 scrub_player_uses_thumb :: proc(c: ^Clip, lt: f32) -> bool {
-	if st.drag == .Playhead || player_seek_drag do return false
 	return scrub_use_thumb(c, lt)
 }
 
@@ -737,11 +738,9 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	if seg_is_dup(i) && seg_dup[i].ok && seg_dup[i].src == sg.src do tex = seg_dup[i].tex
 	else if !c.tex_ok do return
 	else if c.streaming && c.thumbs_ready && c.nthumbs > 0 {
-		// clique-seek PARADO: se o frame nítido está longe e a miniatura está mais perto
-		// do alvo, mostra o filmstrip (cena certa, borrada) até o worker chegar.
-		// ARRASTO do cursor / barra: NUNCA troca por thumb — 256×144 esticado no canvas
-		// é o "a qualidade caiu". Fica o último 720p; o worker substitui quando decodifica.
-		// Playback contínuo também não pisca thumb (catch-up).
+		// seek/arrasto: se o frame nítido está longe e a miniatura está mais perto do
+		// alvo, mostra o filmstrip (cena certa, borrada) até o worker chegar. Playback
+		// contínuo não pisca thumb (catch-up).
 		lt := seg_local(i, vt)
 		dragging := st.drag == .Playhead || player_seek_drag
 		waiting := dragging || !st.playing || intrinsics.atomic_load(&c.rsp_busy)

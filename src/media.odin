@@ -51,11 +51,16 @@ stream_dh :: proc() -> i32 { return stream_hi ? STREAM_HI_H : STREAM_LO_H }
 // demais: num arrasto lento fundo num vídeo de horas cada seek custa MAIS que 1.5s de
 // movimento do playhead, então o worker nunca chegava a <1.5s e o preview vivia preso na
 // miniatura borrada. 4s mantém o frame REAL (360/720p, levemente atrás do cursor) na tela
-// enquanto o worker persegue. Saltos grandes com o player PARADO (clique-seek) passam de 4s
-// e ainda mostram a miniatura na POSIÇÃO certa. No ARRASTO do cursor a miniatura NÃO entra
-// no player (qualidade): fica o último frame nítido. Cache (clipes curtos) decodifica ao
-// vivo — nunca cai aqui.
+// enquanto o worker persegue. Saltos grandes (clique-seek OU arrasto rápido) passam de 4s
+// e mostram a miniatura na POSIÇÃO certa — senão o player fica CONGELADO no último 720p
+// enquanto o ffmpeg ainda está no seek do ponto antigo. Cache (clipes curtos) decodifica
+// ao vivo — nunca cai aqui.
 SCRUB_SHARP_S :: f32(4.0)
+// mata o ffmpeg de scrub em voo se o cursor pulou mais que isto (s da fonte). Sem isto o
+// worker termina um decode de 0.5–2s do ponto ONDE o arrasto começou e só então pega o
+// alvo novo — no meio o player não recebe frame nenhum. O kill desbloqueia o read e o
+// próximo giro decodifica o tempo ATUAL.
+SCRUB_ABORT_S :: f32(2.0)
 // scrub: acima desta latência (ms) de um decode de scrub por SOFTWARE, o clipe migra p/
 // NVDEC no scrub (c.scrub_hw). 700ms é conservador: mesmo o pior init de cuvid (~575ms) +
 // decode (~23ms) fica abaixo, então trocar SEMPRE melhora onde dispara (codec pesado).
@@ -154,6 +159,13 @@ scrub_done_sf:int           // bytes/frame com que o worker decodificou — a ma
 scrub_last_ms:f64           // duração do último decode de scrub (diagnóstico, HUD F3)
 scrub_run:    bool          // atômico: worker ativo
 scrub_thr:    ^thread.Thread
+// ffmpeg do decode de scrub EM VOO: a main mata se o cursor pulou (ver scrub_abort_if_stale).
+// Mesmo padrão do export_ps: o worker zera `ok` ANTES do process_wait (o core:os fecha o
+// handle lá) pra um kill concorrente não operar sobre PID reciclado.
+scrub_ps_mu: sync.Mutex
+scrub_ps:    os.Process
+scrub_ps_ok: bool
+scrub_work_t: f32           // alvo que o worker está decodificando agora
 
 // --- vista DUPLICADA por segmento: quando a MESMA fonte aparece em 2+ trilhas de
 // vídeo sob o playhead, um Clip só (1 textura, 1 decoder) não serve 2 tempos — as
@@ -1469,6 +1481,11 @@ scrub_decode_frame :: proc(c: ^Clip, t: f32, buf: []u8, fast := false) -> bool {
 		os.close(w)
 		if pe != nil { os.close(r); return false }
 		tame_process(c, p, false)
+		if fast {
+			sync.mutex_lock(&scrub_ps_mu)
+			scrub_ps = p; scrub_ps_ok = true; scrub_work_t = t
+			sync.mutex_unlock(&scrub_ps_mu)
+		}
 		total := 0
 		for total < sf {
 			n, re := os.read(r, buf[total:sf])
@@ -1476,6 +1493,9 @@ scrub_decode_frame :: proc(c: ^Clip, t: f32, buf: []u8, fast := false) -> bool {
 			if n == 0 || re != nil do break
 		}
 		os.close(r)
+		if fast {
+			sync.mutex_lock(&scrub_ps_mu); scrub_ps_ok = false; sync.mutex_unlock(&scrub_ps_mu)
+		}
 		_, _ = os.process_wait(p)
 		if intrinsics.atomic_load(&app_closing) do return false // fechando: não retenta por software
 		if total == sf do return true
@@ -1510,6 +1530,12 @@ scrub_worker :: proc() {
 						clips[ci].scrub_hw = true
 						dbg("SCRUBHW", "clip='%s' migrado p/ NVDEC no scrub (decode SW levou %.0fms > %.0f)", clips[ci].name, scrub_last_ms, SCRUB_HW_MS)
 					}
+					// o arrasto já foi pra longe: publicar este frame PLANTARIA a cena velha
+					// por cima do filmstrip certo. Descarta e o próximo giro pega o alvo atual.
+					if abs(scrub_req_t - st0) > SCRUB_SHARP_S {
+						dbg("SCRUB", "clip=%d t=%.1fs DESCARTADO (cursor em %.1fs)", ci, st0, scrub_req_t)
+						continue
+					}
 					dbg("SCRUB", "clip=%d t=%.1fs %s %.0fms", ci, st0, clips[ci].scrub_hw ? "HW" : "SW", scrub_last_ms)
 					scrub_done_c = ci
 					scrub_done_t = st0
@@ -1541,6 +1567,16 @@ scrub_worker :: proc() {
 		}
 		time.sleep(4 * time.Millisecond)
 	}
+}
+
+// main: se o cursor pulou longe do decode em voo, mata o ffmpeg. O worker está
+// bloqueado no read; o kill faz o pipe dar EOF e ele recomeça no alvo ATUAL.
+scrub_abort_if_stale :: proc() {
+	sync.mutex_lock(&scrub_ps_mu)
+	defer sync.mutex_unlock(&scrub_ps_mu)
+	if !scrub_ps_ok do return
+	if abs(scrub_req_t - scrub_work_t) <= SCRUB_ABORT_S do return
+	_ = os.process_kill(scrub_ps)
 }
 
 // (worker) spawna um decoder ao vivo p/ a vista dup em `t` e lê o 1º frame p/

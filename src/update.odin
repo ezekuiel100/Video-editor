@@ -578,6 +578,7 @@ update :: proc() {
 
 	// scrub streaming: sobe o frame que o worker decodificou (só na main thread);
 	// fora do scrub, deixa o worker ocioso.
+	if st.drag == .Playhead || player_seek_drag do scrub_abort_if_stale()
 	if st.drag != .Playhead && !player_seek_drag do intrinsics.atomic_store(&scrub_req_c, -1)
 	if intrinsics.atomic_load(&scrub_ready) {
 		dc := scrub_done_c
