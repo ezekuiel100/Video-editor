@@ -523,7 +523,7 @@ draw_modal :: proc(sw, sh: f32) {
 				if clicked(chk) do export_gpu = !export_gpu
 				rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, export_gpu ? ACCENT : MUTED)
 				if export_gpu do rl.DrawRectangleRec({ chk.x + 4, chk.y + 4, 10, 10 }, ACCENT)
-				txt("Ativar codificação com GPU (NVENC)", px + 26, py + 2, 13, TEXT)
+				txt("GPU (NVENC) — bem mais rápido", px + 26, py + 2, 13, TEXT)
 			} else {
 				rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, MUTED)
 				txt("GPU (NVENC) indisponível — usa CPU", px + 26, py + 2, 13, MUTED)

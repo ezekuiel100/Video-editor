@@ -591,6 +591,11 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			segW, segH := seg_export_dims(i, W, H)
 			op := sg.opacity <= 0 ? 1 : sg.opacity
 			sp := sg.speed <= 0 ? 1 : sg.speed
+			// rgba só quando o overlay PRECISA de alpha (opacidade, giro, fade, dissolver).
+			// No recorte simples o yuv420p evita 4 bytes/pixel + conversão no overlay — o
+			// caminho mais comum (cortar e exportar) saía ~1.5–2× mais lento à toa.
+			need_a := op < 0.999 || abs(sg.rot) > 0.5 || fin > 0.01 || fout > 0.01 || sg.vfin > 0.01 || sg.vfout > 0.01 || sg.trans_mode == 1 || ghost_out_d[i] > 0.01
+			pix := need_a ? "rgba" : "yuv420p"
 			// vídeo consome (in_off-hd)..(in_off+dur*sp+tl) — hd=pré-roll, tl=pós-roll do
 			// dissolver; imagem usa o input em loop. setpts posiciona em start2.
 			// FOLGA insuficiente: se a fonte não tem footage p/ o pré/pós-roll, apara só o
@@ -668,18 +673,18 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				// fps=30 ANTES do zoompan: com d=1 ele emite 1 frame de saída por frame de
 				// ENTRADA; sem normalizar, fonte !=30fps (ex.: 60fps de stream) muda a duração
 				// do vídeo e DESSINCRONIZA do áudio. Normaliza p/ 30fps -> dur*30 frames exatos.
-				fmt.sbprintf(&fb, ",fps=30%s,zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,setpts=PTS+%.3f/TB,format=rgba",
-					padf, zexpr, xexpr, yexpr, segW, segH, start2)
+				fmt.sbprintf(&fb, ",fps=30%s,zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,setpts=PTS+%.3f/TB,format=%s",
+					padf, zexpr, xexpr, yexpr, segW, segH, start2, pix)
 			} else {
 				// RECORTE estático: mantém só a sub-região (frações da fonte) antes de escalar
 				if seg_cropped(i) do fmt.sbprintf(&fb, ",crop=iw*%.5f:ih*%.5f:iw*%.5f:ih*%.5f", crw, crh, crx, cry)
 				fmt.sbprintf(&fb, ",scale=%d:%d", segW, segH)
 				// distorce via remap ANTES da rotação; reposiciona em start2 após.
 				if bulge_xin[i] >= 0 {
-					fmt.sbprintf(&fb, ",fps=30,format=rgb24[bpre%d];[bpre%d][%d:v][%d:v]remap[brm%d];[brm%d]setpts=PTS+%.3f/TB,format=rgba",
-						vc, vc, bulge_xin[i], bulge_yin[i], vc, vc, start2)
+					fmt.sbprintf(&fb, ",fps=30,format=rgb24[bpre%d];[bpre%d][%d:v][%d:v]remap[brm%d];[brm%d]setpts=PTS+%.3f/TB,format=%s",
+						vc, vc, bulge_xin[i], bulge_yin[i], vc, vc, start2, pix)
 				} else {
-					fmt.sbprintf(&fb, ",format=rgba")
+					fmt.sbprintf(&fb, ",format=%s", pix)
 				}
 			}
 			// EFEITOS de cor ANTES da rotação: eq/hue convertem p/ YUV (sem alpha); aplicar
@@ -816,16 +821,27 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	case .Low:    cq, crf = "32", "28"
 	case .Auto:   cq, crf = "25", "22" // qualidade preservada; o -maxrate abaixo segura o tamanho
 	}
+	// PRESET DE VELOCIDADE: o CQ/CRF manda no tamanho; o preset manda no TEMPO. Antes tudo
+	// ia em NVENC p5 / x264 veryfast — a Média e a Baixa demoravam o mesmo que a Alta.
+	// p1 é ~2–3× p5 no mesmo CQ; ultrafast é o atalho da Baixa em CPU. VP9 sem -cpu-used
+	// (default 1) era o caminho mais lento do modal — 4/6 deixa o WEBM utilizável.
+	nvenc_pr, x26x_pr, vp9_cpu: string
+	switch export_qual {
+	case .High:   nvenc_pr, x26x_pr, vp9_cpu = "p5", "veryfast", "2"
+	case .Medium: nvenc_pr, x26x_pr, vp9_cpu = "p4", "veryfast", "4"
+	case .Low:    nvenc_pr, x26x_pr, vp9_cpu = "p1", "ultrafast", "6"
+	case .Auto:   nvenc_pr, x26x_pr, vp9_cpu = "p4", "veryfast", "4"
+	}
 	// codec por FORMATO. NVENC (GPU) vale p/ H.264 e HEVC; VP9 é sempre por software.
 	switch export_fmt {
 	case .MP4:
-		if gpu do append(&args, "-c:v", "h264_nvenc", "-preset", "p5", "-cq", cq, "-pix_fmt", "yuv420p", "-r", "30")
-		else    do append(&args, "-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p", "-r", "30")
+		if gpu do append(&args, "-c:v", "h264_nvenc", "-preset", nvenc_pr, "-cq", cq, "-pix_fmt", "yuv420p", "-r", "30")
+		else    do append(&args, "-c:v", "libx264", "-preset", x26x_pr, "-crf", crf, "-pix_fmt", "yuv420p", "-r", "30")
 	case .HEVC: // -tag:v hvc1 = players (QuickTime/Apple) reconhecem o HEVC no .mp4
-		if gpu do append(&args, "-c:v", "hevc_nvenc", "-preset", "p5", "-cq", cq, "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-r", "30")
-		else    do append(&args, "-c:v", "libx265", "-preset", "veryfast", "-crf", crf, "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-r", "30")
-	case .WEBM: // VP9 não tem NVENC utilizável aqui; -b:v 0 = modo CRF puro; row-mt acelera
-		append(&args, "-c:v", "libvpx-vp9", "-crf", crf, "-b:v", "0", "-row-mt", "1", "-pix_fmt", "yuv420p", "-r", "30")
+		if gpu do append(&args, "-c:v", "hevc_nvenc", "-preset", nvenc_pr, "-cq", cq, "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-r", "30")
+		else    do append(&args, "-c:v", "libx265", "-preset", x26x_pr, "-crf", crf, "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-r", "30")
+	case .WEBM: // VP9 não tem NVENC utilizável aqui; -b:v 0 = modo CRF puro; row-mt + cpu-used aceleram
+		append(&args, "-c:v", "libvpx-vp9", "-crf", crf, "-b:v", "0", "-row-mt", "1", "-cpu-used", vp9_cpu, "-pix_fmt", "yuv420p", "-r", "30")
 	case .MP3: // só áudio: descarta o vídeo por completo
 		append(&args, "-vn")
 	}

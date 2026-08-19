@@ -649,3 +649,65 @@ export_aparicao_nao_some_o_clipe_de_saida :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(g, "fade=t=out"), "opacidade vai no geq, não no fade")
 	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.500"), "sem fade-in cheio de dissolver")
 }
+
+// Clipe opaco, sem giro/fade/dissolver: yuv420p no overlay (rgba 4 bytes/pixel era o
+// default e deixava o recorte simples ~1.5–2× mais lento). Transparência continua rgba.
+@(test)
+export_clipe_simples_nao_usa_rgba :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "format=yuv420p[v0]"), "recorte simples: overlay em yuv420p")
+	testing.expect(t, !strings.contains(g, "format=rgba[v0]"), "rgba no clipe opaco é custo à toa")
+}
+
+@(test)
+export_opacidade_continua_em_rgba :: proc(t: ^testing.T) {
+	t_export_reset()
+	si := add_seg(0, 0, 0, 10)
+	segs[si].opacity = 0.5
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "format=rgba"), "opacidade < 1 precisa de alpha no overlay")
+}
+
+// Presets de VELOCIDADE (não confundir com CRF): Baixa tem de sair mais rápida que Média,
+// senão o botão só muda o tamanho do arquivo e o usuário acha que "não tem como acelerar".
+@(test)
+export_baixa_usa_preset_rapido_na_cpu :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	export_qual = .Low
+	args, _ := t_build(t)
+	p, ok := t_arg_after(args, "-preset")
+	testing.expect(t, ok && p == "ultrafast", "Baixa em CPU: ultrafast")
+	export_qual = .Medium
+	args, _ = t_build(t)
+	p, ok = t_arg_after(args, "-preset")
+	testing.expect(t, ok && p == "veryfast", "Média em CPU: veryfast")
+}
+
+@(test)
+export_gpu_media_nao_fica_em_p5 :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	args, _, ok := export_build_args("saida.mp4", true, true)
+	testing.expect(t, ok, "montagem GPU recusada")
+	p, has := t_arg_after(args, "-preset")
+	testing.expect(t, has && p == "p4", "Média em NVENC: p4 (p5 era o lento de antes)")
+	export_qual = .Low
+	args, _, ok = export_build_args("saida.mp4", true, true)
+	testing.expect(t, ok, "montagem GPU Baixa recusada")
+	p, has = t_arg_after(args, "-preset")
+	testing.expect(t, has && p == "p1", "Baixa em NVENC: p1")
+}
+
+@(test)
+export_webm_usa_cpu_used :: proc(t: ^testing.T) {
+	t_export_reset()
+	export_fmt = .WEBM
+	add_seg(0, 0, 0, 10)
+	args, _ := t_build(t)
+	v, ok := t_arg_after(args, "-cpu-used")
+	testing.expect(t, ok && v == "4", "WEBM Média sem -cpu-used (default 1) é o export mais lento")
+	export_fmt = .MP4
+}
