@@ -773,44 +773,25 @@ draw_timeline :: proc(r: rl.Rectangle) {
 
 	draw_fx_on_tracks(rows_clip) // barras de EFEITO por cima dos clipes, na trilha de cada um
 
-	// vão selecionado / hover: retângulo no buraco entre clipes + X p/ fechar
+	// vão selecionado: retângulo no buraco entre clipes + X p/ fechar (só no clique, não no hover)
 	sync_sel_gap()
-	if !blade_mode && st.drag == .None && modal == .None && !tl_marquee {
-		gtr := -1
-		gt0, gt1: f32
-		g_sel := sel_gap_ok()
-		if g_sel {
-			gtr = sel_gap_track; gt0 = sel_gap_t0; gt1 = sel_gap_t1
-		} else if hovered(vlane) {
-			mpg := rl.GetMousePosition()
-			htr := track_at_y(mpg.y)
-			if !track_locked[htr] {
-				if hok, h0, h1 := find_gap_at(htr, tl_t(mpg.x)); hok {
-					gtr = htr; gt0 = h0; gt1 = h1
-				}
-			}
-		}
-		if gtr >= 0 {
-			gx0 := tl_x(gt0)
-			gx1 := tl_x(gt1)
-			gr := rl.Rectangle{ gx0, track_y(gtr) + 4, max(gx1 - gx0, 2), th(gtr) - 8 }
-			gold := rl.Color{ 245, 200, 70, 235 }
-			if g_sel {
-				rl.DrawRectangleRec(gr, rl.Color{ 245, 200, 70, 28 })
-				rl.DrawRectangleRoundedLinesEx(gr, 0.06, 4, 2, gold)
-				if gr.width > 26 {
-					xr := rl.Rectangle{ gr.x + gr.width - 18, gr.y + 2, 14, 14 }
-					rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : rl.Color{ 60, 64, 74, 220 })
-					rl.DrawLineEx({ xr.x + 4, xr.y + 4 }, { xr.x + 10, xr.y + 10 }, 1.6, rl.WHITE)
-					rl.DrawLineEx({ xr.x + 10, xr.y + 4 }, { xr.x + 4, xr.y + 10 }, 1.6, rl.WHITE)
-					if clicked(xr) {
-						close_gap(gtr, gt0, gt1)
-						consumed = true
-					}
-				}
-			} else {
-				rl.DrawRectangleRec(gr, rl.Color{ 245, 200, 70, 14 })
-				rl.DrawRectangleRoundedLinesEx(gr, 0.06, 4, 1.2, rl.Color{ 245, 200, 70, 140 })
+	if !blade_mode && st.drag == .None && modal == .None && !tl_marquee && sel_gap_ok() {
+		gtr := sel_gap_track
+		gt0, gt1 := sel_gap_t0, sel_gap_t1
+		gx0 := tl_x(gt0)
+		gx1 := tl_x(gt1)
+		gr := rl.Rectangle{ gx0, track_y(gtr) + 4, max(gx1 - gx0, 2), th(gtr) - 8 }
+		gold := rl.Color{ 245, 200, 70, 235 }
+		rl.DrawRectangleRec(gr, rl.Color{ 245, 200, 70, 28 })
+		rl.DrawRectangleRoundedLinesEx(gr, 0.06, 4, 2, gold)
+		if gr.width > 26 {
+			xr := rl.Rectangle{ gr.x + gr.width - 18, gr.y + 2, 14, 14 }
+			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : rl.Color{ 60, 64, 74, 220 })
+			rl.DrawLineEx({ xr.x + 4, xr.y + 4 }, { xr.x + 10, xr.y + 10 }, 1.6, rl.WHITE)
+			rl.DrawLineEx({ xr.x + 10, xr.y + 4 }, { xr.x + 4, xr.y + 10 }, 1.6, rl.WHITE)
+			if clicked(xr) {
+				close_gap(gtr, gt0, gt1)
+				consumed = true
 			}
 		}
 	}
