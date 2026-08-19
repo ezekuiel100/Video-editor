@@ -937,6 +937,9 @@ draw_timeline :: proc(r: rl.Rectangle) {
 				drag_trim = edge
 				selected = hit // foco (para inspector/remover/dividir)
 				grab_dt = tl_t(mp.x) - segs[hit].start
+				// corpo do clipe (não a borda de aparo): cursor vai ao início se ainda
+				// não está sobre o vídeo — como nos NLEs, pra já ver o 1º quadro.
+				if edge == 0 do seek_to_seg_if_outside(hit)
 			}
 		} else if hovered(ruler) {
 			st.drag = .Playhead // arrastar na RÉGUA move o playhead (scrub)
