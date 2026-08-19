@@ -3,7 +3,6 @@ package main
 import rl "vendor:raylib"
 import "base:intrinsics"
 import "core:fmt"
-import "core:math"
 import "core:os"
 import "core:strconv"
 import "core:strings"
@@ -41,9 +40,6 @@ stt_eat:   bool
 stt_in:    f32 // in_off do segmento no Começar (offset das falas)
 stt_src_dur: f32
 stt_scroll: f32
-tf_stt:     TField // vocabulário / nomes para o --prompt
-stt_focus:  bool
-stt_prompt_run: string // cópia do vocabulário no Começar (o worker lê isto)
 tf_cue:     TField // texto da fala em edição (prévia STT ou modal Caps)
 cue_edit:   int = -1
 cue_focus:  bool
@@ -53,6 +49,13 @@ caps_eat:     bool
 stt_note_buf: [200]u8
 stt_note_n:   int
 stt_want_gpu: bool // snapshot no Começar
+stt_pct_x:    i32  // 0..1000, atômico (worker escreve, main lê)
+stt_span_lo:  f32  // worker: fase atual mapeia 0..1 local → [lo, hi]
+stt_span_hi:  f32
+stt_watch_kind: STTWatch
+stt_watch_dur:  f32 // segundos da extração (ffmpeg)
+
+STTWatch :: enum { None, Curl, FFmpeg, Whisper }
 
 STT_LANGS := []cstring{ "Auto", "Português", "Inglês", "Espanhol" }
 STT_LANGC := []string{ "auto", "pt", "en", "es" }
@@ -135,21 +138,182 @@ stt_mkdirs :: proc(dir: string) -> bool {
 	return os.is_dir(dir)
 }
 
+stt_set_pct :: proc(p: f32) {
+	v := i32(clamp(p, 0, 1) * 1000 + 0.5)
+	old := intrinsics.atomic_load(&stt_pct_x)
+	if v < old do return // só avança (senão o 0% do Whisper no começo da fala puxava a barra pra trás)
+	intrinsics.atomic_store(&stt_pct_x, v)
+}
+stt_reset_pct :: proc() { intrinsics.atomic_store(&stt_pct_x, 0) }
+stt_pct :: proc() -> f32 { return f32(intrinsics.atomic_load(&stt_pct_x)) / 1000 }
+stt_begin :: proc(lo, hi: f32) {
+	stt_span_lo = clamp(lo, 0, 1)
+	stt_span_hi = clamp(max(hi, stt_span_lo), 0, 1)
+	stt_set_pct(stt_span_lo)
+}
+stt_local :: proc(p: f32) {
+	stt_set_pct(stt_span_lo + clamp(p, 0, 1) * (stt_span_hi - stt_span_lo))
+}
+
+// "progress = 42%", "Progress:  5%", "######## 40.1%"
+stt_parse_pct_line :: proc(s: string) -> (f32, bool) {
+	t := strings.trim_space(s)
+	if t == "" do return 0, false
+	low := strings.to_lower(t, context.temp_allocator)
+	if i := strings.index(low, "progress"); i >= 0 {
+		rest := t[i + 8:]
+		for j in 0 ..< len(rest) {
+			c := rest[j]
+			if c == '=' || c == ':' {
+				rest = strings.trim_left_space(rest[j+1:])
+				break
+			}
+		}
+		if v, ok := stt_parse_leading_pct(rest); ok do return v, true
+	}
+	// último token com % (barra do curl, meter clássico)
+	for k := len(t) - 1; k >= 0; k -= 1 {
+		if t[k] != '%' do continue
+		a := k
+		for a > 0 {
+			c := t[a-1]
+			if (c >= '0' && c <= '9') || c == '.' || c == ' ' { a -= 1; continue }
+			break
+		}
+		chunk := strings.trim_space(t[a:k])
+		if v, ok := strconv.parse_f64(chunk); ok && v >= 0 && v <= 100.5 {
+			return clamp(f32(v / 100), 0, 1), true
+		}
+		break
+	}
+	return 0, false
+}
+
+stt_parse_leading_pct :: proc(s: string) -> (f32, bool) {
+	n := 0
+	for n < len(s) {
+		c := s[n]
+		if (c >= '0' && c <= '9') || c == '.' || c == ' ' { n += 1; continue }
+		break
+	}
+	chunk := strings.trim_space(s[:n])
+	if chunk == "" do return 0, false
+	v, ok := strconv.parse_f64(chunk)
+	if !ok || v < 0 || v > 100.5 do return 0, false
+	return clamp(f32(v / 100), 0, 1), true
+}
+
+stt_parse_out_time :: proc(s: string) -> (f32, bool) {
+	us :: "out_time_us="
+	ms :: "out_time_ms="
+	if strings.has_prefix(s, us) {
+		if v, ok := strconv.parse_i64(s[len(us):]); ok && v >= 0 do return f32(v) / 1e6, true
+	} else if strings.has_prefix(s, ms) {
+		if v, ok := strconv.parse_i64(s[len(ms):]); ok && v >= 0 do return f32(v) / 1e6, true
+	}
+	return 0, false
+}
+
+// "[00:00:10.000 --> 00:00:12.400]" — relógio da fala como fallback se o -pp não sair
+stt_parse_arrow_time :: proc(s: string) -> (f32, bool) {
+	i := strings.index(s, "-->")
+	if i < 0 do return 0, false
+	rest := strings.trim_left_space(s[i+3:])
+	end := 0
+	for end < len(rest) {
+		c := rest[end]
+		if c == ' ' || c == ']' || c == '\t' do break
+		end += 1
+	}
+	return parse_srt_time(rest[:end])
+}
+
+stt_on_watch_line :: proc(s: string) {
+	switch stt_watch_kind {
+	case .None:
+		return
+	case .Curl:
+		if p, ok := stt_parse_pct_line(s); ok do stt_local(p)
+	case .FFmpeg:
+		if t, ok := stt_parse_out_time(s); ok && stt_watch_dur > 0.05 {
+			stt_local(t / stt_watch_dur)
+		}
+	case .Whisper:
+		if p, ok := stt_parse_pct_line(s); ok {
+			stt_local(p)
+		} else if t, ok := stt_parse_arrow_time(s); ok && stt_src_dur > 0.2 {
+			stt_local(t / stt_src_dur)
+		}
+	}
+}
+
 stt_spawn_wait :: proc(cmd: []string) -> bool {
+	return stt_spawn_watch(cmd, .None, 0)
+}
+
+stt_spawn_watch :: proc(cmd: []string, kind: STTWatch, dur: f32) -> bool {
 	if len(cmd) == 0 do return false
-	p, e := os.process_start(os.Process_Desc{ command = cmd })
-	if e != nil do return false
+	stt_watch_kind = kind
+	stt_watch_dur = dur
+	desc := os.Process_Desc{ command = cmd }
+	er, ew, epe := os.pipe()
+	if epe == nil {
+		desc.stderr = ew
+		desc.stdout = ew
+	}
+	p, e := os.process_start(desc)
+	if epe == nil do os.close(ew)
+	if e != nil {
+		if epe == nil do os.close(er)
+		return false
+	}
 	if stt_job != nil do AssignProcessToJobObject(stt_job, win.HANDLE(p.handle))
 	SetPriorityClass(win.HANDLE(p.handle), win.BELOW_NORMAL_PRIORITY_CLASS)
+	if epe == nil {
+		buf: [4096]u8
+		line: [512]u8
+		ll := 0
+		for {
+			if intrinsics.atomic_load(&stt_stop) || app_closing {
+				_ = os.process_kill(p)
+				break
+			}
+			n, rerr := os.read(er, buf[:])
+			if n > 0 {
+				for k in 0 ..< n {
+					ch := buf[k]
+					if ch == '\n' || ch == '\r' {
+						if ll > 0 {
+							stt_on_watch_line(string(line[:ll]))
+							ll = 0
+						}
+					} else if ll < len(line) {
+						line[ll] = ch
+						ll += 1
+					}
+				}
+			}
+			if n <= 0 || rerr != nil do break
+		}
+		if ll > 0 do stt_on_watch_line(string(line[:ll]))
+		os.close(er)
+	}
 	for {
 		if intrinsics.atomic_load(&stt_stop) || app_closing {
 			_ = os.process_kill(p)
 			_, _ = os.process_wait(p)
+			stt_watch_kind = .None
 			return false
 		}
 		state, werr := os.process_wait(p, 50 * time.Millisecond)
-		if state.exited do return state.exit_code == 0
-		if werr != nil && werr != os.General_Error.Timeout do return false
+		if state.exited {
+			stt_watch_kind = .None
+			return state.exit_code == 0
+		}
+		if werr != nil && werr != os.General_Error.Timeout {
+			stt_watch_kind = .None
+			return false
+		}
 	}
 }
 
@@ -161,7 +325,9 @@ stt_fail :: proc(msg: string) {
 
 stt_download :: proc(url, dest: string) -> bool {
 	os.remove(dest)
-	return stt_spawn_wait([]string{ "curl.exe", "-L", "--fail", "--retry", "2", "-o", dest, url }) && stt_exists(dest)
+	return stt_spawn_watch([]string{
+		"curl.exe", "-L", "--fail", "--retry", "2", "--progress-bar", "-o", dest, url,
+	}, .Curl, 0) && stt_exists(dest)
 }
 
 stt_ensure_cli :: proc(gpu: bool) -> string {
@@ -172,6 +338,7 @@ stt_ensure_cli :: proc(gpu: bool) -> string {
 		cuda := fmt.tprintf("%s\\cuda", dir)
 		if !stt_mkdirs(cuda) do return ""
 		intrinsics.atomic_store(&stt_phase, STTPhase.FetchBin)
+		stt_begin(stt_pct(), 0.15)
 		stt_set_note("Baixando motor Whisper GPU (~270 MB, só na 1ª vez)…")
 		zip := fmt.tprintf("%s\\whisper-cuda.zip", cuda)
 		if !stt_download(STT_CUDA_ZIP, zip) do return ""
@@ -180,6 +347,7 @@ stt_ensure_cli :: proc(gpu: bool) -> string {
 		return stt_find_named(cuda, "whisper-cli.exe", 3)
 	}
 	intrinsics.atomic_store(&stt_phase, STTPhase.FetchBin)
+	stt_begin(stt_pct(), 0.15)
 	stt_set_note("Baixando motor Whisper (~21 MB, só na 1ª vez)…")
 	zip := fmt.tprintf("%s\\whisper-cpu.zip", dir)
 	if !stt_download(STT_CPU_ZIP, zip) do return ""
@@ -208,6 +376,7 @@ stt_ensure_tools :: proc(want_gpu: bool) -> (cli, model: string, gpu: bool, ok: 
 			return
 		}
 		intrinsics.atomic_store(&stt_phase, STTPhase.FetchModel)
+		stt_begin(max(stt_pct(), 0.12), 0.42)
 		stt_set_note(fmt.tprintf("Baixando modelo Máximo (~%d MB)…", STT_MODEL_MB))
 		dest := fmt.tprintf("%s\\%s", dir, STT_MODEL_FILE)
 		if !stt_download(fmt.tprintf("%s%s", STT_HF, STT_MODEL_FILE), dest) {
@@ -219,19 +388,13 @@ stt_ensure_tools :: proc(want_gpu: bool) -> (cli, model: string, gpu: bool, ok: 
 	return cli, model, gpu, true
 }
 
-// prompt enviado ao Whisper: idioma + vocabulário do usuário (nomes, marca).
-stt_build_prompt :: proc(lang: int, extra: string) -> string {
-	ex := strings.trim_space(extra)
+// prompt enviado ao Whisper: só o idioma (nomes/marcas se corrigem depois, nas falas).
+stt_build_prompt :: proc(lang: int) -> string {
 	switch lang {
-	case 1: // pt
-		if ex == "" do return "Transcrição em português do Brasil."
-		return fmt.tprintf("Transcrição em português do Brasil. Vocabulário: %s.", ex)
-	case 3: // es
-		if ex == "" do return "Transcripción en español."
-		return fmt.tprintf("Transcripción en español. Vocabulario: %s.", ex)
+	case 1: return "Transcrição em português do Brasil."
+	case 3: return "Transcripción en español."
 	}
-	if ex == "" do return ""
-	return fmt.tprintf("Vocabulary: %s.", ex)
+	return ""
 }
 
 // [Música], (applause) e afins — o -sns já corta a maior parte; isto limpa o resto.
@@ -270,43 +433,47 @@ stt_worker :: proc() {
 	if intrinsics.atomic_load(&stt_stop) { stt_fail("Cancelado"); return }
 
 	intrinsics.atomic_store(&stt_phase, STTPhase.Extract)
+	ex0 := max(stt_pct(), 0.04)
+	stt_begin(ex0, min(ex0 + 0.08, 0.50))
 	wav := stt_wav_path()
 	os.remove(wav)
 	src0 := sg.in_off
 	src_d := max(f32(0.2), sg.dur * (sg.speed <= 0 ? 1 : sg.speed))
-	if !stt_spawn_wait([]string{
+	if !stt_spawn_watch([]string{
 		"ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+		"-progress", "pipe:2", "-nostats",
 		"-ss", fmt.tprintf("%.3f", src0), "-t", fmt.tprintf("%.3f", src_d),
 		"-i", c.path, "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav,
-	}) || !stt_exists(wav) {
+	}, .FFmpeg, src_d) || !stt_exists(wav) {
 		stt_fail("Falha ao extrair o áudio do clipe")
 		return
 	}
 	if intrinsics.atomic_load(&stt_stop) { os.remove(wav); stt_fail("Cancelado"); return }
 
 	intrinsics.atomic_store(&stt_phase, STTPhase.Talk)
-	stt_set_note(fmt.tprintf("Transcrevendo (Máximo%s)… pode levar alguns minutos.",
+	stt_begin(max(stt_pct(), 0.12), 1)
+	stt_set_note(fmt.tprintf("Transcrevendo (Máximo%s)…",
 		use_gpu ? " · GPU" : ""))
 	pref := stt_srt_prefix()
 	os.remove(fmt.tprintf("%s.srt", pref))
 	lang := STT_LANGC[clamp(stt_lang, 0, len(STT_LANGC) - 1)]
-	prompt := stt_build_prompt(stt_lang, stt_prompt_run)
+	prompt := stt_build_prompt(stt_lang)
 	cmd := make([dynamic]string, context.temp_allocator)
 	append(&cmd, cli, "-m", model, "-f", wav, "-l", lang,
-		"-osrt", "-of", pref, "-ml", "48", "-sow", "-np", "-sns", "-t", "4")
+		"-osrt", "-of", pref, "-ml", "48", "-sow", "-np", "-pp", "-sns", "-t", "4")
 	if !use_gpu do append(&cmd, "-ng")
 	if prompt != "" do append(&cmd, "--prompt", prompt)
-	if !stt_spawn_wait(cmd[:]) {
+	if !stt_spawn_watch(cmd[:], .Whisper, 0) {
 		if intrinsics.atomic_load(&stt_stop) { os.remove(wav); stt_fail("Cancelado"); return }
 		// GPU recusou (CUDA ausente / DLL): uma tentativa por CPU
 		if use_gpu {
 			if cpu := stt_ensure_cli(false); cpu != "" {
 				clear(&cmd)
 				append(&cmd, cpu, "-m", model, "-f", wav, "-l", lang,
-					"-osrt", "-of", pref, "-ml", "48", "-sow", "-np", "-sns", "-ng", "-t", "4")
+					"-osrt", "-of", pref, "-ml", "48", "-sow", "-np", "-pp", "-sns", "-ng", "-t", "4")
 				if prompt != "" do append(&cmd, "--prompt", prompt)
 				stt_set_note("GPU falhou — tentando de novo na CPU…")
-				if stt_spawn_wait(cmd[:]) do use_gpu = false
+				if stt_spawn_watch(cmd[:], .Whisper, 0) do use_gpu = false
 			}
 		}
 		if use_gpu || !stt_exists(fmt.tprintf("%s.srt", pref)) {
@@ -324,6 +491,7 @@ stt_worker :: proc() {
 	}
 	if stt_srt != "" do delete(stt_srt)
 	stt_srt = string(data)
+	stt_set_pct(1)
 	intrinsics.atomic_store(&stt_phase, STTPhase.Done)
 }
 
@@ -446,7 +614,6 @@ stt_close :: proc() {
 	modal = .None
 	stt_si = -1
 	stt_eat = false
-	stt_focus = false
 	stt_scroll = 0
 	cue_edit_reset()
 	stt_cues_free()
@@ -470,7 +637,6 @@ open_stt_modal :: proc() {
 	stt_src_dur = segs[selected].dur * seg_speed(selected)
 	stt_scroll = 0
 	stt_eat = true
-	stt_focus = false
 	cue_edit_reset()
 	if !stt_gpu_set { stt_gpu = export_nvenc_ok; stt_gpu_set = true }
 	intrinsics.atomic_store(&stt_stop, false)
@@ -493,9 +659,9 @@ stt_start :: proc() {
 	if stt_err != "" { delete(stt_err); stt_err = "" }
 	stt_in = segs[stt_si].in_off
 	stt_src_dur = segs[stt_si].dur * seg_speed(stt_si)
-	if stt_prompt_run != "" do delete(stt_prompt_run)
-	stt_prompt_run = strings.clone(string(tf_stt.buf[:tf_stt.len]))
 	stt_want_gpu = stt_gpu && export_nvenc_ok
+	stt_reset_pct()
+	stt_begin(0, 0.04)
 	stt_set_note("Preparando…")
 	intrinsics.atomic_store(&stt_stop, false)
 	intrinsics.atomic_store(&stt_phase, STTPhase.Prep)
@@ -769,14 +935,6 @@ draw_stt_modal :: proc(sw, sh: f32) {
 		txt("GPU NVIDIA (bem mais rápido)", x + 26, y + 2, 12, TEXT)
 		y += 26
 	}
-	txt("Vocabulário (nomes, marca, termos)", x, y, 12, TEXT); y += 18
-	fr := rl.Rectangle{ x, y, cw - 40, 28 }
-	rl.DrawRectangleRounded(fr, 0.2, 4, PANEL2)
-	if tf_stt.len == 0 && !stt_focus do txt("Ex.: João Silva, Odin, CapCut", fr.x + 8, fr.y + 6, 13, MUTED)
-	if !busy do tf_field(&tf_stt, fr, &stt_focus, true)
-	rl.DrawRectangleRoundedLinesEx(fr, 0.2, 4, 1, stt_focus ? ACCENT : LINE)
-	if stt_focus && rl.IsKeyPressed(.ENTER) do stt_focus = false
-	y += 36
 	txt("Modelo Máximo. Vem em stt\\ com o editor; GPU baixa na primeira vez.", x, y, 11, MUTED)
 	y += 20
 	if ui_btn({ x, y, 160, 30 }, busy ? "Cancelar" : "Transcrever", !busy) {
@@ -797,11 +955,13 @@ draw_stt_modal :: proc(sw, sh: f32) {
 	case .Idle:
 		txt(stt_phase_label(ph), x, y, 12, MUTED)
 	case .Prep, .FetchBin, .FetchModel, .Extract, .Talk:
+		pct := stt_pct()
 		txt(stt_phase_label(ph), x, y, 12, ACCENT)
-		bar := rl.Rectangle{ x, y + 22, cw - 40, 6 }
+		txt(rl.TextFormat("%d%%", i32(pct*100 + 0.5)), x + cw - 72, y, 12, ACCENT)
+		bar := rl.Rectangle{ x, y + 22, cw - 40, 8 }
 		rl.DrawRectangleRounded(bar, 1, 4, LINE)
-		pulse := (abs(math.sin(f32(rl.GetTime()) * 3)) * 0.45 + 0.2) * bar.width
-		rl.DrawRectangleRounded({ bar.x, bar.y, pulse, bar.height }, 1, 4, ACCENT)
+		fill := max(f32(2), pct * bar.width)
+		rl.DrawRectangleRounded({ bar.x, bar.y, fill, bar.height }, 1, 4, ACCENT)
 	}
 	y += 40
 

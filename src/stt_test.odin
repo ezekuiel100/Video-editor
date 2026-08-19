@@ -48,11 +48,31 @@ srt_descarta_marcacao_de_nao_fala :: proc(t: ^testing.T) {
 }
 
 @(test)
-stt_prompt_junta_idioma_e_vocabulario :: proc(t: ^testing.T) {
-	testing.expect(t, stt_build_prompt(1, "") == "Transcrição em português do Brasil.")
-	testing.expect(t, strings.contains(stt_build_prompt(1, "João, Odin"), "João, Odin"))
-	testing.expect(t, stt_build_prompt(2, "") == "")
-	testing.expect(t, strings.contains(stt_build_prompt(2, "CapCut"), "CapCut"))
+stt_parse_progresso_real :: proc(t: ^testing.T) {
+	p, ok := stt_parse_pct_line("whisper_print_progress_callback: progress =  42%")
+	testing.expect(t, ok && t_feq(p, 0.42), "Whisper progress = 42%")
+	p, ok = stt_parse_pct_line("Progress: 5%")
+	testing.expect(t, ok && t_feq(p, 0.05), "Progress: 5%")
+	p, ok = stt_parse_pct_line("################ 40.1%")
+	testing.expect(t, ok && abs(p - 0.401) < 0.002, "barra do curl")
+	p, ok = stt_parse_pct_line("progress = 100%")
+	testing.expect(t, ok && t_feq(p, 1), "100%")
+	_, bad := stt_parse_pct_line("lixo sem número")
+	testing.expect(t, !bad, "linha sem %")
+	sec, ok2 := stt_parse_out_time("out_time_us=2500000")
+	testing.expect(t, ok2 && t_feq(sec, 2.5), "ffmpeg out_time_us")
+	sec, ok2 = stt_parse_out_time("out_time_ms=1000000")
+	testing.expect(t, ok2 && t_feq(sec, 1), "ffmpeg out_time_ms (µs legado)")
+	clk, ok3 := stt_parse_arrow_time("[00:00:10.000 --> 00:00:12.400] olá")
+	testing.expect(t, ok3 && t_feq(clk, 12.4), "relógio da fala")
+}
+
+@(test)
+stt_prompt_so_idioma :: proc(t: ^testing.T) {
+	testing.expect(t, stt_build_prompt(1) == "Transcrição em português do Brasil.")
+	testing.expect(t, stt_build_prompt(3) == "Transcripción en español.")
+	testing.expect(t, stt_build_prompt(0) == "")
+	testing.expect(t, stt_build_prompt(2) == "")
 }
 
 @(test)

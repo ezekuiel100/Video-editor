@@ -115,7 +115,6 @@ update :: proc() {
 		// da fala primeiro, depois fecha STT / editor de falas / silêncio.
 		if rl.IsKeyPressed(.ESCAPE) {
 			if cue_focus do cue_commit_active()
-			else if stt_focus do stt_focus = false
 			else if modal == .STT do stt_close()
 			else if modal == .Caps do caps_close()
 			else if modal == .Silence do sil_close()
@@ -259,14 +258,13 @@ update :: proc() {
 	//  S = dividir no playhead | B = ferramenta lâmina | F = ajustar à janela | Esc = sair da lâmina
 	if rl.IsKeyPressed(.F3) do prof_show = !prof_show // HUD do profiler (global, mede o custo da main thread)
 	if rl.IsKeyPressed(.F4) do dbg_toggle() // liga/desliga o log de diagnóstico do decoder (arquivo ao lado do .exe)
-	if rl.IsKeyPressed(.SPACE) && !txt_edit && !search_focus && !stt_focus {
+	if rl.IsKeyPressed(.SPACE) && !txt_edit && !search_focus && !cue_focus {
 		if modal == .Silence do sil_play = !sil_play // no editor de silêncio: toca o RESULTADO
 		else do toggle_play()
 	}
 	if rl.IsKeyPressed(.ESCAPE) {
 		if search_focus do search_focus = false // sai da busca primeiro
 		else if txt_edit do txt_edit = false // depois da edição de texto
-		else if stt_focus do stt_focus = false
 		else if modal == .Silence do sil_close()
 		else if modal == .STT do stt_close()
 		else if crop_mode do set_crop_mode(false) // sai do modo recorte
