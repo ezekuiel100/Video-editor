@@ -1990,6 +1990,23 @@ draw_caps_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	txt(rl.TextFormat("%d fala(s) transcritas", i32(len(c.caps))), x, y, 13, ACCENT); y += 22
 	if ui_btn({ x, y, cw - 2*pad, 28 }, "Editar falas", true) do open_caps_editor()
 	y += 36
+	txt("Estilo", x, y, 13, TEXT); y += 18
+	presets := [4]CapPreset{ .YouTube, .CapCut, .Marker, .Shadow }
+	pw := (cw - 2*pad - 18) / 4
+	for p, pi in presets {
+		r := rl.Rectangle{ x + f32(pi)*(pw + 6), y, pw, 26 }
+		on := c.cap_preset == p
+		rl.DrawRectangleRounded(r, 0.25, 4, on ? ACCENT_D : (hovered(r) ? HOVER : PANEL2))
+		txt_c(CAP_PRESET_NAME[p], r.x + r.width/2, r.y + 6, 11, on ? rl.WHITE : TEXT)
+		if clicked(r) do cap_apply_preset(c, p)
+	}
+	y += 32
+	chk := rl.Rectangle{ x, y, 16, 16 }
+	if clicked({ x, y, cw - 2*pad, 18 }) { c.cap_upper = !c.cap_upper; dirty = true }
+	rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, c.cap_upper ? ACCENT : MUTED)
+	if c.cap_upper do rl.DrawRectangleRec({ chk.x + 3, chk.y + 3, 10, 10 }, ACCENT)
+	txt("MAIÚSCULAS", x + 22, y + 1, 12, TEXT)
+	y += 26
 	txt("Tamanho, cor e posição valem para todas.", x, y, 11, MUTED); y += 20
 	if len(text_fonts) > 1 {
 		txt("Fonte", x, y, 13, TEXT); y += 20
@@ -2046,7 +2063,7 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	}
 	crop_extra := (insp_tab == 0 && !c.is_text && !alike && seg_cropped(selected)) ? f32(30) : f32(0)
 	// aba Áudio: sem o botão "Detectar silêncio" (fica só na toolbar da timeline)
-	ch := c.is_text ? (c.is_caps ? f32(316) : f32(388)) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(268)))
+	ch := c.is_text ? (c.is_caps ? f32(410) : f32(388)) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(268)))
 	// o cartão NÃO pode invadir o transporte/timeline: em janela baixa os sliders
 	// caíam em cima da régua e o clique "do playhead" ainda acionava o inspector.
 	ch = min(ch, max(f32(80), area.height - 20))

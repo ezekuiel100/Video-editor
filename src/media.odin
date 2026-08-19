@@ -361,7 +361,15 @@ Clip :: struct {
 	// Evita estourar MAX_CLIPS/MAX_SEGS — voz-pra-texto vira UMA faixa, não 80 títulos.
 	is_caps: bool,
 	caps:    [dynamic]CapCue,
+	// look das legendas (YouTube / CapCut / …). Zero = sombra suave (títulos e .ovp antigos).
+	cap_preset:  CapPreset,
+	cap_stroke:  f32,      // espessura do contorno, fração do tamanho da fonte
+	cap_box:     f32,      // opacidade da caixa 0..1 (0 = sem caixa)
+	cap_box_col: rl.Color, // cor da caixa / marcador
+	cap_upper:   bool,     // desenha em MAIÚSCULAS
 }
+
+CapPreset :: enum u8 { Shadow, YouTube, CapCut, Marker }
 
 // uma fala da faixa de legendas. t0/t1 são tempo na FONTE do vídeo transcrito.
 CapCue :: struct {
@@ -714,6 +722,57 @@ new_caps_clip :: proc(cues: []CapCue, size: f32, color: rl.Color, dur: f32) -> i
 		c.text = strings.clone(c.caps[0].text)
 	}
 	return slot
+}
+
+CAP_PRESET_NAME := [CapPreset]cstring{ .Shadow = "Sombra", .YouTube = "YouTube", .CapCut = "CapCut", .Marker = "Marca" }
+
+cap_font_named :: proc(names: []string) -> int {
+	for want in names {
+		for f, i in text_fonts {
+			if strings.equal_fold(string(f.name), want) do return i
+		}
+	}
+	return -1
+}
+
+// aplica um look pronto (cor, caixa, contorno, maiúsculas). Tamanho e fonte
+// acompanham o estilo; o usuário ainda pode ajustar depois no inspector.
+cap_apply_preset :: proc(c: ^Clip, p: CapPreset) {
+	c.cap_preset = p
+	switch p {
+	case .Shadow:
+		c.text_color = rl.WHITE
+		c.cap_stroke = 0
+		c.cap_box = 0
+		c.cap_box_col = {}
+		c.cap_upper = false
+		if c.text_size < 0.04 || c.text_size > 0.12 do c.text_size = 0.05
+	case .YouTube:
+		c.text_color = rl.WHITE
+		c.cap_stroke = 0
+		c.cap_box = 0.72
+		c.cap_box_col = rl.Color{ 0, 0, 0, 255 }
+		c.cap_upper = false
+		c.text_size = 0.048
+		c.text_font = 0
+	case .CapCut:
+		c.text_color = rl.WHITE
+		c.cap_stroke = 0.11
+		c.cap_box = 0
+		c.cap_box_col = {}
+		c.cap_upper = true
+		c.text_size = 0.062
+		if i := cap_font_named([]string{ "Arial Black", "Impact" }); i >= 0 do c.text_font = i
+	case .Marker:
+		c.text_color = rl.Color{ 16, 16, 20, 255 }
+		c.cap_stroke = 0
+		c.cap_box = 1
+		c.cap_box_col = rl.Color{ 255, 224, 20, 255 }
+		c.cap_upper = true
+		c.text_size = 0.055
+		if i := cap_font_named([]string{ "Arial Black", "Arial" }); i >= 0 do c.text_font = i
+	}
+	dirty = true
 }
 
 // atualiza o conteúdo de um clipe de texto (marca o projeto como não salvo — o undo só

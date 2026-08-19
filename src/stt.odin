@@ -512,6 +512,7 @@ stt_apply :: proc() -> int {
 	src := seg_src(stt_si)
 	slot := new_caps_clip(stt_cues[:], 0.050, rl.WHITE, max(src.dur, sg.in_off + sg.dur * seg_speed(stt_si)))
 	if slot < 0 do return 0
+	cap_apply_preset(&clips[slot], .YouTube)
 	tr := free_track_from(g_nv - 1)
 	if tr < 0 { set_toast("Trilha bloqueada"); return 0 }
 	ni := add_seg(slot, sg.start, sg.in_off, sg.dur, tr)

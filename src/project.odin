@@ -64,7 +64,11 @@ save_project_text :: proc() -> string {
 		idx[i] = len(medias)
 		if clips[i].is_caps { // faixa de legendas: estilo + duração; as falas vão na seção `cues`
 			tc := clips[i].text_color
-			append(&medias, fmt.tprintf("#CAP\t%.4f\t%d\t%d\t%d\t%d\t%.4f", clips[i].text_size, tc.r, tc.g, tc.b, clips[i].text_font, clips[i].dur))
+			bc := clips[i].cap_box_col
+			append(&medias, fmt.tprintf("#CAP\t%.4f\t%d\t%d\t%d\t%d\t%.4f\t%d\t%.3f\t%.3f\t%d\t%d\t%d\t%d",
+				clips[i].text_size, tc.r, tc.g, tc.b, clips[i].text_font, clips[i].dur,
+				int(clips[i].cap_preset), clips[i].cap_stroke, clips[i].cap_box,
+				bc.r, bc.g, bc.b, clips[i].cap_upper ? 1 : 0))
 		} else if clips[i].is_text { // clipe de texto: "#TXT<tab>size<tab>r<tab>g<tab>b<tab>fonte<tab>texto"
 			tc := clips[i].text_color
 			append(&medias, fmt.tprintf("#TXT\t%.4f\t%d\t%d\t%d\t%d\t%s", clips[i].text_size, tc.r, tc.g, tc.b, clips[i].text_font, clips[i].text))
@@ -379,7 +383,21 @@ load_project :: proc(path: string) {
 			font := len(f) >= 6 ? (strconv.parse_int(f[5]) or_else 0) : 0
 			dur := len(f) >= 7 ? f32(strconv.parse_f64(f[6]) or_else 5.0) : IMG_DUR
 			slot := new_caps_clip({}, size, col, dur)
-			if slot >= 0 do clips[slot].text_font = font
+			if slot >= 0 {
+				clips[slot].text_font = font
+				if len(f) >= 14 {
+					clips[slot].cap_preset = CapPreset(clamp(strconv.parse_int(f[7]) or_else 0, 0, int(max(CapPreset))))
+					clips[slot].cap_stroke = f32(strconv.parse_f64(f[8]) or_else 0)
+					clips[slot].cap_box = f32(strconv.parse_f64(f[9]) or_else 0)
+					clips[slot].cap_box_col = rl.Color{
+						u8(strconv.parse_int(f[10]) or_else 0),
+						u8(strconv.parse_int(f[11]) or_else 0),
+						u8(strconv.parse_int(f[12]) or_else 0),
+						255,
+					}
+					clips[slot].cap_upper = (strconv.parse_int(f[13]) or_else 0) != 0
+				}
+			}
 		} else if strings.has_prefix(p, "#TXT\t") { // clipe de texto: recria do registro salvo
 			f := strings.split(p, "\t", context.temp_allocator)
 			size := len(f) >= 2 ? f32(strconv.parse_f64(f[1]) or_else 0.10) : 0.10

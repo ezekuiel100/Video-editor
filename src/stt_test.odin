@@ -87,6 +87,14 @@ ovp_guarda_faixa_de_legendas :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(txt, "\ncues 0 2\n"), "seção cues")
 	testing.expect(t, strings.contains(txt, "0.500 2.000 olá"), "1ª fala")
 	testing.expect(t, strings.contains(txt, "2.000 4.000 mundo"), "2ª fala")
+	cap_apply_preset(&clips[slot], .CapCut)
+	txt2 := save_project_text()
+	testing.expect(t, strings.contains(txt2, "\t2\t0.110\t"), "preset CapCut + contorno no #CAP")
+	testing.expect(t, clips[slot].cap_stroke > 0.05, "CapCut tem contorno")
+	testing.expect(t, clips[slot].cap_upper, "CapCut em maiúsculas")
+	cap_apply_preset(&clips[slot], .YouTube)
+	testing.expect(t, clips[slot].cap_box > 0.5, "YouTube tem caixa")
+	testing.expect(t, !clips[slot].cap_upper, "YouTube não força maiúsculas")
 	caps_free(&clips[slot])
 	delete(clips[slot].text); clips[slot].text = ""
 	delete(clips[slot].name); clips[slot].name = ""

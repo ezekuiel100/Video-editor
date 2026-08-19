@@ -582,14 +582,35 @@ text_wrap :: proc(fnt: rl.Font, s: string, fsz, spacing, max_w: f32) -> (lines: 
 	return
 }
 
+// caixa / contorno em torno do bloco de texto (hit-test e sel_box).
+text_style_pad :: proc(c: ^Clip, fsz: f32) -> (px, py: f32) {
+	st := max(f32(0), c.cap_stroke) * fsz
+	if c.cap_box > 0.01 {
+		return fsz*0.28 + st, fsz*0.16 + st
+	}
+	if st > 0.4 do return st + 1, st + 1
+	return max(f32(1), fsz*0.03), max(f32(1), fsz*0.03)
+}
+
+draw_text_stroke :: proc(fnt: rl.Font, t: cstring, pos: rl.Vector2, origin: rl.Vector2, rot, fsz, spacing, thick: f32, col: rl.Color) {
+	if thick < 0.4 do return
+	dirs := [8]rl.Vector2{ {1,0}, {-1,0}, {0,1}, {0,-1}, {0.72,0.72}, {-0.72,0.72}, {0.72,-0.72}, {-0.72,-0.72} }
+	if abs(rot) > 0.5 {
+		for d in dirs do rl.DrawTextPro(fnt, t, { pos.x + d.x*thick, pos.y + d.y*thick }, origin, rot, fsz, spacing, col)
+	} else {
+		for d in dirs do rl.DrawTextEx(fnt, t, { pos.x + d.x*thick, pos.y + d.y*thick }, fsz, spacing, col)
+	}
+}
+
 draw_text_into :: proc(c: ^Clip, sg: Seg, fx, fy, fw, fh: f32, src_t: f32 = 0) {
 	if !c.is_text do return
 	body := clip_text_at(c, src_t)
 	if body == "" do return
+	if c.cap_upper do body = strings.to_upper(body, context.temp_allocator)
 	fnt := text_font_of(c)
 	scl := sg.scale <= 0 ? f32(1) : sg.scale
 	fsz := max(f32(10), c.text_size * fh * scl)
-	spacing := fsz * 0.06
+	spacing := fsz * (c.cap_preset == .CapCut ? 0.04 : 0.06)
 	max_w := fw * 0.86
 	lines, n, dim := text_wrap(fnt, body, fsz, spacing, max_w)
 	if n <= 0 do return
@@ -600,12 +621,24 @@ draw_text_into :: proc(c: ^Clip, sg: Seg, fx, fy, fw, fh: f32, src_t: f32 = 0) {
 	sh := rl.Color{ 0, 0, 0, u8(clamp(op, 0, 1) * 150) }
 	off := max(f32(1), fsz*0.03)
 	lh := fsz * 1.18
+	stroke := max(f32(0), c.cap_stroke) * fsz
+	box_on := c.cap_box > 0.01
+	bcol := c.cap_box_col
+	bcol.a = u8(clamp(op * c.cap_box, 0, 1) * 255)
+	scol := rl.Color{ 0, 0, 0, col.a }
+	padx, pady := text_style_pad(c, fsz)
 	if sdf_ok do rl.BeginShaderMode(sdf_shader)
 	if n == 1 && abs(sg.rot) > 0.5 {
 		t := cs(lines[0])
 		origin := rl.Vector2{ dim.x/2, dim.y/2 }
-		rl.DrawTextPro(fnt, t, { cx + off, cy + off }, origin, sg.rot, fsz, spacing, sh)
-		rl.DrawTextPro(fnt, t, { cx, cy },             origin, sg.rot, fsz, spacing, col)
+		if box_on {
+			rl.DrawRectanglePro({ cx, cy, dim.x + 2*padx, dim.y + 2*pady }, { dim.x/2 + padx, dim.y/2 + pady }, sg.rot, bcol)
+		}
+		draw_text_stroke(fnt, t, { cx, cy }, origin, sg.rot, fsz, spacing, stroke, scol)
+		if !box_on && stroke < 0.4 {
+			rl.DrawTextPro(fnt, t, { cx + off, cy + off }, origin, sg.rot, fsz, spacing, sh)
+		}
+		rl.DrawTextPro(fnt, t, { cx, cy }, origin, sg.rot, fsz, spacing, col)
 	} else {
 		y0 := cy - dim.y/2
 		for k in 0 ..< n {
@@ -613,8 +646,15 @@ draw_text_into :: proc(c: ^Clip, sg: Seg, fx, fy, fw, fh: f32, src_t: f32 = 0) {
 			lw := rl.MeasureTextEx(fnt, t, fsz, spacing).x
 			px := cx - lw/2
 			py := y0 + f32(k)*lh
-			rl.DrawTextEx(fnt, t, { px + off, py + off }, fsz, spacing, sh)
-			rl.DrawTextEx(fnt, t, { px, py },             fsz, spacing, col)
+			if box_on {
+				round := c.cap_preset == .Marker ? f32(0.45) : f32(0.22)
+				rl.DrawRectangleRounded({ px - padx, py - pady*0.45, lw + 2*padx, fsz + pady*1.15 }, round, 6, bcol)
+			}
+			draw_text_stroke(fnt, t, { px, py }, {}, 0, fsz, spacing, stroke, scol)
+			if !box_on && stroke < 0.4 {
+				rl.DrawTextEx(fnt, t, { px + off, py + off }, fsz, spacing, sh)
+			}
+			rl.DrawTextEx(fnt, t, { px, py }, fsz, spacing, col)
 		}
 	}
 	if sdf_ok do rl.EndShaderMode()
@@ -681,9 +721,11 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 			fsz := max(f32(10), c.text_size*fh*scl); sp := fsz*0.06
 			body := clip_text_at(c, src_t)
 			if body == "" do body = c.text
+			if c.cap_upper do body = strings.to_upper(body, context.temp_allocator)
 			_, _, dim := text_wrap(text_font_of(c), body, fsz, sp, fw*0.86)
+			padx, pady := text_style_pad(c, fsz)
 			bxc := fx + fw/2 + sg.px*fw; byc := fy + fh/2 + sg.py*fh
-			rl.DrawRectangleLinesEx({ bxc - dim.x/2 - 6, byc - dim.y/2 - 4, dim.x + 12, dim.y + 8 }, 1.5, ACCENT)
+			rl.DrawRectangleLinesEx({ bxc - dim.x/2 - padx - 4, byc - dim.y/2 - pady - 3, dim.x + 2*padx + 8, dim.y + 2*pady + 6 }, 1.5, ACCENT)
 		}
 		return
 	}
