@@ -676,6 +676,11 @@ export_aparicao_nao_some_o_clipe_de_saida :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(g, "hypot"), "não é íris/raio")
 	testing.expect(t, !strings.contains(g, "fade=t=out"), "opacidade vai no geq, não no fade")
 	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.500"), "sem fade-in cheio de dissolver")
+	// geq a full-res no corte ainda travava (2ª transição do capitalismo). Máscara a 1/8
+	// + trim só na janela: o RGB fica nítido, o geq vê ~64× menos pixels e só 1s de frames.
+	testing.expect(t, strings.contains(g, "trim=3.500:4.500"), "o ramo da máscara só cobre o corte")
+	testing.expect(t, strings.contains(g, "alphamerge"), "máscara baixa-res aplicada no RGB cheio")
+	testing.expect(t, strings.contains(g, "format=gray,geq=lum="), "geq só no luma da miniatura")
 }
 
 // Clipe opaco, sem giro/fade/dissolver: yuv420p no overlay (rgba 4 bytes/pixel era o

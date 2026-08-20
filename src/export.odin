@@ -356,22 +356,45 @@ export_trans_fades :: proc(fb: ^strings.Builder, start2, tend, din, dout: f32, s
 }
 
 // Wipe de tinta/fumaça (Filmora): limiar sobre luma orgânica. invert=true = clipe que SAI.
-export_ghost_mask :: proc(fb: ^strings.Builder, start2, d: f32, persist: bool, invert := false) {
+// CUSTO: `geq` interpreta a expressão POR PIXEL — a 1080p isso é ~2M evals/frame e o
+// dissolve orgânico travava o export mesmo limitado ao corte (a 2ª transição do
+// capitalismo, 1.2s, ainda engasgava). A tinta é de manchas GRANDES: calcula a máscara
+// a 1/8 da resolução (64× menos pixels), sobe com bilinear e aplica via alphamerge
+// (C nativo). O RGB do clipe fica em full-res. Fora do corte, `trim` no ramo da máscara
+// faz o geq nem ver os outros frames (o `enable` do geq neste ffmpeg às vezes não pula
+// o trabalho). persist = overlay sem duração: máscara o clipe todo, ainda em 1/8.
+// `tag` distingue labels se o mesmo clipe ganha máscara de entrada E de saída.
+// fw/fh = tamanho ATUAL do stream (segW×segH ou canvas do texto) p/ o scale de volta
+// casar pixel a pixel com o ramo RGB.
+export_ghost_mask :: proc(fb: ^strings.Builder, start2, d: f32, persist: bool, invert: bool, tag, fw, fh: int) {
 	P: string
+	du := max(d, 0.001)
 	if persist {
 		P = "0.50"
 	} else {
-		du := max(d, 0.001)
 		P = fmt.tprintf("min(1\\,max(0\\,(T-%.3f)/%.3f))", start2, du)
 	}
-	// tinta: sins distorcidos (manchas grandes + bordas irregulares), sem hypot
-	ink := "(0.50+0.22*sin(X*0.007+Y*0.005)+0.18*sin(X*0.013+2.5*sin(Y*0.009))+0.14*sin(Y*0.011+2.0*sin(X*0.008))+0.12*sin((X+40*sin(Y*0.006))*0.016+Y*0.010))"
+	// *8: a máscara é calculada a 1/8; X/Y pequenos teriam manchas 8× maiores.
+	ink := "(0.50+0.22*sin(X*8*0.007+Y*8*0.005)+0.18*sin(X*8*0.013+2.5*sin(Y*8*0.009))+0.14*sin(Y*8*0.011+2.0*sin(X*8*0.008))+0.12*sin((X*8+40*sin(Y*8*0.006))*0.016+Y*8*0.010))"
 	s :: 0.10
-	T := fmt.tprintf("((%s)*1.20-0.10)", P)
-	U := fmt.tprintf("min(1\\,max(0\\,((%s)-((%s)-%.2f))/%.2f))", T, ink, s, 2*s)
+	Th := fmt.tprintf("((%s)*1.20-0.10)", P)
+	U := fmt.tprintf("min(1\\,max(0\\,((%s)-((%s)-%.2f))/%.2f))", Th, ink, s, 2*s)
 	M := fmt.tprintf("((%s)*(%s)*(3-2*(%s)))", U, U, U)
 	if invert do M = fmt.tprintf("(1-(%s))", M)
-	fmt.sbprintf(fb, ",format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*(%s)'", M)
+	mw := max(fw / 8, 2); mh := max(fh / 8, 2)
+	mw -= mw % 2; mh -= mh % 2
+	if mw < 2 do mw = 2
+	if mh < 2 do mh = 2
+	ow := max(fw, 2); oh := max(fh, 2)
+	ow -= ow % 2; oh -= oh % 2
+	fmt.sbprintf(fb, ",format=rgba,split[gp%d][gw%d];", tag, tag)
+	if persist {
+		fmt.sbprintf(fb, "[gw%d]", tag)
+	} else {
+		fmt.sbprintf(fb, "[gw%d]trim=%.3f:%.3f,", tag, start2, start2+du)
+	}
+	fmt.sbprintf(fb, "scale=%d:%d:flags=fast_bilinear,format=gray,geq=lum='255*(%s)',scale=%d:%d:flags=bilinear,format=gray[gm%d];[gp%d][gm%d]alphamerge",
+		mw, mh, M, ow, oh, tag, tag, tag)
 }
 
 // EFEITOS DE COR no export: espelha o BULGE_FS (brilho/contraste/saturação -> eq; visual
@@ -707,11 +730,13 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				fmt.sbprintf(&fb, "[%d:v]trim=0:%.3f,setpts=PTS-STARTPTS+%.3f/TB,scale=%d:%d,format=rgba",
 					seg_inp[i], sg.dur+hd+tl, start2, W, H)
 				export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
+				gmask := 0
 				if sg.trans_mode == 1 {
-					if td := seg_trans(i); td > 0.01 do export_ghost_mask(&fb, start2, td, false)
-					else do export_ghost_mask(&fb, start2, 1, true)
+					if td := seg_trans(i); td > 0.01 do export_ghost_mask(&fb, start2, td, false, false, vc*2+gmask, W, H)
+					else do export_ghost_mask(&fb, start2, 1, true, false, vc*2+gmask, W, H)
+					gmask += 1
 				}
-				if ghost_out_d[i] > 0.01 do export_ghost_mask(&fb, ghost_out_t0[i], ghost_out_d[i], false, true)
+				if ghost_out_d[i] > 0.01 do export_ghost_mask(&fb, ghost_out_t0[i], ghost_out_d[i], false, true, vc*2+gmask, W, H)
 				fmt.sbprintf(&fb, "[v%d];", vc)
 				nb := fmt.tprintf("c%d", vc)
 				fmt.sbprintf(&fb, "[%s][v%d]overlay=0:0:enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
@@ -837,11 +862,13 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			}
 			if op < 0.999 do fmt.sbprintf(&fb, ",colorchannelmixer=aa=%.3f", op)
 			export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
+			gmask := 0
 			if sg.trans_mode == 1 {
-				if td := seg_trans(i); td > 0.01 do export_ghost_mask(&fb, start2, td, false)
-				else do export_ghost_mask(&fb, start2, 1, true)
+				if td := seg_trans(i); td > 0.01 do export_ghost_mask(&fb, start2, td, false, false, vc*2+gmask, segW, segH)
+				else do export_ghost_mask(&fb, start2, 1, true, false, vc*2+gmask, segW, segH)
+				gmask += 1
 			}
-			if ghost_out_d[i] > 0.01 do export_ghost_mask(&fb, ghost_out_t0[i], ghost_out_d[i], false, true)
+			if ghost_out_d[i] > 0.01 do export_ghost_mask(&fb, ghost_out_t0[i], ghost_out_d[i], false, true, vc*2+gmask, segW, segH)
 			fmt.sbprintf(&fb, "[v%d];", vc)
 			nb := fmt.tprintf("c%d", vc)
 			fmt.sbprintf(&fb, "[%s][v%d]overlay=x='(main_w-overlay_w)/2+(%.4f)*main_w':y='(main_h-overlay_h)/2+(%.4f)*main_h':enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
