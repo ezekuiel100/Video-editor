@@ -523,6 +523,28 @@ progress_line_separa_progresso_de_erro :: proc(t: ^testing.T) {
 	testing.expect(t, !progress_line("=x"), "sem chave antes do = não é progresso")
 }
 
+@(test)
+export_err_noise_ignora_rodape_do_muxer :: proc(t: ^testing.T) {
+	testing.expect(t, export_err_noise("[out#0/mp4 @ 1] Terminating thread with return code -22 (Invalid argument)"),
+		"é o rodapé que escondia a causa")
+	testing.expect(t, export_err_noise("[out#0/mp4 @ 1] Task finished with error code: -22 (Invalid argument)"),
+		"task finished também é rodapé")
+	testing.expect(t, !export_err_noise("[mp4 @ 1] Application provided invalid, non monotonically increasing dts to muxer in stream 1"),
+		"a linha do DTS é a causa — tem que ir pro toast")
+}
+
+@(test)
+export_amix_corrige_timestamp :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	add_seg(1, 10, 0, 8)
+	args, g := t_build(t)
+	testing.expect(t, strings.contains(g, "amix=inputs=2"), "os dois entram no mix")
+	testing.expect(t, strings.contains(g, "aresample=async=1:first_pts=0[aout]"),
+		"sem aresample o AAC estoura DTS no corte e o MP4 morre com -22")
+	testing.expect(t, t_has(args, "-avoid_negative_ts"), "MP4 precisa de make_zero p/ DTS no limite")
+}
+
 // O export monta [N:a] a partir da FONTE ORIGINAL, então nunca dependeu da extração de áudio
 // do player — mas consultava c.has_audio, que é "existe um rl.Music carregado agora". Esse
 // campo é false durante toda a extração (que no caminho de cache só começa depois de o clipe

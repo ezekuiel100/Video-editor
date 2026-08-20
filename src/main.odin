@@ -392,6 +392,7 @@ win_click_t:  f64 = -1    // instante do último clique na barra (detecta duplo-
 main :: proc() {
 	hide_child_consoles() // esconde as janelas de console dos ffmpeg — ANTES de qualquer spawn
 	init_paths() // resolve %TEMP% e acha o ffmpeg empacotado — ANTES de qualquer spawn/temp
+	if dump_export_cli() do return
 	sweep_orphan_temps() // varre o %TEMP%: apaga temporários de PIDs mortos (lixo de crashes antigos)
 	job_init() // antes de qualquer spawn de ffmpeg
 	export_nvenc_ok = probe_nvenc() // 1 frame: decide se o checkbox de GPU pode ligar

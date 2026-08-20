@@ -61,6 +61,132 @@ export_fmt_ext :: proc(f: ExportFmt) -> string {
 	}
 	return ".mp4"
 }
+
+// editor.exe -dump-export projeto.ovp [saida.mp4]
+// monta o MESMO comando do botão Exportar (dry, sem GL) e roda o ffmpeg com loglevel info
+// p/ ver a causa real — o toast da UI só guarda a última linha (quase sempre o -22 genérico).
+dump_export_cli :: proc() -> bool {
+	if len(os.args) < 3 || os.args[1] != "-dump-export" do return false
+	ovp := os.args[2]
+	out := len(os.args) >= 4 ? os.args[3] : "dump_out.mp4"
+	data, rerr := os.read_entire_file(ovp, context.temp_allocator)
+	if rerr != nil {
+		fmt.eprintfln("nao abriu %s: %v", ovp, rerr)
+		return true
+	}
+	lines := strings.split_lines(string(data), context.temp_allocator)
+	if len(lines) < 1 || strings.trim_space(lines[0]) != "OVP1" {
+		fmt.eprintfln("ovp invalido")
+		return true
+	}
+	ar_auto = false
+	mpaths := make([dynamic]string, context.temp_allocator)
+	Seg2 :: struct { fields: [OVP_SEG_N]f32 }
+	segd := make([dynamic]Seg2, context.temp_allocator)
+	res_w, res_h := 1920, 1080
+	lnv := 3
+	li := 1
+	for li < len(lines) {
+		ln := strings.trim_space(lines[li]); li += 1
+		if ln == "" do continue
+		toks := strings.fields(ln, context.temp_allocator)
+		if len(toks) == 0 do continue
+		switch toks[0] {
+		case "res":
+			if len(toks) >= 3 {
+				res_w = strconv.parse_int(toks[1]) or_else res_w
+				res_h = strconv.parse_int(toks[2]) or_else res_h
+			}
+		case "tracks":
+			if len(toks) >= 2 do lnv = strconv.parse_int(toks[1]) or_else lnv
+		case "media":
+			n := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else 0) : 0
+			for _ in 0 ..< n {
+				if li < len(lines) {
+					append(&mpaths, strings.trim_space(lines[li]))
+					li += 1
+				}
+			}
+		case "seg":
+			n := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else 0) : 0
+			for _ in 0 ..< n {
+				if li >= len(lines) do break
+				ft := strings.fields(strings.trim_space(lines[li]), context.temp_allocator); li += 1
+				s: Seg2
+				s.fields[14] = 1
+				for k in 0 ..< min(OVP_SEG_N, len(ft)) do s.fields[k] = f32(strconv.parse_f64(ft[k]) or_else 0)
+				append(&segd, s)
+			}
+		}
+	}
+	nclips = 0
+	nsegs = 0
+	nfx = 0
+	g_nv = clamp(lnv, 1, MAXV)
+	set_proj_res(res_w, res_h)
+	for p in mpaths {
+		if strings.has_prefix(p, "#") do continue
+		i := nclips
+		if i >= MAX_CLIPS do break
+		clips[i] = Clip{}
+		clips[i].path = p
+		dur, _, vw, vh, _ := video_probe(p)
+		clips[i].dur = dur
+		clips[i].vw = vw
+		clips[i].vh = vh
+		clips[i].src_audio = probe_has_audio(p)
+		intrinsics.atomic_store(&clips[i].probed, true)
+		nclips += 1
+		fmt.printfln("media %d: %s dur=%.3f %dx%d audio=%v", i, p, dur, vw, vh, clips[i].src_audio)
+	}
+	for s in segd {
+		f := s.fields
+		si := add_seg(int(f[0]), f[2], f[3], f[4], int(f[1]))
+		if si >= 0 do seg_apply_ovp_fields(&segs[si], f)
+	}
+	fmt.printfln("proj %dx%d nclips=%d nsegs=%d total=%.3f", proj_w, proj_h, nclips, nsegs, timeline_dur())
+	args, graph, ok := export_build_args(out, false, true)
+	if !ok {
+		fmt.eprintfln("export_build_args recusou")
+		return true
+	}
+	fmt.println("--- GRAPH ---")
+	fmt.println(graph)
+	fmt.println("--- ARGS ---")
+	for a in args do fmt.println(a)
+	fg_path := fmt.tprintf("%s_dump_fgraph.txt", AUDIO_BASE)
+	if os.write_entire_file(fg_path, transmute([]u8)graph) != nil {
+		fmt.eprintfln("falha ao gravar %s", fg_path)
+		return true
+	}
+	run := make([dynamic]string, context.temp_allocator)
+	for a in args {
+		if a == "-filter_complex_script" {
+			append(&run, a)
+			continue
+		}
+		if strings.contains(a, "_fgraph.txt") {
+			append(&run, fg_path)
+			continue
+		}
+		if a == "pipe:1" {
+			append(&run, fmt.tprintf("%s_dump_prev.raw", AUDIO_BASE))
+			continue
+		}
+		if a == "-loglevel" {
+			append(&run, a, "warning")
+			continue
+		}
+		if a == "error" && len(run) > 0 && run[len(run)-1] == "warning" do continue
+		append(&run, a)
+	}
+	fmt.printfln("--- RUN ffmpeg loglevel warning ---")
+	state, stdout, stderr, e := os.process_exec(os.Process_Desc{ command = run[:] }, context.temp_allocator)
+	fmt.printfln("exec_err=%v exited=%v code=%d stdout=%d", e, state.exited, state.exit_code, len(stdout))
+	fmt.println("--- STDERR ---")
+	fmt.println(string(stderr))
+	return true
+}
 // prévia AO VIVO da exportação: um 2º ramo do filtro (split) manda frames rgb24
 // reduzidos pelo stdout; a thread os lê e a main sobe na textura do overlay.
 PREV_W :: i32(480)
@@ -126,6 +252,15 @@ progress_line :: proc(s: string) -> bool {
 	return false
 }
 
+// linhas de rodapé do ffmpeg 7+ (thread do muxer). Não são a causa — a causa veio ANTES.
+export_err_noise :: proc(s: string) -> bool {
+	return strings.contains(s, "Terminating thread") ||
+		strings.contains(s, "Task finished with error code") ||
+		strings.contains(s, "Error muxing a packet") ||
+		strings.contains(s, "Nothing was written into output file") ||
+		strings.contains(s, "Error submitting a packet to the muxer")
+}
+
 export_worker :: proc() {
 	buf: [4096]u8
 	line: [512]u8
@@ -140,11 +275,14 @@ export_worker :: proc() {
 					if len(s) > 0 && s[len(s)-1] == '\r' do s = s[:len(s)-1] // Windows: -progress usa CRLF
 					if export_apply_progress(s) {
 						// out_time_* atualizou o %
-					} else if !progress_line(s) {
-						// guarda a ÚLTIMA linha que não é progresso: é o erro do ffmpeg, a
-						// única pista da causa (o app não tem console p/ onde olhar)
-						n2 := min(len(s), len(export_err))
-						copy(export_err[:], s[:n2]); export_err_n = n2
+					} else if !progress_line(s) && !export_err_noise(s) {
+						// guarda a PRIMEIRA linha útil: o ffmpeg 7+ termina com
+						// "Terminating thread ... -22", que sobrescrevia a causa
+						// ("non monotonically increasing dts", "height not divisible"...).
+						if export_err_n == 0 {
+							n2 := min(len(s), len(export_err))
+							copy(export_err[:], s[:n2]); export_err_n = n2
+						}
 					}
 					ll = 0
 				} else if ll < len(line) { line[ll] = ch; ll += 1 }
@@ -778,7 +916,13 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	if ac > 0 {
 		fmt.sbprintf(&fb, ";")
 		for k in 0 ..< ac do fmt.sbprintf(&fb, "[a%d]", k)
-		fmt.sbprintf(&fb, "amix=inputs=%d:normalize=0:dropout_transition=0[aout]", ac)
+		// aresample=async=1: o amix+adelay entrega pacotes com PTS/DTS furados no
+		// INSTANTE em que um clipe acaba e o próximo começa (corte na timeline).
+		// O AAC recusa com "non monotonically increasing dts" / "Queue input is
+		// backward in time" e o muxer MP4 morre com -22 (Invalid argument) — o
+		// toast só mostrava a última linha ("Terminating thread... -22").
+		// first_pts=0 ancora o mix no zero da timeline.
+		fmt.sbprintf(&fb, "amix=inputs=%d:normalize=0:dropout_transition=0,aresample=async=1:first_pts=0[aout]", ac)
 	}
 
 	if !want_video && ac == 0 { set_toast("Nada de áudio para exportar"); return nil, "", false } // MP3 sem áudio
@@ -861,6 +1005,9 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		case .MP4, .HEVC: append(&args, "-c:a", "aac", "-b:a", "192k")
 		}
 	}
+	// MP4/MOV recusam DTS negativo/NOPTS (EINVAL -22). make_zero desloca a linha do
+	// tempo p/ não estourar o muxer se o amix ainda entregar um pacote no limite.
+	if export_fmt == .MP4 || export_fmt == .HEVC do append(&args, "-avoid_negative_ts", "make_zero")
 	append(&args, out)
 	// 2ª saída (só formatos de vídeo): frames rgb24 da prévia ao vivo pelo stdout (pipe:1)
 	if want_video do append(&args, "-map", "[vpout]", "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-t", tlim, "-max_muxing_queue_size", "4096", "pipe:1")
