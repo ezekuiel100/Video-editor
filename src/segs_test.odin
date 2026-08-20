@@ -628,6 +628,62 @@ velocidade_para_no_efeito_no_vizinho_e_no_fim_da_fonte :: proc(t: ^testing.T) {
 	testing.expect(t, t_feq(speed_fit_dur(si, 20, 0), 0.05), "o piso de 0,05s continua sendo o piso")
 }
 
+// cortar + acelerar + voltar a 1x tem de devolver o trecho inteiro. Sem ripple o
+// vizinho do corte ficava na posição antiga, virava parede, e a metade acelerada
+// sumia (dur*speed encolhia em silêncio).
+@(test)
+velocidade_volta_a_1x_depois_do_corte :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10)
+	testing.expect(t, split_seg_at(a, 5), "corta no meio")
+	src0 := segs[a].dur * seg_speed(a)
+	apply_seg_speed(a, 2)
+	testing.expect(t, t_feq(segs[a].dur, 2.5), "2x encolhe a metade esquerda na timeline")
+	testing.expect(t, t_feq(segs[a].dur * segs[a].speed, src0), "mas o trecho da fonte continua o mesmo")
+	testing.expect(t, t_feq(segs[1].start, 2.5), "o vizinho do corte acompanha (sem vão)")
+	apply_seg_speed(a, 1)
+	testing.expect(t, t_feq(segs[a].speed, 1) && t_feq(segs[a].dur, 5),
+		"voltar a 1x devolve a duração original da metade")
+	testing.expect(t, t_feq(segs[a].dur * segs[a].speed, src0), "e o trecho da fonte inteiro")
+	testing.expect(t, t_feq(segs[1].start, 5), "o vizinho volta pro ponto do corte")
+}
+
+@(test)
+velocidade_nao_move_a_outra_trilha :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 10)
+	b := add_seg(1, 10, 0, 8, 1) // outra trilha, colado no fim de A
+	apply_seg_speed(a, 2)
+	testing.expect(t, t_feq(segs[b].start, 10), "trilha vizinha não rippla")
+	apply_seg_speed(a, 1)
+	testing.expect(t, t_feq(segs[a].dur, 10) && t_feq(segs[b].start, 10), "1x restaura A e B continua")
+}
+
+@(test)
+velocidade_empurra_efeito_da_trilha :: proc(t: ^testing.T) {
+	t_reset()
+	si := add_seg(0, 0, 0, 10)
+	fxsegs[0] = FxSeg{ track = 0, start = 10, dur = 2 }; nfx = 1
+	apply_seg_speed(si, 2)
+	testing.expect(t, t_feq(fxsegs[0].start, 5), "efeito colado no fim acompanha o encolhe")
+	apply_seg_speed(si, 1)
+	testing.expect(t, t_feq(fxsegs[0].start, 10), "e volta no 1x")
+}
+
+@(test)
+velocidade_audio_separado_acompanha :: proc(t: ^testing.T) {
+	t_reset()
+	v := add_seg(0, 0, 0, 10)
+	a := add_seg(0, 0, 0, 10, MAXV)
+	segs[a].aonly = true
+	apply_seg_speed(v, 2)
+	testing.expect(t, t_feq(segs[v].dur, 5) && t_feq(segs[a].dur, 5), "os dois encolhem")
+	testing.expect(t, t_feq(segs[a].speed, 2), "e o áudio separado ganha a mesma velocidade")
+	apply_seg_speed(v, 1)
+	testing.expect(t, t_feq(segs[v].dur, 10) && t_feq(segs[a].dur, 10) && t_feq(segs[a].speed, 1),
+		"voltar a 1x restaura os dois")
+}
+
 // `dup_req_c` é zerado à força pela troca de qualidade da prévia e pela remoção de mídia.
 // Se isso pegar um pedido ANTES de o worker olhar, ele nunca sinaliza `dup_ready` — o único
 // ponto que baixava `dup_inflight`. A flag ficava presa e o dup_request retornava cedo pelo

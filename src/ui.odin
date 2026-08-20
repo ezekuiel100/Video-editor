@@ -2191,12 +2191,14 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 			if ui_btn(br, labels[k], abs(sg.speed - presets[k]) < 0.001) { sg.speed = presets[k]; changed = true }
 		}
 		y += 36
-		// aplica: preserva o trecho da fonte (dur*speed) e recalcula a duração na timeline,
-		// limitada pelo próximo clipe da trilha e pelo fim da fonte.
+		// aplica: preserva o trecho da fonte (dur*speed), recalcula a duração na
+		// timeline e desliza o resto da trilha (ripple). Sem o ripple, um corte
+		// à direita virava parede e voltar a 1x não devolvia a parte acelerada.
+		// o fade é reajustado quando o arrasto assentar (fades_settle)
 		if changed {
-			span := sg.dur * old_speed
-			// o fade é reajustado quando o arrasto assentar (fades_settle)
-			sg.dur = speed_fit_dur(selected, span / sg.speed, (c.dur - sg.in_off) / sg.speed)
+			nsp := sg.speed
+			sg.speed = old_speed // o slider já gravou o valor novo; apply lê a velocidade ATUAL como a antiga
+			apply_seg_speed(selected, nsp)
 		}
 		txt("Duração", x, y, 13, TEXT); txt(timecode(sg.dur), vx - 10, y, 13, MUTED); y += 24
 		txt("Muda o tom do áudio.", x, y, 11, MUTED)

@@ -304,6 +304,65 @@ speed_fit_dur :: proc(si: int, want, src_left: f32) -> f32 {
 	return max(0.05, min(want, limit - sg.start, src_left))
 }
 
+// desliza o que está à direita de `old_end` na trilha do seg `si` (outros clipes +
+// efeitos). Mesma ideia do ripple do Delete: o vão/aperto da velocidade não deixa
+// o vizinho do corte encostar e virar parede.
+speed_ripple :: proc(si: int, old_end, delta: f32) {
+	if si < 0 || si >= nsegs || abs(delta) < 0.0001 do return
+	tr := segs[si].track
+	for j in 0 ..< nsegs {
+		if j == si || segs[j].track != tr do continue
+		if segs[j].start >= old_end - 0.001 do segs[j].start = max(0, segs[j].start + delta)
+	}
+	for k in 0 ..< nfx {
+		if fxsegs[k].track != tr do continue
+		if fxsegs[k].start >= old_end - 0.001 do fxsegs[k].start = max(0, fxsegs[k].start + delta)
+	}
+}
+
+// áudio separado que ainda está sincronizado com o vídeo (ou o inverso): mesma
+// fonte, mesmo recorte, mesma duração e velocidade. -1 se não houver.
+speed_twin :: proc(si: int) -> int {
+	if si < 0 || si >= nsegs do return -1
+	sg := segs[si]
+	for j in 0 ..< nsegs {
+		if j == si || segs[j].src != sg.src || segs[j].aonly == sg.aonly do continue
+		if abs(segs[j].start - sg.start) > 0.02 do continue
+		if abs(segs[j].in_off - sg.in_off) > 0.02 do continue
+		if abs(segs[j].dur - sg.dur) > 0.02 do continue
+		if abs(seg_speed(j) - seg_speed(si)) > 0.001 do continue
+		return j
+	}
+	return -1
+}
+
+// aplica velocidade nova: preserva o trecho da fonte (`dur*speed`) e recalcula a
+// duração na timeline. O resto da trilha desliza pelo delta — senão acelerar
+// encolhia o clipe, o vizinho do corte virava parede, e voltar a 1x não devolvia
+// a parte acelerada. Áudio separado que ainda está em sincronia acompanha.
+apply_seg_speed :: proc(si: int, new_speed: f32) {
+	if si < 0 || si >= nsegs do return
+	c := seg_src(si)
+	if c.is_img || c.is_text do return
+	nsp := new_speed <= 0 ? f32(1) : new_speed
+	osp := seg_speed(si)
+	if abs(nsp - osp) < 0.0001 do return
+	sg := &segs[si]
+	span := sg.dur * osp
+	src_left := max(f32(0), (c.dur - sg.in_off) / nsp)
+	new_dur := max(f32(0.05), min(span / nsp, src_left))
+	twin := speed_twin(si)
+	fit :: proc(k: int, nsp, new_dur: f32) {
+		old_end := segs[k].start + segs[k].dur
+		delta := new_dur - segs[k].dur
+		segs[k].speed = nsp
+		segs[k].dur = new_dur
+		speed_ripple(k, old_end, delta)
+	}
+	fit(si, nsp, new_dur)
+	if twin >= 0 do fit(twin, nsp, new_dur)
+}
+
 fx_free_start :: proc(tr, mv: int, proposed, dur: f32) -> f32 { // empurra p/ a direita até um vão livre
 	s := max(0, proposed)
 	for _ in 0 ..< nsegs + nfx + 1 {
