@@ -1279,13 +1279,14 @@ draw_trans_icon :: proc(box: rl.Rectangle, kind: int) {
 		for k in 0 ..< 8 { a := u8(f32(k)/7*255); rl.DrawRectangleRec({ ix + f32(k)*(iw/8), iy, iw/8+1, ih }, rl.Color{ 205, 208, 216, a }) }
 	case 2: // fade de saída: claro -> preto
 		for k in 0 ..< 8 { a := u8((1-f32(k)/7)*255); rl.DrawRectangleRec({ ix + f32(k)*(iw/8), iy, iw/8+1, ih }, rl.Color{ 205, 208, 216, a }) }
-	case 3: // dissolve orgânico: fundo + manchas de fumaça (não círculo)
-		rl.DrawRectangleRec({ ix, iy, iw, ih }, rl.Color{ 70, 110, 140, 255 })
-		blob := rl.Color{ 200, 150, 130, 200 }
-		rl.DrawRectangleRec({ ix + iw*0.08, iy + ih*0.18, iw*0.28, ih*0.32 }, blob)
-		rl.DrawRectangleRec({ ix + iw*0.42, iy + ih*0.08, iw*0.22, ih*0.24 }, rl.Color{ 200, 150, 130, 150 })
-		rl.DrawRectangleRec({ ix + iw*0.55, iy + ih*0.40, iw*0.36, ih*0.42 }, blob)
-		rl.DrawRectangleRec({ ix + iw*0.18, iy + ih*0.58, iw*0.24, ih*0.28 }, rl.Color{ 200, 150, 130, 170 })
+	case 3: // tinta/fumaça (Filmora): manchas pretas orgânicas
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, rl.Color{ 228, 230, 235, 255 })
+		ink := rl.Color{ 18, 18, 20, 255 }
+		rl.DrawCircleV({ ix + iw*0.36, iy + ih*0.58 }, ih*0.36, ink)
+		rl.DrawCircleV({ ix + iw*0.58, iy + ih*0.34 }, ih*0.30, ink)
+		rl.DrawCircleV({ ix + iw*0.22, iy + ih*0.30 }, ih*0.16, ink)
+		rl.DrawCircleV({ ix + iw*0.74, iy + ih*0.72 }, ih*0.20, ink)
+		rl.DrawCircleV({ ix + iw*0.48, iy + ih*0.12 }, ih*0.10, ink)
 	}
 }
 
@@ -1480,7 +1481,7 @@ draw_color_panel :: proc(r: rl.Rectangle) {
 
 draw_transitions_panel :: proc(r: rl.Rectangle) {
 	txt("Transições", r.x + 14, r.y + 12, 15, TEXT)
-	txt("Dissolve orgânico: a cena nova entra por cima (fantasma); a antiga só some no fim.",
+	txt("Dissolve orgânico: máscara de tinta/fumaça — a imagem some por partes.",
 		r.x + 14, r.y + 38, 12, MUTED)
 	items := []struct{ name: cstring, kind: int }{ {"Dissolver", 0}, {"Fade de entrada", 1}, {"Fade de saída", 2}, {"Dissolve orgânico", 3} }
 	tw: f32 = 132; th: f32 = 74; gap: f32 = 12

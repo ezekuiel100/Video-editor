@@ -652,8 +652,7 @@ fade_preto_sozinho_nao_ganha_enable :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(g, "alpha=1:enable="), "mas sem enable")
 }
 
-// Dissolve orgânico: A e B recebem geq (opacidade + fumaça). Sem fade do dissolver
-// limpo — o mix 40/60 e a máscara invertida de A estão no geq.
+// Dissolve orgânico: wipe de tinta (máscara luma). A e B em geq, sem fade limpo.
 @(test)
 export_aparicao_nao_some_o_clipe_de_saida :: proc(t: ^testing.T) {
 	t_export_reset()
@@ -664,9 +663,10 @@ export_aparicao_nao_some_o_clipe_de_saida :: proc(t: ^testing.T) {
 	testing.expect(t, seg_ghost(b), "dissolve orgânico válido")
 	_, g := t_build(t)
 	testing.expect(t, strings.contains(g, "geq="), "máscara no grafo")
-	testing.expect(t, strings.count(g, "geq=") >= 2, "A (segura) e B (fantasma) têm geq")
-	testing.expect(t, strings.contains(g, "0.38"), "A segura até o meio")
-	testing.expect(t, strings.contains(g, "0.70"), "B entra como overlay")
+	testing.expect(t, strings.count(g, "geq=") >= 2, "A e B têm a máscara de tinta")
+	testing.expect(t, strings.contains(g, "sin(X"), "luma orgânica no plano")
+	testing.expect(t, strings.contains(g, "1.20"), "limiar da tinta com folga")
+	testing.expect(t, strings.contains(g, "(1-("), "A some nas manchas (máscara invertida)")
 	testing.expect(t, !strings.contains(g, "hypot"), "não é íris/raio")
 	testing.expect(t, !strings.contains(g, "fade=t=out"), "opacidade vai no geq, não no fade")
 	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.500"), "sem fade-in cheio de dissolver")

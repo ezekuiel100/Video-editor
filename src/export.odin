@@ -355,26 +355,22 @@ export_trans_fades :: proc(fb: ^strings.Builder, start2, tend, din, dout: f32, s
 	if vout > 0.01 do fmt.sbprintf(fb, ",fade=t=out:st=%.3f:d=%.3f:alpha=1", send-vout, vout)
 }
 
-// Dissolve orgânico = os 9 frames: A segura; B entra como overlay fantasma no
-// quadro inteiro; A some no fim. Sem janela/íris. invert=true = clipe que SAI.
+// Wipe de tinta/fumaça (Filmora): limiar sobre luma orgânica. invert=true = clipe que SAI.
 export_ghost_mask :: proc(fb: ^strings.Builder, start2, d: f32, persist: bool, invert := false) {
 	P: string
 	if persist {
-		P = "0.35"
+		P = "0.50"
 	} else {
 		du := max(d, 0.001)
 		P = fmt.tprintf("min(1\\,max(0\\,(T-%.3f)/%.3f))", start2, du)
 	}
-	if invert {
-		// hold até 38%, some até 98%
-		U := fmt.tprintf("min(1\\,max(0\\,((%s)-0.38)/0.60))", P)
-		M := fmt.tprintf("(1-((%s)*(%s)*(3-2*(%s))))", U, U, U)
-		fmt.sbprintf(fb, ",format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*(%s)'", M)
-		return
-	}
-	// B: fade-in nos primeiros 70%
-	U := fmt.tprintf("min(1\\,max(0\\,(%s)/0.70))", P)
+	// tinta: sins distorcidos (manchas grandes + bordas irregulares), sem hypot
+	ink := "(0.50+0.22*sin(X*0.007+Y*0.005)+0.18*sin(X*0.013+2.5*sin(Y*0.009))+0.14*sin(Y*0.011+2.0*sin(X*0.008))+0.12*sin((X+40*sin(Y*0.006))*0.016+Y*0.010))"
+	s :: 0.10
+	T := fmt.tprintf("((%s)*1.20-0.10)", P)
+	U := fmt.tprintf("min(1\\,max(0\\,((%s)-((%s)-%.2f))/%.2f))", T, ink, s, 2*s)
 	M := fmt.tprintf("((%s)*(%s)*(3-2*(%s)))", U, U, U)
+	if invert do M = fmt.tprintf("(1-(%s))", M)
 	fmt.sbprintf(fb, ",format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*(%s)'", M)
 }
 

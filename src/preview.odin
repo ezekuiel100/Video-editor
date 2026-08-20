@@ -48,6 +48,11 @@ float vn(vec2 p, vec2 seed) {
     float n11 = fract(sin(dot(i+vec2(1.0,1.0), seed)) * 43758.5453);
     return mix(mix(n00,n10,f.x), mix(n01,n11,f.x), f.y);
 }
+float fbm3(vec2 p) {
+    return vn(p, vec2(127.1, 311.7))*0.55
+         + vn(p*2.07, vec2(269.5, 183.3))*0.30
+         + vn(p*4.13, vec2(74.2, 91.7))*0.15;
+}
 out vec4 finalColor;
 void main() {
     vec2 span = uv1 - uv0;
@@ -91,19 +96,19 @@ void main() {
     c = clamp(c, 0.0, 1.0);
     float a = src.a;
     if (wipeFeather > 0.001) {
-        // Os 9 frames: A fica opaca; B entra POR CIMA como fantasma no quadro todo;
-        // A só some no fim. Sem janela, sem círculo, sem buracos — isso é que
-        // deixava o efeito "completamente diferente" do vídeo.
-        float p = wipeEdge;
-        float n = vn(local*vec2(2.1, 1.7), vec2(127.1, 311.7));
-        float wob = (n - 0.5) * 0.08;
-        if (wipeInv > 0.5) {
-            a *= clamp((1.0 - smoothstep(0.38, 0.98, p)) + wob * p, 0.0, 1.0);
-        } else {
-            float fade = smoothstep(0.00, 0.70, p);
-            a *= clamp(fade + wob * 0.10, 0.0, 1.0);
-            c = mix(c, c*0.98 + vec3(0.03, 0.032, 0.035), fade*(1.0-fade)*0.30);
-        }
+        // Wipe de tinta/fumaça (Filmora): máscara luma orgânica. Manchas escuras
+        // revelam primeiro — a imagem some por partes, sem círculo e sem fade limpo.
+        vec2 q = local * vec2(2.55, 2.05);
+        float n1 = fbm3(q);
+        q += vec2(n1, fbm3(q + vec2(5.2, 1.4))) * 0.48;
+        float n2 = fbm3(q * 1.65);
+        q += vec2(n2, n1) * 0.28;
+        float ink = smoothstep(0.22, 0.78, fbm3(q));
+        float s = max(wipeFeather, 0.09);
+        float t = wipeEdge * (1.0 + 2.0*s) - s;
+        float m = smoothstep(ink - s, ink + s, t);
+        if (wipeInv > 0.5) m = 1.0 - m;
+        a *= m;
     }
     finalColor = vec4(c, a)*colDiffuse*fragColor;
 }`
@@ -831,10 +836,9 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	}
 }
 
-// progresso do dissolve orgânico: p=0 A inteiro; p=1 B inteiro.
-// feather = maciez da fumaça (a tinta da borda é mais seca no shader).
+// wipe de tinta: p=0 nada de B; p=1 B inteiro. feather = borda da mancha.
 ghost_wipe_edge :: proc(p: f32) -> (edge, feather: f32) {
-	return clamp(p, 0, 1), 0.14
+	return clamp(p, 0, 1), 0.10
 }
 
 // segmento B cuja transição CENTRADA no corte cobre `time` na trilha t. A janela é
@@ -868,7 +872,7 @@ composite_video :: proc(fx, fy, fw, fh: f32, sel_box: bool) -> bool {
 			half := seg_trans(tb)/2; cut := segs[tb].start
 			p := clamp((vt - (cut - half)) / (2*half), 0, 1) // 0 no início do overlap, 1 no fim
 			if seg_ghost(tb) {
-				// linear: o easing (B rápido, A segura) vive no shader, como no vídeo-ref.
+				// tinta: A some nas manchas, B aparece nas mesmas (máscara luma).
 				edge, feather := ghost_wipe_edge(p)
 				if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box, edge, feather, 1) }
 				any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, edge, feather, 0)
@@ -881,7 +885,7 @@ composite_video :: proc(fx, fy, fw, fh: f32, sel_box: bool) -> bool {
 			if cur >= 0 {
 				// overlay persistente: manchas já abertas (~meio da rampa)
 				if segs[cur].trans_mode == 1 && segs[cur].trans <= 0.01 {
-					any = true; draw_seg_composited(cur, vt, 1, fx, fy, fw, fh, sel_box, 0.35, 0.14)
+					any = true; draw_seg_composited(cur, vt, 1, fx, fy, fw, fh, sel_box, 0.50, 0.10)
 				} else {
 					any = true; draw_seg_composited(cur, vt, 1, fx, fy, fw, fh, sel_box)
 				}
