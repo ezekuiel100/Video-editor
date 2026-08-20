@@ -145,7 +145,7 @@ Também dá pra arrastar arquivos de vídeo pra dentro da janela (vão pro bin).
 
 | | |
 |---|---|
-| Mídias no bin | 12 (`MAX_CLIPS`) |
+| Mídias no bin | 1000 (`MAX_CLIPS`) |
 | Segmentos na timeline | 64 (`MAX_SEGS`) |
 | Trilhas | 12 vídeo + 12 áudio |
 | Resolução do preview | 1280×720 (`DEC_W`×`DEC_H`; streaming alterna 720p/360p) |

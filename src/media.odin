@@ -67,7 +67,7 @@ SCRUB_ABORT_S :: f32(2.0)
 // Codec leve (SW rápido) nunca cruza o limiar e segue em SW — sem disputar sessão NVDEC à toa.
 SCRUB_HW_MS :: f64(700)
 
-MAX_CLIPS     :: 12
+MAX_CLIPS     :: 1000
 DBG_PLAY      :: false // LOG de diagnóstico do playback a cada frame (stderr); ligue p/ depurar
 DBG_SPV       :: false // LOG do preview de VELOCIDADE (WAV esticado): pedido, render e adoção
 DBG_SEEK      :: false // LOG do relógio nos ~3s após um seek na barra do player
@@ -101,7 +101,8 @@ WAVE_RMS_GAIN :: f32(2.8)
 // player (streaming: esticado a ~900px). 96×54 era ok na trilha mas virava um borrão de
 // upscale ~9x no player durante o arrasto rápido; 256×144 (16:9) dá ~4x mais nitidez lá e
 // mantém o mesmo layout do filmstrip (proporção idêntica). Custo de RAM: ~110KB/miniatura
-// (pior caso ~47MB com 12 clipes streaming longos) — aceitável.
+// (pior caso ~110KB × N miniaturas; o teto do bin é MAX_CLIPS, mas só clipes
+	// na timeline pedem filmstrip de verdade — 64 segs no máximo).
 THUMB_W       :: 256
 THUMB_H       :: 144
 THUMB_FR      :: THUMB_W * THUMB_H * 3
