@@ -601,6 +601,12 @@ zoompan_anima_sobre_o_clipe_nao_sobre_o_stream :: proc(t: ^testing.T) {
 	segs[c].crop2_x = 0.3; segs[c].crop2_y = 0.3; segs[c].crop2_w = 0.3; segs[c].crop2_h = 0.3
 	_, g2 := t_build(t)
 	testing.expect(t, strings.contains(g2, "clip((on/30-0.0000)/4.0000"), "sem transição: sem deslocamento, divisor = dur")
+	// o zoompan deste ffmpeg não interpola (x/y viram int, amostra nearest) — sem o
+	// 2× + lanczos o Pan & Zoom sai tremido no arquivo e suave na prévia (GPU bilinear).
+	testing.expect(t, strings.contains(g2, "format=gbrp,scale=iw*2:ih*2:flags=lanczos,zoompan="),
+		"supersample 2× em gbrp antes do zoompan")
+	testing.expect(t, strings.contains(g2, "x='trunc(") && strings.contains(g2, "y='trunc("),
+		"x/y truncados: round-to-nearest oscilava e virava ziguezague")
 }
 
 // Dissolver e fade preto são rampas INDEPENDENTES e com origens diferentes: o dissolver é

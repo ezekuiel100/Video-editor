@@ -802,12 +802,18 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				Ls := fmt.tprintf("clip((on/30-%.4f)/%.4f\\,0\\,1)", f64(hd), f64(max(sg.dur, 0.0001)))
 				Ss := fmt.tprintf("(%s*%s*(3-2*%s))", Ls, Ls, Ls) // smoothstep (sem vírgulas: seguro no filtergraph)
 				zexpr := fmt.tprintf("1/(%.6f+(%.6f)*%s)", za, zb-za, Ss) // zoom = 1/fração da região
-				xexpr := fmt.tprintf("(%.6f+(%.6f)*%s)*iw", xa, xb-xa, Ss)  // canto sup-esq X (px da entrada do zoompan)
-				yexpr := fmt.tprintf("(%.6f+(%.6f)*%s)*ih", ya, yb-ya, Ss)  // canto sup-esq Y
+				// trunc: o zoompan arredonda x/y p/ pixel INTEIRO (não tem interp neste
+				// ffmpeg). Sem trunc o round-to-nearest oscila p/ cima e p/ baixo = ziguezague.
+				xexpr := fmt.tprintf("trunc((%.6f+(%.6f)*%s)*iw)", xa, xb-xa, Ss)
+				yexpr := fmt.tprintf("trunc((%.6f+(%.6f)*%s)*ih)", ya, yb-ya, Ss)
 				// fps=30 ANTES do zoompan: com d=1 ele emite 1 frame de saída por frame de
 				// ENTRADA; sem normalizar, fonte !=30fps (ex.: 60fps de stream) muda a duração
 				// do vídeo e DESSINCRONIZA do áudio. Normaliza p/ 30fps -> dur*30 frames exatos.
-				fmt.sbprintf(&fb, ",fps=30%s,zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,setpts=PTS+%.3f/TB,format=%s",
+				// TREMO: o zoompan amostra nearest-neighbor em coords inteiras. O preview é
+				// bilinear na GPU (float) → suave. Sem o 2× + lanczos o arquivo sai "tremido"
+				// (1 px de salto por frame no pan lento). gbrp evita o crawl de chroma 4:2:0.
+				// Este ffmpeg NÃO tem zoompan:interp=linear — o supersample é o que resta.
+				fmt.sbprintf(&fb, ",fps=30%s,format=gbrp,scale=iw*2:ih*2:flags=lanczos,zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,setpts=PTS+%.3f/TB,format=%s",
 					padf, zexpr, xexpr, yexpr, segW, segH, start2, pix)
 			} else {
 				// RECORTE estático: mantém só a sub-região (frações da fonte) antes de escalar
