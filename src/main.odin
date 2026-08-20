@@ -95,6 +95,8 @@ src_preview: int = -1 // mídia em PRÉVIA de origem no player (duplo-clique no 
 src_t:       f32      // posição (s) na fonte durante a prévia de origem
 bin_click_t: f64 = -1 // tempo do último clique no bin (p/ detectar duplo-clique)
 bin_click_i: int = -1 // item do último clique no bin
+tl_click_t:  f64 = -1 // tempo do último clique num clipe da timeline (duplo-clique = seek)
+tl_click_i:  int = -1 // segmento do último clique na timeline
 player_vol:  f32 = 1  // volume do PLAYER (monitor): escala o que se OUVE, NÃO altera o áudio dos segmentos
 vol_popup:   bool     // popup do slider VERTICAL de volume (abre ao clicar no alto-falante)
 shot_n:      int      // contador de screenshots (nome do arquivo)

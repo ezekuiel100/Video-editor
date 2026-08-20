@@ -912,15 +912,20 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			} else {
 				// clicar num seg NÃO marcado (ou aparar borda) redefine a seleção só p/ ele;
 				// clicar num JÁ marcado mantém o grupo e move todos juntos
+				now := rl.GetTime()
+				dbl := edge == 0 && tl_click_i == hit && now - tl_click_t < 0.35
 				if edge != 0 || !seg_marked[hit] { seg_clear_marks(); seg_marked[hit] = true }
-				st.drag = .Clip
-				drag_clip = hit
-				drag_trim = edge
 				selected = hit // foco (para inspector/remover/dividir)
-				grab_dt = tl_t(mp.x) - segs[hit].start
-				// corpo do clipe (não a borda de aparo): cursor vai ao início se ainda
-				// não está sobre o vídeo — como nos NLEs, pra já ver o 1º quadro.
-				if edge == 0 do seek_to_seg_if_outside(hit)
+				if dbl {
+					// duplo-clique no corpo: cursor vai ao início se ainda não está sobre o clipe
+					seek_to_seg_if_outside(hit)
+				} else {
+					st.drag = .Clip
+					drag_clip = hit
+					drag_trim = edge
+					grab_dt = tl_t(mp.x) - segs[hit].start
+				}
+				tl_click_t = now; tl_click_i = hit
 			}
 		} else if hovered(ruler) {
 			st.drag = .Playhead // arrastar na RÉGUA move o playhead (scrub)

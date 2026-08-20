@@ -1658,7 +1658,7 @@ do_redo :: proc() {
 	set_toast("Refazer")
 }
 
-// clique num clipe: se o playhead NÃO está sobre ele, vai para o início.
+// duplo-clique num clipe: se o playhead NÃO está sobre ele, vai para o início.
 // já em cima (inclusive no frame inicial) = não mexe — o usuário está vendo o clipe.
 seek_to_seg_if_outside :: proc(si: int) {
 	if si < 0 || si >= nsegs || !seg_ready(si) do return
