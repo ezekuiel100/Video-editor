@@ -601,12 +601,78 @@ zoompan_anima_sobre_o_clipe_nao_sobre_o_stream :: proc(t: ^testing.T) {
 	segs[c].crop2_x = 0.3; segs[c].crop2_y = 0.3; segs[c].crop2_w = 0.3; segs[c].crop2_h = 0.3
 	_, g2 := t_build(t)
 	testing.expect(t, strings.contains(g2, "clip((on/30-0.0000)/4.0000"), "sem transição: sem deslocamento, divisor = dur")
-	// o zoompan deste ffmpeg não interpola (x/y viram int, amostra nearest) — sem o
-	// 2× + lanczos o Pan & Zoom sai tremido no arquivo e suave na prévia (GPU bilinear).
-	testing.expect(t, strings.contains(g2, "format=gbrp,scale=iw*2:ih*2:flags=lanczos,zoompan="),
-		"supersample 2× em gbrp antes do zoompan")
-	testing.expect(t, strings.contains(g2, "x='trunc(") && strings.contains(g2, "y='trunc("),
-		"x/y truncados: round-to-nearest oscilava e virava ziguezague")
+	t_assert_zoompan_suave(t, g)
+	t_assert_zoompan_suave(t, g2)
+}
+
+// ---------- Pan & Zoom: TREMO no arquivo (não só a curva da animação) ----------
+// O que deixava o "ampliar" tremido: zoompan vira x/y em int e amostra nearest.
+// A prévia é bilinear na GPU. Este ffmpeg não tem interp=linear. A guarda é:
+//   1. SUPER >= 2  (1× = 1 px de salto por frame no pan lento)
+//   2. gbrp + lanczos imediatamente antes do zoompan (não bilinear, não yuv420)
+//   3. x/y com trunc( — round-to-nearest oscilava e virava ziguezague
+//   4. nenhum zoompan:interp=  (este ffmpeg rejeita / ignora)
+
+@(test)
+zoompan_super_nao_desce_de_2 :: proc(t: ^testing.T) {
+	testing.expectf(t, ZOOM_PAN_SUPER >= 2,
+		"ZOOM_PAN_SUPER=%d: sem o 2× o Pan & Zoom volta a tremer no arquivo", ZOOM_PAN_SUPER)
+}
+
+@(test)
+zoompan_presample_e_gbrp_lanczos :: proc(t: ^testing.T) {
+	s := zoompan_presample()
+	testing.expect(t, strings.contains(s, "format=gbrp,"), "gbrp: yuv420 crawlava chroma no pan")
+	testing.expect(t, strings.contains(s, "flags=lanczos,zoompan="), "lanczos no upsample; bilinear ainda saltava")
+	testing.expect(t, strings.contains(s, fmt.tprintf("scale=iw*%d:ih*%d", ZOOM_PAN_SUPER, ZOOM_PAN_SUPER)),
+		"scale usa o fator SUPER, não um 2 hardcoded solto")
+	testing.expect(t, !strings.contains(s, "bilinear"), "bilinear no supersample não mata o tremor")
+}
+
+@(test)
+zoompan_emite_supersample_e_trunc :: proc(t: ^testing.T) {
+	t_export_reset()
+	c := add_seg(0, 0, 0, 8)
+	segs[c].zoom_anim = true
+	segs[c].crop_x = 0.05; segs[c].crop_y = 0.05; segs[c].crop_w = 0.9; segs[c].crop_h = 0.9
+	segs[c].crop2_x = 0.20; segs[c].crop2_y = 0.20; segs[c].crop2_w = 0.5; segs[c].crop2_h = 0.5
+	_, g := t_build(t)
+	t_assert_zoompan_suave(t, g)
+}
+
+// O capitalismo era retrato (784×1168) com Ken Burns em JPEG. O pad de aspecto
+// entra no meio da cadeia; o supersample ainda tem de colar no zoompan.
+@(test)
+zoompan_em_retrato_ainda_supersample :: proc(t: ^testing.T) {
+	t_export_reset()
+	proj_w = 784; proj_h = 1168
+	clips[0].is_img = true
+	clips[0].vw = 784; clips[0].vh = 1168
+	c := add_seg(0, 0, 0, 27)
+	segs[c].zoom_anim = true
+	segs[c].crop_x = 0.0; segs[c].crop_y = 0.0; segs[c].crop_w = 1; segs[c].crop_h = 1
+	segs[c].crop2_x = 0.15; segs[c].crop2_y = 0.10; segs[c].crop2_w = 0.7; segs[c].crop2_h = 0.7
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "zoompan="), "imagem com ampliar usa zoompan")
+	t_assert_zoompan_suave(t, g)
+}
+
+t_assert_zoompan_suave :: proc(t: ^testing.T, g: string) {
+	nz := strings.count(g, "zoompan=")
+	testing.expect(t, nz > 0, "grafo sem zoompan — o teste não exercita o ampliar")
+	pre := zoompan_presample()
+	testing.expectf(t, strings.count(g, pre) == nz,
+		"%d zoompan= mas só %d com %s — algum ficou sem supersample", nz, strings.count(g, pre), pre)
+	testing.expect(t, strings.count(g, "x='trunc(") == nz, "x sem trunc: round-to-nearest = ziguezague")
+	testing.expect(t, strings.count(g, "y='trunc(") == nz, "y sem trunc: idem")
+	testing.expect(t, !strings.contains(g, "zoompan=") || !strings.contains(g, "interp="),
+		"zoompan:interp= não existe neste ffmpeg — export morre ou ignora")
+	testing.expect(t, !strings.contains(g, "flags=bilinear,zoompan="),
+		"bilinear antes do zoompan não mata o salto de 1 px")
+	testing.expect(t, !strings.contains(g, "flags=fast_bilinear,zoompan="),
+		"fast_bilinear antes do zoompan idem")
+	testing.expect(t, !strings.contains(g, "x='(("), "x sem trunc (expressão crua)")
+	testing.expect(t, !strings.contains(g, "y='(("), "y sem trunc (expressão crua)")
 }
 
 // Dissolver e fade preto são rampas INDEPENDENTES e com origens diferentes: o dissolver é

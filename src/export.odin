@@ -409,6 +409,17 @@ export_ghost_mask :: proc(fb: ^strings.Builder, start2, d: f32, persist: bool, i
 		mw, mh, M, ow, oh, tag, tag, tag)
 }
 
+// TREMO do Pan & Zoom: o zoompan amostra nearest-neighbor em coords inteiras. O preview
+// é bilinear na GPU (float) → suave. Sem o N× + lanczos o arquivo sai "tremido" (1 px
+// de salto por frame no pan lento). gbrp evita o crawl de chroma 4:2:0. Este ffmpeg NÃO
+// tem zoompan:interp=linear — o supersample é o que resta.
+// NÃO baixar ZOOM_PAN_SUPER abaixo de 2: 1× (sem scale) é o tremor original.
+ZOOM_PAN_SUPER :: 2
+
+zoompan_presample :: proc() -> string {
+	return fmt.tprintf("format=gbrp,scale=iw*%d:ih*%d:flags=lanczos,zoompan=", ZOOM_PAN_SUPER, ZOOM_PAN_SUPER)
+}
+
 // EFEITOS DE COR no export: espelha o BULGE_FS (brilho/contraste/saturação -> eq; visual
 // P&B/sépia/inverter -> hue/colorchannelmixer/negate; vinheta -> vignette). Aproxima o
 // preview (não é pixel-exato, mas visualmente consistente). Nada é adicionado se neutro.
@@ -846,12 +857,8 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				// fps=30 ANTES do zoompan: com d=1 ele emite 1 frame de saída por frame de
 				// ENTRADA; sem normalizar, fonte !=30fps (ex.: 60fps de stream) muda a duração
 				// do vídeo e DESSINCRONIZA do áudio. Normaliza p/ 30fps -> dur*30 frames exatos.
-				// TREMO: o zoompan amostra nearest-neighbor em coords inteiras. O preview é
-				// bilinear na GPU (float) → suave. Sem o 2× + lanczos o arquivo sai "tremido"
-				// (1 px de salto por frame no pan lento). gbrp evita o crawl de chroma 4:2:0.
-				// Este ffmpeg NÃO tem zoompan:interp=linear — o supersample é o que resta.
-				fmt.sbprintf(&fb, ",fps=30%s,format=gbrp,scale=iw*2:ih*2:flags=lanczos,zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,setpts=PTS+%.3f/TB,format=%s",
-					padf, zexpr, xexpr, yexpr, segW, segH, start2, pix)
+				fmt.sbprintf(&fb, ",fps=30%s,%sz='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,setpts=PTS+%.3f/TB,format=%s",
+					padf, zoompan_presample(), zexpr, xexpr, yexpr, segW, segH, start2, pix)
 			} else {
 				// RECORTE estático: mantém só a sub-região (frações da fonte) antes de escalar
 				if seg_cropped(i) do fmt.sbprintf(&fb, ",crop=iw*%.5f:ih*%.5f:iw*%.5f:ih*%.5f", crw, crh, crx, cry)
