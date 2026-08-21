@@ -681,6 +681,167 @@ export_aparicao_nao_some_o_clipe_de_saida :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(g, "trim=3.500:4.500"), "o ramo da máscara só cobre o corte")
 	testing.expect(t, strings.contains(g, "alphamerge"), "máscara baixa-res aplicada no RGB cheio")
 	testing.expect(t, strings.contains(g, "format=gray,geq=lum="), "geq só no luma da miniatura")
+	t_assert_geq_barato(t, g, 1920, 1080)
+}
+
+// ---------- dissolve orgânico: CUSTO do geq (não só o visual) ----------
+// O que travou o capitalismo: geq interpreta a expressão POR PIXEL. Full-res 1080p
+// ≈ 2M evals/frame; no clipe inteiro, dezenas de segundos de CPU por transição.
+// `enable=between` NÃO basta neste ffmpeg — o filtro ainda avalia. A guarda é:
+//   1. DIV >= 8  (1/8 da área = 64× menos pixels; DIV=2 ainda engasgava)
+//   2. geq só em luma da miniatura, nunca r=/g=/b= no RGB cheio
+//   3. trim no ramo da máscara = só a janela do corte, não o clipe
+//   4. alphamerge aplica a miniatura no RGB nítido
+
+@(test)
+ghost_mask_div_nao_desce_de_8 :: proc(t: ^testing.T) {
+	testing.expectf(t, GHOST_MASK_DIV >= 8,
+		"GHOST_MASK_DIV=%d: abaixo de 8 o geq volta a travar o export (capitalismo, 2ª transição)",
+		GHOST_MASK_DIV)
+}
+
+@(test)
+ghost_mask_dims_reduz_cerca_de_64x :: proc(t: ^testing.T) {
+	casos := [][2]int{{1920, 1080}, {784, 1168}, {1152, 1712}, {64, 64}, {2, 2}}
+	for c in casos {
+		mw, mh, ow, oh := ghost_mask_dims(c[0], c[1])
+		full := max(c[0], 2) * max(c[1], 2)
+		mini := mw * mh
+		// piso: pelo menos 16× menos pixels (DIV=8 dá 64×; arredondamento em 2×2 sobra)
+		if full >= 64*64 {
+			testing.expectf(t, mini * 16 <= full,
+				"%dx%d -> miniatura %dx%d (%d px) ainda é gorda demais vs %d",
+				c[0], c[1], mw, mh, mini, full)
+		}
+		testing.expectf(t, ow >= 2 && oh >= 2 && mw >= 2 && mh >= 2,
+			"%dx%d: dimensão ímpar/zero na máscara (%d×%d -> %d×%d)", c[0], c[1], mw, mh, ow, oh)
+		testing.expectf(t, mw%2 == 0 && mh%2 == 0 && ow%2 == 0 && oh%2 == 0,
+			"%dx%d: scale ímpar (%d×%d / %d×%d) — ffmpeg recusa em yuv420", c[0], c[1], mw, mh, ow, oh)
+	}
+}
+
+// chamada direta: o texto emitido é o contrato. Se alguém "otimizar" de volta p/
+// geq RGB + enable=between, este teste quebra sem precisar montar a timeline.
+@(test)
+ghost_mask_emite_miniatura_trim_e_luma :: proc(t: ^testing.T) {
+	fb := strings.builder_make(context.temp_allocator)
+	export_ghost_mask(&fb, 31.35, 1.2, false, true, 7, 784, 1168)
+	s := strings.to_string(fb)
+	mw, mh, ow, oh := ghost_mask_dims(784, 1168)
+	want_down := fmt.tprintf("scale=%d:%d:flags=fast_bilinear,format=gray,geq=lum=", mw, mh)
+	want_up   := fmt.tprintf("scale=%d:%d:flags=bilinear,format=gray", ow, oh)
+	testing.expect(t, strings.contains(s, "trim=31.350:32.550"), "trim = só os 1.2s do corte, não o clipe")
+	testing.expect(t, strings.contains(s, want_down), "geq vê a miniatura, não o frame cheio")
+	testing.expect(t, strings.contains(s, want_up), "sobe de volta p/ casar com o RGB")
+	testing.expect(t, strings.contains(s, "alphamerge"), "máscara aplicada no RGB nítido")
+	testing.expect(t, !strings.contains(s, "geq=r="), "geq em RGB = 3 planos × full-res")
+	testing.expect(t, !strings.contains(s, "enable="), "enable no geq NÃO pula trabalho neste ffmpeg")
+	testing.expect(t, strings.contains(s, "(1-("), "invert=true: o clipe que SAI some nas manchas")
+}
+
+@(test)
+ghost_mask_persist_ainda_e_miniatura :: proc(t: ^testing.T) {
+	fb := strings.builder_make(context.temp_allocator)
+	export_ghost_mask(&fb, 0, 1, true, false, 0, 1920, 1080)
+	s := strings.to_string(fb)
+	mw, mh, _, _ := ghost_mask_dims(1920, 1080)
+	want := fmt.tprintf("scale=%d:%d:flags=fast_bilinear,format=gray,geq=lum=", mw, mh)
+	testing.expect(t, strings.contains(s, want), "overlay persistente também geq a 1/8 — senão um overlay de 10s trava igual")
+	testing.expect(t, !strings.contains(s, "trim="), "persist = máscara o clipe todo (sem janela)")
+	testing.expect(t, strings.contains(s, "alphamerge"), "mesmo caminho barato")
+}
+
+// O cenário que travou de verdade: clipes longos (16s+7s) e dissolve de 1.2s.
+// Sem o trim, o geq rodava nos ~16s do A e nos ~7s do B. Sem a miniatura, 1.2s
+// a full-res ainda engasgava. Os dois têm de continuar no grafo montado.
+@(test)
+dissolve_organico_em_clipe_longo_nao_geq_full :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 16)
+	b := add_seg(1, 16, 0, 7)
+	segs[b].trans = 1.2
+	segs[b].trans_mode = 1
+	testing.expect(t, t_feq(seg_trans(b), 1.2), "dissolve de 1.2s (senão o teste não pega o corte)")
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "trim=15.400:16.600"),
+		"máscara recortada na janela do corte (15.4..16.6), não nos 16s do clipe")
+	t_assert_geq_barato(t, g, 1920, 1080)
+	// nenhum ramo de máscara pode durar o clipe: trim A:B,scale=mini tem B-A ≈ 1.2
+	n, ok_all := t_mask_trims_curtos(g, 1.2)
+	testing.expect(t, n >= 2, "A (sai) e B (entra) precisam do ramo de máscara")
+	testing.expect(t, ok_all, "algum trim da máscara cobriu o clipe inteiro em vez do corte")
+}
+
+// cada `geq=` do grafo: luma de miniatura, nunca RGB, nunca full-res, nunca sem alphamerge.
+t_assert_geq_barato :: proc(t: ^testing.T, g: string, fw, fh: int) {
+	testing.expect(t, !strings.contains(g, "geq=r="), "geq=r= avalia RGB cheio — o que travou o export")
+	testing.expect(t, !strings.contains(g, "geq=g="), "geq=g= idem")
+	testing.expect(t, !strings.contains(g, "geq=b="), "geq=b= idem")
+	nge := strings.count(g, "geq=")
+	nlum := strings.count(g, "format=gray,geq=lum=")
+	testing.expectf(t, nge == nlum && nge > 0,
+		"%d geq= mas só %d em luma cinza — o resto é o caminho lento", nge, nlum)
+	testing.expect(t, strings.count(g, "alphamerge") == nge,
+		"cada geq precisa de alphamerge no RGB cheio")
+	// scale=W:H imediatamente antes do geq de luma
+	needle := "scale="
+	from := 0
+	for {
+		i := strings.index(g[from:], "format=gray,geq=lum=")
+		if i < 0 do break
+		at := from + i
+		// recua até o scale= mais próximo à esquerda
+		chunk := g[:at]
+		ls := strings.last_index(chunk, needle)
+		testing.expect(t, ls >= 0, "geq=lum sem scale= antes")
+		if ls < 0 do break
+		rest := g[ls+len(needle):]
+		w, n1, ok1 := t_num_head(rest)
+		if !ok1 || n1 >= len(rest) || rest[n1] != ':' {
+			testing.expect(t, false, "não li W do scale antes do geq")
+			break
+		}
+		h, _, ok2 := t_num_head(rest[n1+1:])
+		testing.expect(t, ok2, "não li H do scale antes do geq")
+		area := int(w) * int(h)
+		full := fw * fh
+		testing.expectf(t, area * 16 <= full,
+			"geq a %dx%d (%d px) ainda é gordo vs canvas %dx%d — DIV caiu?",
+			int(w), int(h), area, fw, fh)
+		from = at + 1
+	}
+}
+
+// trims do ramo da máscara: `trim=A:B,scale=` (o trim de vídeo é `]trim=` sem scale na cola).
+t_mask_trims_curtos :: proc(g: string, want_d: f32) -> (n: int, all_short: bool) {
+	all_short = true
+	from := 0
+	for {
+		i := strings.index(g[from:], "trim=")
+		if i < 0 do break
+		at := from + i
+		rest := g[at+5:]
+		a, n1, ok1 := t_num_head(rest)
+		if !ok1 || n1 >= len(rest) || rest[n1] != ':' {
+			from = at + 5
+			continue
+		}
+		b, n2, ok2 := t_num_head(rest[n1+1:])
+		if !ok2 {
+			from = at + 5
+			continue
+		}
+		after := rest[n1+1+n2:]
+		if !strings.has_prefix(after, ",scale=") {
+			from = at + 5
+			continue
+		}
+		n += 1
+		d := b - a
+		if d < want_d-0.05 || d > want_d+0.05 do all_short = false
+		from = at + 5
+	}
+	return
 }
 
 // Clipe opaco, sem giro/fade/dissolver: yuv420p no overlay (rgba 4 bytes/pixel era o

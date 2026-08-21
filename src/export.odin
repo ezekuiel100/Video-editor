@@ -359,13 +359,28 @@ export_trans_fades :: proc(fb: ^strings.Builder, start2, tend, din, dout: f32, s
 // CUSTO: `geq` interpreta a expressão POR PIXEL — a 1080p isso é ~2M evals/frame e o
 // dissolve orgânico travava o export mesmo limitado ao corte (a 2ª transição do
 // capitalismo, 1.2s, ainda engasgava). A tinta é de manchas GRANDES: calcula a máscara
-// a 1/8 da resolução (64× menos pixels), sobe com bilinear e aplica via alphamerge
-// (C nativo). O RGB do clipe fica em full-res. Fora do corte, `trim` no ramo da máscara
-// faz o geq nem ver os outros frames (o `enable` do geq neste ffmpeg às vezes não pula
-// o trabalho). persist = overlay sem duração: máscara o clipe todo, ainda em 1/8.
-// `tag` distingue labels se o mesmo clipe ganha máscara de entrada E de saída.
-// fw/fh = tamanho ATUAL do stream (segW×segH ou canvas do texto) p/ o scale de volta
-// casar pixel a pixel com o ramo RGB.
+// a 1/GHOST_MASK_DIV da resolução (64× menos pixels com DIV=8), sobe com bilinear e
+// aplica via alphamerge (C nativo). O RGB do clipe fica em full-res. Fora do corte,
+// `trim` no ramo da máscara faz o geq nem ver os outros frames (o `enable` do geq
+// neste ffmpeg às vezes não pula o trabalho). persist = overlay sem duração: máscara
+// o clipe todo, ainda em miniatura. `tag` distingue labels se o mesmo clipe ganha
+// máscara de entrada E de saída. fw/fh = tamanho ATUAL do stream (segW×segH ou
+// canvas do texto) p/ o scale de volta casar pixel a pixel com o ramo RGB.
+//
+// NÃO baixar GHOST_MASK_DIV abaixo de 8: DIV=1 (full-res) e DIV=2 ainda travavam.
+GHOST_MASK_DIV :: 8
+
+ghost_mask_dims :: proc(fw, fh: int) -> (mw, mh, ow, oh: int) {
+	mw = max(fw / GHOST_MASK_DIV, 2)
+	mh = max(fh / GHOST_MASK_DIV, 2)
+	mw -= mw % 2; mh -= mh % 2
+	if mw < 2 do mw = 2
+	if mh < 2 do mh = 2
+	ow = max(fw, 2); oh = max(fh, 2)
+	ow -= ow % 2; oh -= oh % 2
+	return
+}
+
 export_ghost_mask :: proc(fb: ^strings.Builder, start2, d: f32, persist: bool, invert: bool, tag, fw, fh: int) {
 	P: string
 	du := max(d, 0.001)
@@ -374,19 +389,16 @@ export_ghost_mask :: proc(fb: ^strings.Builder, start2, d: f32, persist: bool, i
 	} else {
 		P = fmt.tprintf("min(1\\,max(0\\,(T-%.3f)/%.3f))", start2, du)
 	}
-	// *8: a máscara é calculada a 1/8; X/Y pequenos teriam manchas 8× maiores.
-	ink := "(0.50+0.22*sin(X*8*0.007+Y*8*0.005)+0.18*sin(X*8*0.013+2.5*sin(Y*8*0.009))+0.14*sin(Y*8*0.011+2.0*sin(X*8*0.008))+0.12*sin((X*8+40*sin(Y*8*0.006))*0.016+Y*8*0.010))"
+	// X/Y * DIV: a máscara é miniatura; sem isso as manchas incham DIV vezes.
+	k := GHOST_MASK_DIV
+	ink := fmt.tprintf("(0.50+0.22*sin(X*%d*0.007+Y*%d*0.005)+0.18*sin(X*%d*0.013+2.5*sin(Y*%d*0.009))+0.14*sin(Y*%d*0.011+2.0*sin(X*%d*0.008))+0.12*sin((X*%d+40*sin(Y*%d*0.006))*0.016+Y*%d*0.010))",
+		k, k, k, k, k, k, k, k, k)
 	s :: 0.10
 	Th := fmt.tprintf("((%s)*1.20-0.10)", P)
 	U := fmt.tprintf("min(1\\,max(0\\,((%s)-((%s)-%.2f))/%.2f))", Th, ink, s, 2*s)
 	M := fmt.tprintf("((%s)*(%s)*(3-2*(%s)))", U, U, U)
 	if invert do M = fmt.tprintf("(1-(%s))", M)
-	mw := max(fw / 8, 2); mh := max(fh / 8, 2)
-	mw -= mw % 2; mh -= mh % 2
-	if mw < 2 do mw = 2
-	if mh < 2 do mh = 2
-	ow := max(fw, 2); oh := max(fh, 2)
-	ow -= ow % 2; oh -= oh % 2
+	mw, mh, ow, oh := ghost_mask_dims(fw, fh)
 	fmt.sbprintf(fb, ",format=rgba,split[gp%d][gw%d];", tag, tag)
 	if persist {
 		fmt.sbprintf(fb, "[gw%d]", tag)
