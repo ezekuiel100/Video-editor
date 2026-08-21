@@ -608,24 +608,32 @@ zoompan_anima_sobre_o_clipe_nao_sobre_o_stream :: proc(t: ^testing.T) {
 // ---------- Pan & Zoom: TREMO no arquivo (não só a curva da animação) ----------
 // O que deixava o "ampliar" tremido: zoompan vira x/y em int e amostra nearest.
 // A prévia é bilinear na GPU. Este ffmpeg não tem interp=linear. A guarda é:
-//   1. SUPER >= 2  (1× = 1 px de salto por frame no pan lento)
-//   2. gbrp + lanczos imediatamente antes do zoompan (não bilinear, não yuv420)
-//   3. x/y com trunc( — round-to-nearest oscilava e virava ziguezague
-//   4. nenhum zoompan:interp=  (este ffmpeg rejeita / ignora)
+//   1. SUPER >= 4 nas imagens; vídeo >= 2  (1× = 1 px de salto por frame)
+//   2. OUT >= 2: zoompan num box maior + lanczos descendo (filtra o nearest)
+//   3. gbrp + lanczos imediatamente antes do zoompan (não bilinear, não yuv420)
+//   4. x/y com trunc( — round-to-nearest oscilava e virava ziguezague
+//   5. nenhum zoompan:interp=  (este ffmpeg rejeita / ignora)
 
 @(test)
-zoompan_super_nao_desce_de_2 :: proc(t: ^testing.T) {
-	testing.expectf(t, ZOOM_PAN_SUPER >= 2,
-		"ZOOM_PAN_SUPER=%d: sem o 2× o Pan & Zoom volta a tremer no arquivo", ZOOM_PAN_SUPER)
+zoompan_fatores_nao_descem :: proc(t: ^testing.T) {
+	testing.expectf(t, ZOOM_PAN_SUPER >= 4,
+		"ZOOM_PAN_SUPER=%d: imagem com ampliar precisa de 4× na fonte", ZOOM_PAN_SUPER)
+	testing.expectf(t, ZOOM_PAN_OUT >= 2,
+		"ZOOM_PAN_OUT=%d: sem downsample o zoompan entrega nearest no frame final", ZOOM_PAN_OUT)
+	testing.expect(t, zoompan_in_mul(true, 784, 1168) >= 4, "JPEG retrato (capitalismo) em 4×")
+	testing.expect(t, zoompan_in_mul(true, 1920, 1080) >= 4, "JPEG 1080p em 4×")
+	testing.expect(t, zoompan_in_mul(false, 1920, 1080) >= 2, "vídeo 1080p em pelo menos 2×")
+	testing.expect(t, zoompan_in_mul(true, 4000, 6000) == 2, "foto enorme: teto 8K, não 16K")
+	ow, oh := zoompan_out_wh(1920, 1080)
+	testing.expect(t, ow >= 3840 && oh >= 2160, "box do zoompan é 2× o segmento")
 }
 
 @(test)
 zoompan_presample_e_gbrp_lanczos :: proc(t: ^testing.T) {
-	s := zoompan_presample()
+	s := zoompan_presample(4)
 	testing.expect(t, strings.contains(s, "format=gbrp,"), "gbrp: yuv420 crawlava chroma no pan")
 	testing.expect(t, strings.contains(s, "flags=lanczos,zoompan="), "lanczos no upsample; bilinear ainda saltava")
-	testing.expect(t, strings.contains(s, fmt.tprintf("scale=iw*%d:ih*%d", ZOOM_PAN_SUPER, ZOOM_PAN_SUPER)),
-		"scale usa o fator SUPER, não um 2 hardcoded solto")
+	testing.expect(t, strings.contains(s, "scale=iw*4:ih*4"), "scale usa o fator, não um 2 hardcoded solto")
 	testing.expect(t, !strings.contains(s, "bilinear"), "bilinear no supersample não mata o tremor")
 }
 
@@ -654,18 +662,21 @@ zoompan_em_retrato_ainda_supersample :: proc(t: ^testing.T) {
 	segs[c].crop2_x = 0.15; segs[c].crop2_y = 0.10; segs[c].crop2_w = 0.7; segs[c].crop2_h = 0.7
 	_, g := t_build(t)
 	testing.expect(t, strings.contains(g, "zoompan="), "imagem com ampliar usa zoompan")
+	testing.expect(t, strings.contains(g, "scale=iw*4:ih*4:flags=lanczos,zoompan="),
+		"JPEG retrato upsample 4× (2× ainda tremia no pan lento)")
 	t_assert_zoompan_suave(t, g)
 }
 
 t_assert_zoompan_suave :: proc(t: ^testing.T, g: string) {
 	nz := strings.count(g, "zoompan=")
 	testing.expect(t, nz > 0, "grafo sem zoompan — o teste não exercita o ampliar")
-	pre := zoompan_presample()
-	testing.expectf(t, strings.count(g, pre) == nz,
-		"%d zoompan= mas só %d com %s — algum ficou sem supersample", nz, strings.count(g, pre), pre)
+	npre := strings.count(g, "format=gbrp,scale=iw*4:ih*4:flags=lanczos,zoompan=") +
+		strings.count(g, "format=gbrp,scale=iw*2:ih*2:flags=lanczos,zoompan=")
+	testing.expectf(t, npre == nz,
+		"%d zoompan= mas só %d com upsample gbrp+lanczos — algum ficou sem supersample", nz, npre)
 	testing.expect(t, strings.count(g, "x='trunc(") == nz, "x sem trunc: round-to-nearest = ziguezague")
 	testing.expect(t, strings.count(g, "y='trunc(") == nz, "y sem trunc: idem")
-	testing.expect(t, !strings.contains(g, "zoompan=") || !strings.contains(g, "interp="),
+	testing.expect(t, !strings.contains(g, "interp="),
 		"zoompan:interp= não existe neste ffmpeg — export morre ou ignora")
 	testing.expect(t, !strings.contains(g, "flags=bilinear,zoompan="),
 		"bilinear antes do zoompan não mata o salto de 1 px")
@@ -673,6 +684,51 @@ t_assert_zoompan_suave :: proc(t: ^testing.T, g: string) {
 		"fast_bilinear antes do zoompan idem")
 	testing.expect(t, !strings.contains(g, "x='(("), "x sem trunc (expressão crua)")
 	testing.expect(t, !strings.contains(g, "y='(("), "y sem trunc (expressão crua)")
+	// o downsample DEPOIS do zoompan é o que filtra o nearest: s=2×box, scale p/ o box
+	testing.expectf(t, strings.count(g, ":fps=30,scale=") == nz,
+		"%d zoompan sem scale= na cola — está entregando nearest no tamanho final", nz)
+	t_assert_zoompan_desce_2x(t, g, nz)
+}
+
+// cada `d=1:s=SW x SH:fps=30,scale=DW:DH` tem SW,SH >= ~2× o destino
+t_assert_zoompan_desce_2x :: proc(t: ^testing.T, g: string, nz: int) {
+	n := 0
+	from := 0
+	for {
+		i := strings.index(g[from:], ":d=1:s=")
+		if i < 0 do break
+		rest := g[from+i+7:]
+		sw, n1, ok1 := t_num_head(rest)
+		if !ok1 || n1 >= len(rest) || rest[n1] != 'x' {
+			from += i + 7
+			continue
+		}
+		sh, n2, ok2 := t_num_head(rest[n1+1:])
+		if !ok2 {
+			from += i + 7
+			continue
+		}
+		after := rest[n1+1+n2:]
+		if !strings.has_prefix(after, ":fps=30,scale=") {
+			from += i + 7
+			continue
+		}
+		rest2 := after[len(":fps=30,scale="):]
+		dw, m1, ok3 := t_num_head(rest2)
+		if !ok3 || m1 >= len(rest2) || rest2[m1] != ':' {
+			testing.expect(t, false, "scale depois do zoompan sem W:H")
+			return
+		}
+		dh, _, ok4 := t_num_head(rest2[m1+1:])
+		testing.expect(t, ok4, "scale depois do zoompan sem H")
+		testing.expectf(t, int(sw) >= int(dw)*2-2 && int(sh) >= int(dh)*2-2,
+			"zoompan s=%dx%d não é 2× o destino %dx%d — downsample sumiu", int(sw), int(sh), int(dw), int(dh))
+		testing.expect(t, strings.contains(after, "flags=lanczos"),
+			"downsample do zoompan sem lanczos")
+		n += 1
+		from += i + 7
+	}
+	testing.expectf(t, n == nz, "achei %d downsamples p/ %d zoompan", n, nz)
 }
 
 // Dissolver e fade preto são rampas INDEPENDENTES e com origens diferentes: o dissolver é

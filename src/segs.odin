@@ -61,8 +61,9 @@ Seg :: struct {
 	// vai de (crop_*) no INÍCIO do clipe a (crop2_*) no FIM, interpolada no tempo com easing
 	// suave. Reaproveita TODO o render/escala do crop (a região menor = mais zoom). Preview
 	// anima ao vivo (GPU bilinear, coords float). No export vira `zoompan` com a MESMA
-	// curva + supersample 2× (o filtro arredonda x/y p/ int e amostra nearest — sem isso
-	// o arquivo treme; ver start_export). crop não serve lá: fixa w/h na init.
+	// curva + upsample (2× vídeo / 4× imagem) e downsample lanczos 2× (o filtro arredonda
+	// x/y p/ int e amostra nearest — sem o downsample o arquivo treme; ver start_export).
+	// crop não serve lá: fixa w/h na init.
 	// zoom_anim=false = recorte estático.
 	zoom_anim: bool,
 	crop2_x, crop2_y, crop2_w, crop2_h: f32,

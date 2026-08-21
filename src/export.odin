@@ -410,14 +410,36 @@ export_ghost_mask :: proc(fb: ^strings.Builder, start2, d: f32, persist: bool, i
 }
 
 // TREMO do Pan & Zoom: o zoompan amostra nearest-neighbor em coords inteiras. O preview
-// é bilinear na GPU (float) → suave. Sem o N× + lanczos o arquivo sai "tremido" (1 px
-// de salto por frame no pan lento). gbrp evita o crawl de chroma 4:2:0. Este ffmpeg NÃO
-// tem zoompan:interp=linear — o supersample é o que resta.
-// NÃO baixar ZOOM_PAN_SUPER abaixo de 2: 1× (sem scale) é o tremor original.
-ZOOM_PAN_SUPER :: 2
+// é bilinear na GPU (float) → suave. Este ffmpeg NÃO tem zoompan:interp=linear.
+// Cadeia: upsample da fonte (gbrp+lanczos) → zoompan num box MAIOR → lanczos desce.
+// O downsample é o que some o salto de 1 px (vira subpixel). Sem ele, mesmo com 2×
+// na fonte, o arquivo ainda treme — o zoompan entregava o frame final em nearest.
+// NÃO baixar ZOOM_PAN_OUT abaixo de 2. SUPER=4 nas imagens (Ken Burns em JPEG);
+// vídeo fica em 2× na fonte p/ não virar 8K por frame. Teto 8K no upsample.
+ZOOM_PAN_SUPER :: 4
+ZOOM_PAN_OUT   :: 2
+ZOOM_PAN_MAX   :: 8192
 
-zoompan_presample :: proc() -> string {
-	return fmt.tprintf("format=gbrp,scale=iw*%d:ih*%d:flags=lanczos,zoompan=", ZOOM_PAN_SUPER, ZOOM_PAN_SUPER)
+zoompan_in_mul :: proc(is_img: bool, iw, ih: int) -> int {
+	want := is_img ? ZOOM_PAN_SUPER : 2
+	if want < 2 do want = 2
+	if iw > 0 && ih > 0 {
+		for want > 2 && (iw*want > ZOOM_PAN_MAX || ih*want > ZOOM_PAN_MAX) do want = 2
+	}
+	return want
+}
+
+zoompan_out_wh :: proc(segW, segH: int) -> (w, h: int) {
+	w = max(segW * ZOOM_PAN_OUT, 2)
+	h = max(segH * ZOOM_PAN_OUT, 2)
+	w -= w % 2; h -= h % 2
+	if w < 2 do w = 2
+	if h < 2 do h = 2
+	return
+}
+
+zoompan_presample :: proc(mul := ZOOM_PAN_SUPER) -> string {
+	return fmt.tprintf("format=gbrp,scale=iw*%d:ih*%d:flags=lanczos,zoompan=", mul, mul)
 }
 
 // EFEITOS DE COR no export: espelha o BULGE_FS (brilho/contraste/saturação -> eq; visual
@@ -857,8 +879,10 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				// fps=30 ANTES do zoompan: com d=1 ele emite 1 frame de saída por frame de
 				// ENTRADA; sem normalizar, fonte !=30fps (ex.: 60fps de stream) muda a duração
 				// do vídeo e DESSINCRONIZA do áudio. Normaliza p/ 30fps -> dur*30 frames exatos.
-				fmt.sbprintf(&fb, ",fps=30%s,%sz='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,setpts=PTS+%.3f/TB,format=%s",
-					padf, zoompan_presample(), zexpr, xexpr, yexpr, segW, segH, start2, pix)
+				zp_mul := zoompan_in_mul(cc.is_img, int(cc.vw), int(cc.vh))
+				zp_w, zp_h := zoompan_out_wh(segW, segH)
+				fmt.sbprintf(&fb, ",fps=30%s,%sz='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,scale=%d:%d:flags=lanczos,setpts=PTS+%.3f/TB,format=%s",
+					padf, zoompan_presample(zp_mul), zexpr, xexpr, yexpr, zp_w, zp_h, segW, segH, start2, pix)
 			} else {
 				// RECORTE estático: mantém só a sub-região (frações da fonte) antes de escalar
 				if seg_cropped(i) do fmt.sbprintf(&fb, ",crop=iw*%.5f:ih*%.5f:iw*%.5f:ih*%.5f", crw, crh, crx, cry)
