@@ -306,7 +306,7 @@ export_worker :: proc() {
 export_preview_worker :: proc() {
 	frame := make([]u8, PREV_BYTES); defer delete(frame)
 	got := 0
-	buf: [65536]u8
+	buf: [1 << 18]u8 // 256 KB: drena o pipe mais depressa que 1 frame (PREV_BYTES ~380 KB)
 	for {
 		n, e := os.read(export_prev_r, buf[:])
 		if n > 0 {
@@ -442,6 +442,44 @@ zoompan_presample :: proc(mul := ZOOM_PAN_SUPER) -> string {
 	return fmt.tprintf("format=gbrp,scale=iw*%d:ih*%d:flags=lanczos,zoompan=", mul, mul)
 }
 
+// Pan & Zoom no export: NÃO usar o filtro `zoompan` (nearest 14 MP/frame).
+// scale=eval=frame + crop x/y, mas NUNCA no tamanho final:
+//   1. JPEG: upsample 2× UMA vez (gbrp+lanczos) ANTES do loop — barato
+//   2. anima num box 2× (ZOOM_PAN_OUT) com crop trunc em 1 px desse grid
+//   3. lanczos desce p/ o dest — é o que some o salto (vira subpixel)
+// O tremor do export rápido vinha de trunc(.../2)*2 (salto de 2 px) + fast_bilinear.
+export_still_supersample :: proc(vw, vh: int) -> string {
+	mul := zoompan_in_mul(true, vw, vh)
+	if mul < 2 do mul = 2
+	if mul > 2 do mul = 2 // 4× no loop era 14 MP/frame; 2× uma vez + dest 2× basta
+	return fmt.tprintf("format=gbrp,scale=iw*%d:ih*%d:flags=lanczos", mul, mul)
+}
+
+export_emit_kenburns :: proc(fb: ^strings.Builder, i, segW, segH: int, hd, start2: f32, pix: string) {
+	sg := segs[i]
+	ax, ay, aw, ah := crop_norm(sg.crop_x,  sg.crop_y,  sg.crop_w,  sg.crop_h)
+	bx, by, bw, bh := crop_norm(sg.crop2_x, sg.crop2_y, sg.crop2_w, sg.crop2_h)
+	kh := aw > 0.0001 ? ah/aw : f32(1)
+	padf := ""
+	za, zb := aw, bw
+	xa, xb := ax, bx
+	ya, yb := ay, by
+	if kh > 1.002 {
+		padf = fmt.tprintf(",pad=w=iw:h=ih*%.6f:x=0:y=0", kh)
+		ya = ay/kh; yb = by/kh
+	} else if kh < 0.998 {
+		padf = fmt.tprintf(",pad=w=iw/%.6f:h=ih:x=0:y=0", kh)
+		za = ah; zb = bh
+		xa = ax*kh; xb = bx*kh
+	}
+	Ls := fmt.tprintf("clip((n/30-%.4f)/%.4f\\,0\\,1)", f64(hd), f64(max(sg.dur, 0.0001)))
+	Ss := fmt.tprintf("(%s*%s*(3-2*%s))", Ls, Ls, Ls)
+	frac := fmt.tprintf("(%.6f+(%.6f)*%s)", za, zb-za, Ss)
+	ow, oh := zoompan_out_wh(segW, segH)
+	fmt.sbprintf(fb, ",fps=30%s,format=gbrp,scale=w='max(2\\,trunc(%d/%s))':h='max(2\\,trunc(%d/%s))':eval=frame:flags=bilinear,crop=%d:%d:x='trunc((%.6f+(%.6f)*%s)*iw)':y='trunc((%.6f+(%.6f)*%s)*ih)',scale=%d:%d:flags=lanczos,setpts=PTS+%.3f/TB,format=%s",
+		padf, ow, frac, oh, frac, ow, oh, xa, xb-xa, Ss, ya, yb-ya, Ss, segW, segH, start2, pix)
+}
+
 // EFEITOS DE COR no export: espelha o BULGE_FS (brilho/contraste/saturação -> eq; visual
 // P&B/sépia/inverter -> hue/colorchannelmixer/negate; vinheta -> vignette). Aproxima o
 // preview (não é pixel-exato, mas visualmente consistente). Nada é adicionado se neutro.
@@ -476,6 +514,158 @@ seg_export_dims :: proc(i, W, H: int) -> (int, int) {
 	if segW < 2 do segW = 2
 	if segH < 2 do segH = 2
 	return segW, segH
+}
+
+// scale só quando o tamanho muda. Fonte já no tamanho do box = 0 trabalho (o caminho
+// comum: 1080p no projeto 1080p). Média/Baixa usa fast_bilinear; Alta deixa o default.
+export_scale_clause :: proc(segW, segH, src_w, src_h: int, cropped: bool) -> string {
+	if !cropped && src_w >= 2 && src_h >= 2 && src_w == segW && src_h == segH do return ""
+	if export_qual == .High do return fmt.tprintf(",scale=%d:%d", segW, segH)
+	return fmt.tprintf(",scale=%d:%d:flags=fast_bilinear", segW, segH)
+}
+
+// clipe que PRECISA do canvas+overlay (PiP, fade, transição, texto, efeitos…).
+export_seg_needs_compose :: proc(i: int) -> bool {
+	sg := segs[i]
+	c := &clips[sg.src]
+	if c.is_text do return true
+	if abs(sg.px) > 0.001 || abs(sg.py) > 0.001 || abs(sg.rot) > 0.5 do return true
+	op := sg.opacity <= 0 ? 1 : sg.opacity
+	if op < 0.999 do return true
+	if sg.vfin > 0.01 || sg.vfout > 0.01 do return true
+	if seg_trans(i) > 0.01 || sg.trans_mode == 1 do return true
+	if bulge_active(sg) || color_active(sg) do return true
+	return false
+}
+
+// recorte simples em sequência (cortar/juntar, sem PiP): dá p/ concat sem gerar um
+// 1080p preto de duração inteira e overlayar cada clipe nele — isso era o maior
+// custo do filtergraph no caso mais comum.
+export_direct_plan :: proc(idxs: ^[MAX_SEGS]int, seg_inp: []int) -> (n: int, ok: bool) {
+	if nfx > 0 do return 0, false
+	n = 0
+	for i in 0 ..< nsegs {
+		if !seg_ready(i) do continue
+		c := &clips[segs[i].src]
+		if c.is_audio || segs[i].aonly do continue
+		if track_hidden[segs[i].track] do continue
+		// legendas/texto: seg_inp fica -1 (PNGs em cap_ovs). Tem de recusar o caminho
+		// direto ANTES de pular pelo inp — senão o vídeo simples ia sozinho e as falas
+		// sumiam do arquivo.
+		if export_seg_needs_compose(i) do return 0, false
+		if i >= len(seg_inp) || seg_inp[i] < 0 do continue
+		idxs[n] = i
+		n += 1
+	}
+	if n == 0 do return 0, false
+	for a in 1 ..< n { // insertion sort por start
+		x := idxs[a]
+		j := a
+		for j > 0 && segs[idxs[j - 1]].start > segs[x].start {
+			idxs[j] = idxs[j - 1]
+			j -= 1
+		}
+		idxs[j] = x
+	}
+	for a in 1 ..< n {
+		prev := segs[idxs[a - 1]]
+		if segs[idxs[a]].start < prev.start + prev.dur - 0.02 do return 0, false
+	}
+	return n, true
+}
+
+// JPEG/PNG: 1 frame no demuxer. O filtro `loop` clona DEPOIS do scale (1 decode, 1 scale).
+// `-loop 1 -framerate 30 -t DUR` no -i redecodificava o JPEG a cada frame E em TODOS os
+// inputs em paralelo (o concat só consome 1): CPU a 100% em libjpeg, NVENC ocioso.
+export_still_loop :: proc(dur: f32) -> string {
+	if dur < 0.001 do return ""
+	return fmt.tprintf(",loop=-1:size=1:start=0,trim=0:%.3f,setpts=PTS-STARTPTS", dur)
+}
+
+// stderr do ffmpeg é falha do NVENC (não do filtergraph)? Só aí vale cair p/ CPU.
+// Concat/SAR/"No such filter" com GPU ligada NÃO é a placa — desligar nvenc_ok
+// deixava o checkbox morto o resto da sessão e o slideshow ia em libx264.
+export_err_is_nvenc :: proc(s: string) -> bool {
+	return strings.contains(s, "nvenc") || strings.contains(s, "NVENC") ||
+		strings.contains(s, "nvcuda") || strings.contains(s, "OpenEncodeSession") ||
+		strings.contains(s, "No NVENC capable") || strings.contains(s, "Cannot load nvcuda")
+}
+
+// cadeia de um clipe no caminho direto: trim + (crop) + (scale) + fps 30 + pad no canvas.
+// setpts zera (concat não usa tempo absoluto). Sem overlay, sem rgba.
+export_emit_direct_clip :: proc(fb: ^strings.Builder, i, W, H, piece: int, seg_inp: []int) {
+	sg := segs[i]
+	cc := &clips[sg.src]
+	sp := sg.speed <= 0 ? 1 : sg.speed
+	segW, segH := seg_export_dims(i, W, H)
+	t0, t1, _, _ := seg_src_span(i, 0, 0)
+	if cc.is_img {
+		// 1 frame: crop/scale UMA vez, depois clona. trim na fonte de 1/30s perderia
+		// a duração; o still_loop no fim segura sg.dur @ 30fps.
+		fmt.sbprintf(fb, "[%d:v]", seg_inp[i])
+		if sg.zoom_anim {
+			// 2× UMA vez, depois clona, depois anima — sem reescalar 14 MP/frame
+			fmt.sbprintf(fb, "%s", export_still_supersample(int(cc.vw), int(cc.vh)))
+			strings.write_string(fb, export_still_loop(sg.dur))
+			export_emit_kenburns(fb, i, segW, segH, 0, 0, "yuv420p")
+			if segW != W || segH != H {
+				fmt.sbprintf(fb, ",pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black", W, H)
+			}
+			fmt.sbprintf(fb, ",setsar=1[p%d];", piece)
+			return
+		}
+	} else {
+		fmt.sbprintf(fb, "[%d:v]trim=%.3f:%.3f,setpts=(PTS-STARTPTS)/%.5f", seg_inp[i], t0, t1, sp)
+		if sg.zoom_anim {
+			export_emit_kenburns(fb, i, segW, segH, 0, 0, "yuv420p")
+			if segW != W || segH != H {
+				fmt.sbprintf(fb, ",pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black", W, H)
+			}
+			fmt.sbprintf(fb, ",setsar=1[p%d];", piece)
+			return
+		}
+	}
+	if seg_cropped(i) {
+		crx, cry, crw, crh := seg_crop(i)
+		fmt.sbprintf(fb, ",crop=iw*%.5f:ih*%.5f:iw*%.5f:ih*%.5f", crw, crh, crx, cry)
+	}
+	strings.write_string(fb, export_scale_clause(segW, segH, int(cc.vw), int(cc.vh), seg_cropped(i)))
+	fmt.sbprintf(fb, ",fps=30")
+	if segW != W || segH != H {
+		fmt.sbprintf(fb, ",pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black", W, H)
+	}
+	// setsar=1: o concat recusa pedaços do MESMO tamanho com SAR diferente.
+	// JPEG/retrato traz SAR tipo 2877:2876; o scale de outra foto sai 1380960:1379761
+	// — tamanho 1440x1918 nos dois, e o export morria ("Input link in0:v0 parameters
+	// do not match"). Sem isto um slideshow de fotos quebra.
+	fmt.sbprintf(fb, ",format=yuv420p,setsar=1")
+	if cc.is_img do strings.write_string(fb, export_still_loop(sg.dur))
+	fmt.sbprintf(fb, "[p%d];", piece)
+}
+
+export_emit_direct_video :: proc(fb: ^strings.Builder, idxs: []int, W, H: int, total: f32, seg_inp: []int) -> string {
+	GAP :: f32(0.02)
+	piece := 0
+	tcur: f32 = 0
+	for idx in idxs {
+		sg := segs[idx]
+		if sg.start > tcur + GAP {
+			fmt.sbprintf(fb, "color=c=black:s=%dx%d:r=30:d=%.3f,format=yuv420p,setsar=1[p%d];", W, H, sg.start - tcur, piece)
+			piece += 1
+		}
+		export_emit_direct_clip(fb, idx, W, H, piece, seg_inp)
+		piece += 1
+		tcur = sg.start + sg.dur
+	}
+	if tcur < total - GAP {
+		fmt.sbprintf(fb, "color=c=black:s=%dx%d:r=30:d=%.3f,format=yuv420p,setsar=1[p%d];", W, H, total - tcur, piece)
+		piece += 1
+	}
+	if piece <= 0 do return "p0"
+	if piece == 1 do return "p0"
+	for k in 0 ..< piece do fmt.sbprintf(fb, "[p%d]", k)
+	fmt.sbprintf(fb, "concat=n=%d:v=1:a=0[vcat];", piece)
+	return "vcat"
 }
 
 // gera os mapas de deslocamento (xmap/ymap) do efeito Distorção p/ o filtro `remap` do
@@ -563,7 +753,10 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	// de um 'q' no handle herdado e a exportação nunca acaba.
 	// max_muxing_queue_size vai NAS SAÍDAS (não aqui): é opção de output; antes do
 	// 1º -i o ffmpeg recusa com "cannot be applied to input url".
+	// filter_threads 0 = 1 thread por núcleo no filtergraph (overlay/scale/eq). Sem isto o
+	// ffmpeg fica quase single-thread no grafo composto — o encode NVENC espera o filtro.
 	append(&args, "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+		"-filter_threads", "0", "-filter_complex_threads", "0",
 		"-progress", "pipe:2", "-nostats")
 
 	// clipes de TEXTO: renderiza cada um num PNG RGBA do tamanho do canvas (já
@@ -660,8 +853,9 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			seg_inp[i] = inp; inp += 1
 			continue
 		}
-		if c.is_img { // imagem: repete o frame por dur (+ handles da transição) segundos
-			append(&args, "-loop", "1", "-framerate", "30", "-t", fmt.tprintf("%.3f", segs[i].dur + thead[i] + ttail[i]))
+		if c.is_img {
+			// 1 frame @ 30fps. A duração vai no filtro `loop` DEPOIS do scale — ver export_still_loop.
+			append(&args, "-framerate", "30")
 		} else {
 			// SEEK NA ENTRADA (-ss ANTES do -i): o ffmpeg pula pro keyframe e decodifica só até
 			// o ponto pedido. Antes o corte era SÓ no filtro (trim), o que obriga a DECODIFICAR
@@ -743,9 +937,15 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 
 	fb := strings.builder_make(context.temp_allocator)
 	if want_video {
-	fmt.sbprintf(&fb, "color=c=black:s=%dx%d:r=30:d=%.3f[b0];", W, H, total)
-	vlabel := "b0"
+	dir_idxs: [MAX_SEGS]int
+	ndir, dir_ok := export_direct_plan(&dir_idxs, seg_inp[:])
+	vlabel: string
 	vc := 0
+	if dir_ok {
+		vlabel = export_emit_direct_video(&fb, dir_idxs[:ndir], W, H, total, seg_inp[:])
+	} else {
+	fmt.sbprintf(&fb, "color=c=black:s=%dx%d:r=30:d=%.3f[b0];", W, H, total)
+	vlabel = "b0"
 	for t in 0 ..< g_nv {
 		if track_hidden[t] do continue // trilha oculta (olho): fora do vídeo exportado (áudio segue mixado)
 		for i in 0 ..< nsegs {
@@ -809,9 +1009,18 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			t0, t1, freeze_hd, freeze_tl := seg_src_span(i, hd, tl)
 			// trim em tempo ABSOLUTO da fonte: o input pode vir seekado (-ss), mas o -copyts
 			// preserva os timestamps, então esta conta independe do seek (ver montagem dos inputs)
-			fmt.sbprintf(&fb, "[%d:v]trim=%.3f:%.3f", seg_inp[i], t0, t1)
-			if freeze_hd > 0.001 do fmt.sbprintf(&fb, ",tpad=start_mode=clone:start_duration=%.3f", freeze_hd)
-			if freeze_tl > 0.001 do fmt.sbprintf(&fb, ",tpad=stop_mode=clone:stop_duration=%.3f", freeze_tl)
+			if cc.is_img {
+				if sg.zoom_anim {
+					fmt.sbprintf(&fb, "[%d:v]%s,loop=-1:size=1:start=0,trim=%.3f:%.3f,setpts=PTS-STARTPTS",
+						seg_inp[i], export_still_supersample(int(cc.vw), int(cc.vh)), t0, t1)
+				} else {
+					fmt.sbprintf(&fb, "[%d:v]loop=-1:size=1:start=0,trim=%.3f:%.3f,setpts=PTS-STARTPTS", seg_inp[i], t0, t1)
+				}
+			} else {
+				fmt.sbprintf(&fb, "[%d:v]trim=%.3f:%.3f", seg_inp[i], t0, t1)
+				if freeze_hd > 0.001 do fmt.sbprintf(&fb, ",tpad=start_mode=clone:start_duration=%.3f", freeze_hd)
+				if freeze_tl > 0.001 do fmt.sbprintf(&fb, ",tpad=stop_mode=clone:stop_duration=%.3f", freeze_tl)
+			}
 			// SEM pillarbox: a fonte de entrada JÁ está no seu aspecto real (nativo, auto-rotacionada
 			// pelo ffmpeg). crop/scale/zoompan/bulge operam em frações de iw/ih do conteúdo (não de um
 			// quadro 16:9), igual ao preview (WYSIWYG). seg_export_dims dá o box no aspecto da fonte, então
@@ -828,65 +1037,11 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				fmt.sbprintf(&fb, ",setpts=(PTS-STARTPTS)/%.5f+%.3f/TB", sp, start2)
 			}
 			if anim {
-				// ZOOM ANIMADO (Pan & Zoom): zoompan anima a região crop_*->crop2_* (frações da
-				// fonte) e a escala p/ o box segW×segH (região travada no aspecto de saída = preenche).
-				// Espelha seg_crop_at do preview: smoothstep S no tempo local (on = frame de saída).
-				// crop não serve aqui (fixa w/h na init); zoompan avalia z/x/y por frame.
-				ax, ay, aw, ah := crop_norm(sg.crop_x,  sg.crop_y,  sg.crop_w,  sg.crop_h)
-				bx, by, bw, bh := crop_norm(sg.crop2_x, sg.crop2_y, sg.crop2_w, sg.crop2_h)
-				// O zoompan amostra iw/z × ih/z: a MESMA fração nos dois eixos. Mas a região do
-				// Pan & Zoom está travada no aspecto de SAÍDA (crop_conform_lock_q: h = w*kh, com
-				// kh = aspecto_fonte/proj_ar), então com fonte e projeto de aspectos DIFERENTES a
-				// fração de altura não é a de largura — usar só `aw` amostrava uma região com a
-				// forma da FONTE e o scale final a esticava (o preview mostrava certo, o arquivo
-				// saía deformado). Correção: um `pad` estático antes do zoompan muda só o
-				// DENOMINADOR das frações e iguala as duas; a área acrescentada nunca é amostrada
-				// (a região cabe inteira no quadro original), serve só de espaço morto.
-				//   kh >= 1: altura vira ih*kh  -> fração de altura = ah/kh = aw  (z = 1/aw)
-				//   kh <  1: largura vira iw/kh -> fração de largura = aw*kh = ah (z = 1/ah)
-				// O `pad` nunca encolhe (kh>=1 só cresce em altura, kh<1 só em largura), e o
-				// aspecto real da região continua batendo com segW×segH — logo, sem distorção.
-				kh := aw > 0.0001 ? ah/aw : f32(1)
-				padf := ""
-				za, zb := aw, bw // frações que viram o zoom (o eixo que ficou "comum")
-				xa, xb := ax, bx
-				ya, yb := ay, by
-				if kh > 1.002 {
-					padf = fmt.tprintf(",pad=w=iw:h=ih*%.6f:x=0:y=0", kh)
-					ya = ay/kh; yb = by/kh // y agora é fração da altura JÁ esticada
-				} else if kh < 0.998 {
-					padf = fmt.tprintf(",pad=w=iw/%.6f:h=ih:x=0:y=0", kh)
-					za = ah; zb = bh       // o eixo comum passou a ser a ALTURA
-					xa = ax*kh; xb = bx*kh // x agora é fração da largura JÁ esticada
-				}
-				// posição do frame de saída DENTRO do clipe, em fração de dur — espelha
-				// exatamente o `clamp((t - start)/dur, 0, 1)` do seg_crop_at (preview).
-				// `on/30` conta a partir do PRIMEIRO frame do stream, que está em
-				// start2 = start - hd (o pré-roll do dissolver), e o stream ainda leva o
-				// pós-roll `tl` no fim; com folga insuficiente na fonte o tpad acrescenta
-				// mais freeze_hd/freeze_tl. Por isso a curva não pode ser on/N sobre o stream:
-				// ela saía adiantada em hd e esticada por (dur+hd+tl)/dur, e o smoothstep
-				// passava de 1 (deixando de ser monótono — o zoom VOLTAVA no fim do clipe).
-				// clip() em vez de dois min/max aninhados; vírgulas escapadas, como o
-				// `between` do enable logo abaixo.
-				Ls := fmt.tprintf("clip((on/30-%.4f)/%.4f\\,0\\,1)", f64(hd), f64(max(sg.dur, 0.0001)))
-				Ss := fmt.tprintf("(%s*%s*(3-2*%s))", Ls, Ls, Ls) // smoothstep (sem vírgulas: seguro no filtergraph)
-				zexpr := fmt.tprintf("1/(%.6f+(%.6f)*%s)", za, zb-za, Ss) // zoom = 1/fração da região
-				// trunc: o zoompan arredonda x/y p/ pixel INTEIRO (não tem interp neste
-				// ffmpeg). Sem trunc o round-to-nearest oscila p/ cima e p/ baixo = ziguezague.
-				xexpr := fmt.tprintf("trunc((%.6f+(%.6f)*%s)*iw)", xa, xb-xa, Ss)
-				yexpr := fmt.tprintf("trunc((%.6f+(%.6f)*%s)*ih)", ya, yb-ya, Ss)
-				// fps=30 ANTES do zoompan: com d=1 ele emite 1 frame de saída por frame de
-				// ENTRADA; sem normalizar, fonte !=30fps (ex.: 60fps de stream) muda a duração
-				// do vídeo e DESSINCRONIZA do áudio. Normaliza p/ 30fps -> dur*30 frames exatos.
-				zp_mul := zoompan_in_mul(cc.is_img, int(cc.vw), int(cc.vh))
-				zp_w, zp_h := zoompan_out_wh(segW, segH)
-				fmt.sbprintf(&fb, ",fps=30%s,%sz='%s':x='%s':y='%s':d=1:s=%dx%d:fps=30,scale=%d:%d:flags=lanczos,setpts=PTS+%.3f/TB,format=%s",
-					padf, zoompan_presample(zp_mul), zexpr, xexpr, yexpr, zp_w, zp_h, segW, segH, start2, pix)
+				export_emit_kenburns(&fb, i, segW, segH, hd, start2, pix)
 			} else {
 				// RECORTE estático: mantém só a sub-região (frações da fonte) antes de escalar
 				if seg_cropped(i) do fmt.sbprintf(&fb, ",crop=iw*%.5f:ih*%.5f:iw*%.5f:ih*%.5f", crw, crh, crx, cry)
-				fmt.sbprintf(&fb, ",scale=%d:%d", segW, segH)
+				strings.write_string(&fb, export_scale_clause(segW, segH, int(cc.vw), int(cc.vh), seg_cropped(i)))
 				// distorce via remap ANTES da rotação; reposiciona em start2 após.
 				if bulge_xin[i] >= 0 {
 					fmt.sbprintf(&fb, ",fps=30,format=rgb24[bpre%d];[bpre%d][%d:v][%d:v]remap[brm%d];[brm%d]setpts=PTS+%.3f/TB,format=%s",
@@ -946,9 +1101,12 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			vlabel = oo
 		}
 	}
-	// duplica a saída: [vout] p/ codificar o arquivo; [vpout] reduzido rgb24 (8fps)
-	// p/ a prévia ao vivo pelo stdout (a UI mostra enquanto exporta).
-	fmt.sbprintf(&fb, "[%s]split=2[vmain][vprv];[vmain]format=yuv420p[vout];[vprv]fps=8,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,format=rgb24[vpout]",
+	} // else: caminho compose (canvas+overlay)
+	// prévia SEMPRE: 2º ramo rgb24 pelo stdout. fps=8 ANTES do scale (menos pixels).
+	// Este ffmpeg NÃO tem o filtro `fifo` (N-123074: "No such filter: 'fifo'") — usá-lo
+	// derrubava TODA exportação. O desacoplo fica no pipe de 1 MB + thread que drena
+	// antes do ffmpeg subir (start_export).
+	fmt.sbprintf(&fb, "[%s]split=2[vmain][vprv];[vmain]format=yuv420p[vout];[vprv]fps=8,scale=%d:%d:flags=fast_bilinear:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,format=rgb24[vpout]",
 		vlabel, PREV_W, PREV_H, PREV_W, PREV_H)
 	}
 
@@ -1039,23 +1197,34 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	}
 	// PRESET DE VELOCIDADE: o CQ/CRF manda no tamanho; o preset manda no TEMPO. Antes tudo
 	// ia em NVENC p5 / x264 veryfast — a Média e a Baixa demoravam o mesmo que a Alta.
-	// p1 é ~2–3× p5 no mesmo CQ; ultrafast é o atalho da Baixa em CPU. VP9 sem -cpu-used
-	// (default 1) era o caminho mais lento do modal — 4/6 deixa o WEBM utilizável.
+	// p1 é ~2–3× p5 no mesmo CQ. Média usa p1/ultrafast (o recorte simples agora é
+	// limitado pelo decode+encode, não pelo preset). VP9 sem -cpu-used (default 1)
+	// era o caminho mais lento do modal — 5/6 deixa o WEBM utilizável.
 	nvenc_pr, x26x_pr, vp9_cpu: string
 	switch export_qual {
-	case .High:   nvenc_pr, x26x_pr, vp9_cpu = "p5", "veryfast", "2"
-	case .Medium: nvenc_pr, x26x_pr, vp9_cpu = "p4", "veryfast", "4"
+	case .High:   nvenc_pr, x26x_pr, vp9_cpu = "p4", "veryfast", "2"
+	case .Medium: nvenc_pr, x26x_pr, vp9_cpu = "p1", "ultrafast", "5"
 	case .Low:    nvenc_pr, x26x_pr, vp9_cpu = "p1", "ultrafast", "6"
-	case .Auto:   nvenc_pr, x26x_pr, vp9_cpu = "p4", "veryfast", "4"
+	case .Auto:   nvenc_pr, x26x_pr, vp9_cpu = "p2", "superfast", "4"
 	}
 	// codec por FORMATO. NVENC (GPU) vale p/ H.264 e HEVC; VP9 é sempre por software.
+	// Média/Baixa: -tune ll (baixa latência) + sem B-frames = mais fps no NVENC.
+	nvenc_fast := gpu && export_qual != .High
 	switch export_fmt {
 	case .MP4:
-		if gpu do append(&args, "-c:v", "h264_nvenc", "-preset", nvenc_pr, "-cq", cq, "-pix_fmt", "yuv420p", "-r", "30")
-		else    do append(&args, "-c:v", "libx264", "-preset", x26x_pr, "-crf", crf, "-pix_fmt", "yuv420p", "-r", "30")
+		if gpu {
+			append(&args, "-c:v", "h264_nvenc", "-preset", nvenc_pr, "-cq", cq, "-pix_fmt", "yuv420p", "-r", "30")
+			if nvenc_fast do append(&args, "-tune", "ll", "-bf", "0")
+		} else {
+			append(&args, "-c:v", "libx264", "-preset", x26x_pr, "-crf", crf, "-pix_fmt", "yuv420p", "-r", "30")
+		}
 	case .HEVC: // -tag:v hvc1 = players (QuickTime/Apple) reconhecem o HEVC no .mp4
-		if gpu do append(&args, "-c:v", "hevc_nvenc", "-preset", nvenc_pr, "-cq", cq, "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-r", "30")
-		else    do append(&args, "-c:v", "libx265", "-preset", x26x_pr, "-crf", crf, "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-r", "30")
+		if gpu {
+			append(&args, "-c:v", "hevc_nvenc", "-preset", nvenc_pr, "-cq", cq, "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-r", "30")
+			if nvenc_fast do append(&args, "-tune", "ll", "-bf", "0")
+		} else {
+			append(&args, "-c:v", "libx265", "-preset", x26x_pr, "-crf", crf, "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-r", "30")
+		}
 	case .WEBM: // VP9 não tem NVENC utilizável aqui; -b:v 0 = modo CRF puro; row-mt + cpu-used aceleram
 		append(&args, "-c:v", "libvpx-vp9", "-crf", crf, "-b:v", "0", "-row-mt", "1", "-cpu-used", vp9_cpu, "-pix_fmt", "yuv420p", "-r", "30")
 	case .MP3: // só áudio: descarta o vídeo por completo
@@ -1081,8 +1250,10 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	// tempo p/ não estourar o muxer se o amix ainda entregar um pacote no limite.
 	if export_fmt == .MP4 || export_fmt == .HEVC do append(&args, "-avoid_negative_ts", "make_zero")
 	append(&args, out)
-	// 2ª saída (só formatos de vídeo): frames rgb24 da prévia ao vivo pelo stdout (pipe:1)
-	if want_video do append(&args, "-map", "[vpout]", "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-t", tlim, "-max_muxing_queue_size", "4096", "pipe:1")
+	// 2ª saída SEMPRE (prévia ao vivo): frames rgb24 pelo stdout (pipe:1)
+	if want_video {
+		append(&args, "-map", "[vpout]", "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-t", tlim, "-max_muxing_queue_size", "8192", "pipe:1")
+	}
 	// REDE DE SEGURANÇA: com o grafo fora da linha, sobram os inputs (um -i por segmento, com
 	// o caminho inteiro). Ainda dá p/ estourar com muitos clipes de caminho longo, e o erro do
 	// os.process_start seria de novo um "Falha ao iniciar ffmpeg" mudo. Melhor dizer a causa.
@@ -1143,14 +1314,45 @@ start_export :: proc(out: string, gpu: bool) {
 	W, H := export_dims()
 	want_video := export_fmt != .MP3
 
-	pr, pw, e := os.pipe() // prévia (stdout)
-	if e != nil { set_toast("Falha ao criar pipe"); return }
+	pr, pw: ^os.File
+	if want_video {
+		e: os.Error
+		pr, pw, e = export_big_pipe() // prévia (stdout) — buffer grande p/ não travar o encode
+		if e != nil { set_toast("Falha ao criar pipe"); return }
+	}
 	gr, gw, e2 := os.pipe() // progresso (stderr)
-	if e2 != nil { os.close(pr); os.close(pw); set_toast("Falha ao criar pipe"); return }
-	p, pe := os.process_start(os.Process_Desc{ command = args[:], stdout = pw, stderr = gw })
-	os.close(pw); os.close(gw)
+	if e2 != nil {
+		if want_video { os.close(pr); os.close(pw) }
+		set_toast("Falha ao criar pipe"); return
+	}
+	export_r = gr; export_prev_r = pr
+	intrinsics.atomic_store(&export_prev_pub, -1)
+	intrinsics.atomic_store(&export_prev_seq, 0)
+	export_prev_last = 0; export_prev_wslot = 0
+	export_prev_thr = nil
+	if want_video {
+		if export_prev_a == nil { export_prev_a = make([]u8, PREV_BYTES); export_prev_b = make([]u8, PREV_BYTES) }
+		if !export_prev_tex_ok {
+			img := rl.GenImageColor(PREV_W, PREV_H, rl.BLACK)
+			rl.ImageFormat(&img, .UNCOMPRESSED_R8G8B8)
+			export_prev_tex = rl.LoadTextureFromImage(img)
+			rl.UnloadImage(img)
+			export_prev_tex_ok = export_prev_tex.id != 0
+		}
+		// drena o pipe ANTES do ffmpeg subir: senão o 1º frame (~380 KB) enche o buffer
+		// padrão do Windows (~64 KB) e o processo fica bloqueado no write até a thread existir.
+		export_prev_thr = thread.create_and_start(export_preview_worker)
+	}
+	desc := os.Process_Desc{ command = args[:], stderr = gw }
+	if want_video do desc.stdout = pw
+	p, pe := os.process_start(desc)
+	if want_video do os.close(pw)
+	os.close(gw)
 	if pe != nil {
-		os.close(pr); os.close(gr)
+		os.close(gr)
+		if export_prev_thr != nil {
+			thread.join(export_prev_thr); thread.destroy(export_prev_thr); export_prev_thr = nil
+		}
 		// pe costuma ser "executable file not found" quando o ffmpeg sumiu do PATH —
 		// antes virava um toast mudo e o usuário não sabia o que instalar/onde olhar.
 		set_toast(rl.TextFormat("Falha ao iniciar ffmpeg: %v", pe))
@@ -1159,29 +1361,30 @@ start_export :: proc(out: string, gpu: bool) {
 	export_job = make_kill_job()
 	if export_job != nil do AssignProcessToJobObject(export_job, win.HANDLE(p.handle))
 	sync.mutex_lock(&export_ps_mu); export_ps = p; export_ps_ok = true; sync.mutex_unlock(&export_ps_mu)
-	export_r = gr; export_prev_r = pr
 	export_total = total; export_pct = 0; export_ok = false
 	export_err_n = 0 // erro da exportação ANTERIOR não vale para esta
 	export_used_gpu = use_gpu
-	// prepara os buffers e a textura da prévia (uma vez; reusa nas próximas exportações)
-	if export_prev_a == nil { export_prev_a = make([]u8, PREV_BYTES); export_prev_b = make([]u8, PREV_BYTES) }
-	if !export_prev_tex_ok {
-		img := rl.GenImageColor(PREV_W, PREV_H, rl.BLACK)
-		rl.ImageFormat(&img, .UNCOMPRESSED_R8G8B8)
-		export_prev_tex = rl.LoadTextureFromImage(img)
-		rl.UnloadImage(img)
-		export_prev_tex_ok = export_prev_tex.id != 0
-	}
-	intrinsics.atomic_store(&export_prev_pub, -1)
-	intrinsics.atomic_store(&export_prev_seq, 0)
-	export_prev_last = 0; export_prev_wslot = 0
 	export_paused = false; export_cancel = false
 	intrinsics.atomic_store(&export_run, true)
 	export_was_running = true // garante que o bloco de conclusão rode mesmo se o clique de cancelar der early-return
 	export_thr = thread.create_and_start(export_worker)
-	export_prev_thr = thread.create_and_start(export_preview_worker)
 	if want_video do set_toast(rl.TextFormat("Exportando %dx%d%s...", i32(W), i32(H), use_gpu ? cstring(" (GPU)") : cstring("")))
 	else          do set_toast("Exportando áudio (MP3)...")
+}
+
+// pipe de prévia com buffer de 1 MB (CreatePipe default ~4–64 KB). 1 frame rgb24 da
+// prévia tem ~380 KB: no buffer pequeno o ffmpeg bloqueava a cada quadro.
+// Só o WRITE é herdável: se o ffmpeg herdar o READ, o pipe nunca dá EOF na thread.
+export_big_pipe :: proc() -> (r, w: ^os.File, err: os.Error) {
+	sa: win.SECURITY_ATTRIBUTES
+	sa.nLength = size_of(sa)
+	sa.bInheritHandle = true
+	hr, hw: win.HANDLE
+	if win.CreatePipe(&hr, &hw, &sa, 1 << 20) {
+		win.SetHandleInformation(hr, win.HANDLE_FLAG_INHERIT, 0)
+		return os.new_file(uintptr(hr), ""), os.new_file(uintptr(hw), ""), nil
+	}
+	return os.pipe()
 }
 
 // pausa/retoma a exportação suspendendo o processo ffmpeg (as threads de leitura só

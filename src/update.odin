@@ -868,13 +868,13 @@ update :: proc() {
 			if g_done_snd_ok do rl.PlaySound(g_done_snd) // aviso sonoro: exportação concluída
 			export_gpu_fallback = false
 		} else {
-			// NVENC falhou no meio (driver, encoder ocupado, resolução estranha…): tenta
-			// UMA vez por CPU com o mesmo caminho, sem o usuário precisar desmarcar o
-			// checkbox. export_gpu_fallback evita loop se a CPU também falhar.
-			if export_used_gpu && !export_gpu_fallback && export_out != "" {
+			// NVENC falhou de verdade (driver/nvcuda): tenta UMA vez por CPU.
+			// Erro de FILTRO (concat/SAR/fifo) não é a placa — se desligássemos
+			// export_nvenc_ok, o resto da sessão exportava em libx264 e a GPU
+			// ficava a 0% (é o que acontecia no slideshow de JPEG).
+			err := export_err_n > 0 ? string(export_err[:export_err_n]) : ""
+			if export_used_gpu && !export_gpu_fallback && export_out != "" && export_err_is_nvenc(err) {
 				export_gpu_fallback = true
-				export_gpu = false // desmarca o checkbox: a GPU acabou de falhar nesta máquina
-				export_nvenc_ok = false
 				if export_out != "" do os.remove(export_out) // lixo parcial do NVENC
 				for f in export_tmp_files { os.remove(f); delete(f) }
 				clear(&export_tmp_files)

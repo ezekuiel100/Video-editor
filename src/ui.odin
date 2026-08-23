@@ -411,7 +411,7 @@ draw_modal :: proc(sw, sh: f32) {
 	if modal == .Caps { draw_caps_modal(sw, sh); return }
 	rl.DrawRectangleRec({0,0,sw,sh}, rl.Color{0,0,0,150}) // backdrop escuro
 	cw: f32 = modal == .Export ? 700 : 540
-	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : 430))
+	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : (modal == .Export ? 430 : 430)))
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
 	rl.DrawRectangleRounded(card, 0.04, 8, rl.Color{ 32, 35, 42, 255 })
@@ -528,8 +528,10 @@ draw_modal :: proc(sw, sh: f32) {
 				rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, MUTED)
 				txt("GPU (NVENC) indisponível — usa CPU", px + 26, py + 2, 13, MUTED)
 			}
+			py += 26
 		} else if export_fmt == .WEBM {
 			txt("VP9 codifica por CPU — export mais lento.", px, py + 2, 12, MUTED)
+			py += 26
 		}
 		// botões
 		if ui_btn({ cx + cw - 244, cy + ch - 52, 100, 36 }, "Cancelar", false) do modal = .None

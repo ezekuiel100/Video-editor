@@ -135,6 +135,7 @@ t_export_reset :: proc() {
 	proj_w = 1920; proj_h = 1080
 	export_fmt = .MP4
 	export_qual = .Medium // NÃO usar .Auto aqui: ela roda ffprobe nas fontes
+	// prévia ao vivo é sempre ligada (ramo vpout + pipe:1)
 }
 
 // monta e devolve (args, grafo); falha o teste se a montagem for recusada.
@@ -590,7 +591,7 @@ zoompan_anima_sobre_o_clipe_nao_sobre_o_stream :: proc(t: ^testing.T) {
 	testing.expect(t, t_feq(seg_trans(b), 1), "o dissolver de 1s vale (senão o teste não exercita o pré-roll)")
 	_, g := t_build(t)
 	// o deslocamento tem que ser o hd REAL (metade do dissolver) e o divisor, dur
-	testing.expect(t, strings.contains(g, "clip((on/30-0.5000)/3.0000"),
+	testing.expect(t, strings.contains(g, "clip((n/30-0.5000)/3.0000"),
 		"a curva desconta o pré-roll do dissolver e corre sobre dur")
 	testing.expect(t, !strings.contains(g, "(on/"+"105"), "não usa a contagem de frames do stream")
 	// sem transição o deslocamento é zero e o divisor continua sendo dur
@@ -600,9 +601,9 @@ zoompan_anima_sobre_o_clipe_nao_sobre_o_stream :: proc(t: ^testing.T) {
 	segs[c].crop_x = 0.1; segs[c].crop_y = 0.1; segs[c].crop_w = 0.5; segs[c].crop_h = 0.5
 	segs[c].crop2_x = 0.3; segs[c].crop2_y = 0.3; segs[c].crop2_w = 0.3; segs[c].crop2_h = 0.3
 	_, g2 := t_build(t)
-	testing.expect(t, strings.contains(g2, "clip((on/30-0.0000)/4.0000"), "sem transição: sem deslocamento, divisor = dur")
-	t_assert_zoompan_suave(t, g)
-	t_assert_zoompan_suave(t, g2)
+	testing.expect(t, strings.contains(g2, "clip((n/30-0.0000)/4.0000"), "sem transição: sem deslocamento, divisor = dur")
+	t_assert_kenburns(t, g)
+	t_assert_kenburns(t, g2)
 }
 
 // ---------- Pan & Zoom: TREMO no arquivo (não só a curva da animação) ----------
@@ -645,49 +646,40 @@ zoompan_emite_supersample_e_trunc :: proc(t: ^testing.T) {
 	segs[c].crop_x = 0.05; segs[c].crop_y = 0.05; segs[c].crop_w = 0.9; segs[c].crop_h = 0.9
 	segs[c].crop2_x = 0.20; segs[c].crop2_y = 0.20; segs[c].crop2_w = 0.5; segs[c].crop2_h = 0.5
 	_, g := t_build(t)
-	t_assert_zoompan_suave(t, g)
+	t_assert_kenburns(t, g)
 }
 
-// O capitalismo era retrato (784×1168) com Ken Burns em JPEG. O pad de aspecto
-// entra no meio da cadeia; o supersample ainda tem de colar no zoompan.
+// O capitalismo era retrato (784×1168) com Ken Burns em JPEG. zoompan 4× saturava
+// a CPU e o NVENC ficava a 0%; scale=eval=frame interpola como a prévia.
 @(test)
 zoompan_em_retrato_ainda_supersample :: proc(t: ^testing.T) {
 	t_export_reset()
 	proj_w = 784; proj_h = 1168
 	clips[0].is_img = true
+	clips[0].src_audio = false
 	clips[0].vw = 784; clips[0].vh = 1168
 	c := add_seg(0, 0, 0, 27)
 	segs[c].zoom_anim = true
 	segs[c].crop_x = 0.0; segs[c].crop_y = 0.0; segs[c].crop_w = 1; segs[c].crop_h = 1
 	segs[c].crop2_x = 0.15; segs[c].crop2_y = 0.10; segs[c].crop2_w = 0.7; segs[c].crop2_h = 0.7
 	_, g := t_build(t)
-	testing.expect(t, strings.contains(g, "zoompan="), "imagem com ampliar usa zoompan")
-	testing.expect(t, strings.contains(g, "scale=iw*4:ih*4:flags=lanczos,zoompan="),
-		"JPEG retrato upsample 4× (2× ainda tremia no pan lento)")
-	t_assert_zoompan_suave(t, g)
+	testing.expect(t, !strings.contains(g, "zoompan="), "JPEG retrato NÃO usa zoompan (14 MP/frame, GPU a 0%)")
+	testing.expect(t, strings.contains(g, "eval=frame"), "ampliar reavalia o scale por frame")
+	testing.expect(t, strings.contains(g, "scale=iw*2:ih*2:flags=lanczos"), "JPEG: upsample 2× UMA vez antes do loop")
+	t_assert_kenburns(t, g)
 }
 
-t_assert_zoompan_suave :: proc(t: ^testing.T, g: string) {
-	nz := strings.count(g, "zoompan=")
-	testing.expect(t, nz > 0, "grafo sem zoompan — o teste não exercita o ampliar")
-	npre := strings.count(g, "format=gbrp,scale=iw*4:ih*4:flags=lanczos,zoompan=") +
-		strings.count(g, "format=gbrp,scale=iw*2:ih*2:flags=lanczos,zoompan=")
-	testing.expectf(t, npre == nz,
-		"%d zoompan= mas só %d com upsample gbrp+lanczos — algum ficou sem supersample", nz, npre)
-	testing.expect(t, strings.count(g, "x='trunc(") == nz, "x sem trunc: round-to-nearest = ziguezague")
-	testing.expect(t, strings.count(g, "y='trunc(") == nz, "y sem trunc: idem")
-	testing.expect(t, !strings.contains(g, "interp="),
-		"zoompan:interp= não existe neste ffmpeg — export morre ou ignora")
-	testing.expect(t, !strings.contains(g, "flags=bilinear,zoompan="),
-		"bilinear antes do zoompan não mata o salto de 1 px")
-	testing.expect(t, !strings.contains(g, "flags=fast_bilinear,zoompan="),
-		"fast_bilinear antes do zoompan idem")
-	testing.expect(t, !strings.contains(g, "x='(("), "x sem trunc (expressão crua)")
-	testing.expect(t, !strings.contains(g, "y='(("), "y sem trunc (expressão crua)")
-	// o downsample DEPOIS do zoompan é o que filtra o nearest: s=2×box, scale p/ o box
-	testing.expectf(t, strings.count(g, ":fps=30,scale=") == nz,
-		"%d zoompan sem scale= na cola — está entregando nearest no tamanho final", nz)
-	t_assert_zoompan_desce_2x(t, g, nz)
+t_assert_kenburns :: proc(t: ^testing.T, g: string) {
+	testing.expect(t, strings.contains(g, "eval=frame"), "Pan & Zoom precisa de scale=eval=frame")
+	testing.expect(t, strings.contains(g, "crop="), "pan via crop x/y (reavalia por frame)")
+	testing.expect(t, strings.contains(g, "x='trunc("), "x sem trunc")
+	testing.expect(t, strings.contains(g, "y='trunc("), "y sem trunc")
+	testing.expect(t, !strings.contains(g, "*iw/2)*2"), "trunc(.../2)*2 saltava 2 px — tremor")
+	testing.expect(t, !strings.contains(g, "*ih/2)*2"), "idem no eixo y")
+	testing.expect(t, strings.contains(g, "flags=lanczos"), "lanczos no downsample some o salto de 1 px")
+	testing.expect(t, !strings.contains(g, "eval=frame:flags=fast_bilinear"), "fast_bilinear no Ken Burns tremia")
+	testing.expect(t, !strings.contains(g, "zoompan="), "zoompan nearest 4× deixava o NVENC ocioso")
+	testing.expect(t, !strings.contains(g, "interp="), "zoompan:interp= não existe neste ffmpeg")
 }
 
 // cada `d=1:s=SW x SH:fps=30,scale=DW:DH` tem SW,SH >= ~2× o destino
@@ -966,15 +958,82 @@ t_mask_trims_curtos :: proc(g: string, want_d: f32) -> (n: int, all_short: bool)
 	return
 }
 
-// Clipe opaco, sem giro/fade/dissolver: yuv420p no overlay (rgba 4 bytes/pixel era o
-// default e deixava o recorte simples ~1.5–2× mais lento). Transparência continua rgba.
+// Clipe opaco, sem giro/fade/dissolver: caminho DIRETO (sem canvas preto + overlay).
+// O overlay em 1080p30 na duração inteira era o maior custo do recorte simples.
 @(test)
 export_clipe_simples_nao_usa_rgba :: proc(t: ^testing.T) {
 	t_export_reset()
 	add_seg(0, 0, 0, 10)
 	_, g := t_build(t)
-	testing.expect(t, strings.contains(g, "format=yuv420p[v0]"), "recorte simples: overlay em yuv420p")
-	testing.expect(t, !strings.contains(g, "format=rgba[v0]"), "rgba no clipe opaco é custo à toa")
+	testing.expect(t, strings.contains(g, "format=yuv420p"), "recorte simples em yuv420p")
+	testing.expect(t, !strings.contains(g, "format=rgba"), "rgba no clipe opaco é custo à toa")
+	testing.expect(t, !strings.contains(g, "overlay="), "recorte simples não precisa de overlay")
+	testing.expect(t, !strings.contains(g, "color=c=black"), "sem canvas preto na duração inteira")
+}
+
+@(test)
+export_cortes_sequenciais_usam_concat :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	add_seg(1, 10, 0, 8)
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "concat=n=2:v=1:a=0"), "dois cortes em sequência: concat, não overlay")
+	testing.expect(t, !strings.contains(g, "overlay="), "sem sobreposição não tem overlay")
+	testing.expect(t, strings.count(g, "setsar=1") >= 2, "concat exige SAR idêntico — JPEG com 2877:2876 vs scale 1380960:1379761 quebrava")
+}
+
+// Slideshow de JPEG: NÃO usar `-loop 1 -t DUR` no demuxer (redecodifica 30×/s em
+// todos os inputs ao mesmo tempo → CPU 100%, GPU do NVENC parada). Decode 1×,
+// scale 1×, `loop` no filtro.
+@(test)
+export_fotos_clonam_depois_do_scale :: proc(t: ^testing.T) {
+	t_export_reset()
+	clips[0].is_img = true
+	clips[0].src_audio = false
+	clips[0].path = "foto.jpg"
+	clips[0].vw = 4000; clips[0].vh = 5333 // maior que o canvas: tem de scale 1×
+	proj_w = 1440; proj_h = 1918
+	add_seg(0, 0, 0, 3)
+	args, g := t_build(t)
+	testing.expect(t, !t_has(args, "-loop"), "demuxer -loop 1 em JPEG redecodificava o arquivo o tempo todo")
+	testing.expect(t, t_has(args, "-framerate"), "imagem ainda declara 30fps no input (1 frame)")
+	testing.expect(t, strings.contains(g, "loop=-1:size=1"), "duração da foto vem do filtro loop, depois do scale")
+	testing.expect(t, strings.contains(g, "setsar=1"), "SAR normalizado p/ o concat")
+	// o scale do CLIPE (não o da prévia 480×270 no fim) tem de VIR ANTES do loop
+	clip := g
+	if s := strings.index(g, "split=2"); s >= 0 do clip = g[:s]
+	i_scale := strings.index(clip, ",scale=")
+	i_loop := strings.index(clip, "loop=-1:size=1")
+	testing.expect(t, i_scale >= 0 && i_loop >= 0 && i_scale < i_loop, "scale antes do loop: 1 scale por foto, não 30/s")
+}
+
+@(test)
+export_err_nvenc_so_quando_e_a_placa :: proc(t: ^testing.T) {
+	testing.expect(t, export_err_is_nvenc("[h264_nvenc @ 1] OpenEncodeSessionEx failed"), "falha do encoder")
+	testing.expect(t, export_err_is_nvenc("Cannot load nvcuda.dll"), "sem CUDA")
+	testing.expect(t, !export_err_is_nvenc("[Parsed_concat_257] Input link in0:v0 parameters do not match"),
+		"SAR/concat não é a GPU — não desligar NVENC")
+	testing.expect(t, !export_err_is_nvenc("No such filter: 'fifo'"), "filtro ausente não é a GPU")
+}
+
+@(test)
+export_pip_continua_com_overlay :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	add_seg(1, 0, 0, 10, 1) // mesma janela, trilha de cima = PiP/compose
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "overlay="), "clipes sobrepostos ainda passam pelo overlay")
+	testing.expect(t, strings.contains(g, "color=c=black"), "compose usa o canvas")
+}
+
+@(test)
+export_gpu_nao_forca_cuvid_no_input :: proc(t: ^testing.T) {
+	t_export_reset()
+	clips[0].vcodec = "h264"
+	add_seg(0, 0, 0, 10)
+	args, _, ok := export_build_args("saida.mp4", true, true)
+	testing.expect(t, ok, "montagem GPU recusada")
+	testing.expect(t, !t_has(args, "h264_cuvid"), "cuvid no input derrubava o NVENC (fallback CPU) quando a sessão NVDEC recusava")
 }
 
 @(test)
@@ -999,7 +1058,7 @@ export_baixa_usa_preset_rapido_na_cpu :: proc(t: ^testing.T) {
 	export_qual = .Medium
 	args, _ = t_build(t)
 	p, ok = t_arg_after(args, "-preset")
-	testing.expect(t, ok && p == "veryfast", "Média em CPU: veryfast")
+	testing.expect(t, ok && p == "ultrafast", "Média em CPU: ultrafast")
 }
 
 @(test)
@@ -1009,7 +1068,7 @@ export_gpu_media_nao_fica_em_p5 :: proc(t: ^testing.T) {
 	args, _, ok := export_build_args("saida.mp4", true, true)
 	testing.expect(t, ok, "montagem GPU recusada")
 	p, has := t_arg_after(args, "-preset")
-	testing.expect(t, has && p == "p4", "Média em NVENC: p4 (p5 era o lento de antes)")
+	testing.expect(t, has && p == "p1", "Média em NVENC: p1")
 	export_qual = .Low
 	args, _, ok = export_build_args("saida.mp4", true, true)
 	testing.expect(t, ok, "montagem GPU Baixa recusada")
@@ -1024,6 +1083,18 @@ export_webm_usa_cpu_used :: proc(t: ^testing.T) {
 	add_seg(0, 0, 0, 10)
 	args, _ := t_build(t)
 	v, ok := t_arg_after(args, "-cpu-used")
-	testing.expect(t, ok && v == "4", "WEBM Média sem -cpu-used (default 1) é o export mais lento")
+	testing.expect(t, ok && v == "5", "WEBM Média sem -cpu-used (default 1) é o export mais lento")
 	export_fmt = .MP4
+}
+
+// Prévia ao vivo é obrigatória. Este ffmpeg não tem `fifo` — o grafo NÃO pode usá-lo.
+@(test)
+export_previa_sempre_emite_vpout :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 10)
+	args, g := t_build(t)
+	testing.expect(t, strings.contains(g, "vpout"), "prévia sempre tem ramo vpout")
+	testing.expect(t, strings.contains(g, "split=2"), "prévia sai de um split")
+	testing.expect(t, !strings.contains(g, "fifo"), "este ffmpeg não tem o filtro fifo — export morria")
+	testing.expect(t, t_has(args, "pipe:1"), "prévia sai em pipe:1")
 }
