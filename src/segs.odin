@@ -15,7 +15,8 @@ State :: struct {
 Drag :: enum { None, Playhead, Clip, Bin, FadeIn, FadeOut, Vol, PreviewMove, Trans, TransDur, FxCenter, FxLib, FxClip, FxTrim, FxCtr }
 trans_drag: int = -1 // tipo de transição sendo arrastado do painel (-1 = nenhum)
 sel_trans: int = -1  // transição/fade SELECIONADO na timeline = índice do seg (-1 = nenhum)
-sel_trans_kind: int = 0 // tipo do selecionado: 0=dissolver, 1=fade preto de entrada, 2=fade preto de saída
+sel_trans_kind: int = 0 // 0=transição de corte | 1=fade entrada | 2=fade saída | 3=overlay orgânico
+trans_panel_scroll: f32 // rolagem da aba Transições (tiles extra)
 VOL_MAX :: f32(2) // teto do volume por segmento (200%) — usado na linha de volume e sliders
 st: State
 
@@ -42,11 +43,11 @@ Seg :: struct {
 	// velocidade de reprodução: dur é SEMPRE tempo de timeline; a fonte consumida é
 	// dur*speed (a partir de in_off). speed 2 = 2x (mais rápido); 0.5 = câmera lenta.
 	speed:    f32,  // 1 = normal; 0 no zero-value tratado como 1
-	// TRANSIÇÃO (dissolver / dissolve orgânico): blend de `trans` segundos com o clipe
-	// anterior adjacente na mesma trilha. Usa o "handle" da fonte (footage antes de in_off):
-	// durante [start-trans, start] ESTE entra. 0 = sem transição.
-	// trans_mode: 0 = dissolver limpo (A some × B entra) | 1 = dissolve orgânico
-	// (opacidade + máscara de fumaça/tinta — a imagem apaga por partes).
+	// TRANSIÇÃO no corte com o clipe anterior adjacente na mesma trilha.
+	// `trans` = duração em segundos, CENTRADA no corte (metade em cada clipe). 0 = sem.
+	// trans_mode (salvo no .ovp):
+	//   0 dissolver | 1 orgânico (tinta) | 2..5 wipe L/R/U/D | 6..9 deslizar L/R/U/D
+	//   10 íris | 11 flash | 12 zoom
 	trans:      f32,
 	trans_mode: int,
 	// FADE PRETO: o clipe surge do preto nos primeiros `vfin` s e some no preto nos
@@ -97,6 +98,72 @@ Seg :: struct {
 	fx_vignette: f32, // vinheta 0..1 (escurece as bordas)
 	fx_temp:     f32, // temperatura -1(frio)..1(quente): +R/-B quente, -R/+B frio
 }
+
+// modos de transição no CORTE (campo trans_mode). Fades preto são vfin/vfout, à parte.
+TRANS_DISSOLVE :: 0
+TRANS_GHOST    :: 1
+TRANS_WIPE_L   :: 2
+TRANS_WIPE_R   :: 3
+TRANS_WIPE_U   :: 4
+TRANS_WIPE_D   :: 5
+TRANS_SLIDE_L  :: 6
+TRANS_SLIDE_R  :: 7
+TRANS_SLIDE_U  :: 8
+TRANS_SLIDE_D  :: 9
+TRANS_IRIS     :: 10
+TRANS_FLASH    :: 11
+TRANS_ZOOM     :: 12
+
+// tile do painel: 0 dissolver | 1 fade in | 2 fade out | 3 orgânico | 4+ = TRANS_* + 2
+trans_panel_is_cut :: proc(kind: int) -> bool { return kind == 0 || kind == 3 || kind >= 4 }
+trans_mode_from_panel :: proc(kind: int) -> int {
+	switch kind {
+	case 0: return TRANS_DISSOLVE
+	case 3: return TRANS_GHOST
+	}
+	if kind >= 4 do return kind - 2
+	return TRANS_DISSOLVE
+}
+trans_is_mask :: proc(m: int) -> bool {
+	return m == TRANS_GHOST || (m >= TRANS_WIPE_L && m <= TRANS_WIPE_D) || m == TRANS_IRIS
+}
+trans_is_slide :: proc(m: int) -> bool { return m >= TRANS_SLIDE_L && m <= TRANS_SLIDE_D }
+trans_is_dissolve :: proc(m: int) -> bool { return m == TRANS_DISSOLVE }
+trans_slide_dir :: proc(m: int) -> (dx, dy: f32) {
+	switch m {
+	case TRANS_SLIDE_L: return -1, 0
+	case TRANS_SLIDE_R: return  1, 0
+	case TRANS_SLIDE_U: return  0, -1
+	case TRANS_SLIDE_D: return  0,  1
+	}
+	return 0, 0
+}
+trans_mode_name :: proc(m: int) -> cstring {
+	switch m {
+	case TRANS_DISSOLVE: return "Dissolver"
+	case TRANS_GHOST:    return "Dissolve orgânico"
+	case TRANS_WIPE_L:   return "Wipe esquerda"
+	case TRANS_WIPE_R:   return "Wipe direita"
+	case TRANS_WIPE_U:   return "Wipe cima"
+	case TRANS_WIPE_D:   return "Wipe baixo"
+	case TRANS_SLIDE_L:  return "Deslizar esquerda"
+	case TRANS_SLIDE_R:  return "Deslizar direita"
+	case TRANS_SLIDE_U:  return "Deslizar cima"
+	case TRANS_SLIDE_D:  return "Deslizar baixo"
+	case TRANS_IRIS:     return "Íris"
+	case TRANS_FLASH:    return "Flash"
+	case TRANS_ZOOM:     return "Zoom"
+	}
+	return "Transição"
+}
+trans_panel_name :: proc(kind: int) -> cstring {
+	switch kind {
+	case 1: return "Fade de entrada"
+	case 2: return "Fade de saída"
+	}
+	return trans_mode_name(trans_mode_from_panel(kind))
+}
+
 // Trilhas DINÂMICAS (estilo NLE). O índice da trilha carrega o tipo: vídeo ocupa a faixa
 // FIXA [0, MAXV) e áudio a faixa FIXA [MAXV, MAXV+MAXA). Manter a base do áudio fixa em MAXV é o
 // que permite adicionar/remover trilhas de vídeo SEM re-indexar os segmentos de áudio. `g_nv`/`g_na`
@@ -1351,20 +1418,20 @@ seg_trans :: proc(bi: int) -> f32 {
 
 // true se a transição válida de bi é o dissolve orgânico (custom no corte).
 seg_ghost :: proc(bi: int) -> bool {
-	return seg_trans(bi) > 0.01 && segs[bi].trans_mode == 1
+	return seg_trans(bi) > 0.01 && segs[bi].trans_mode == TRANS_GHOST
 }
 // overlay persistente: o clipe (em trilha de cima) entra à direita sobre o B-roll.
 seg_ghost_overlay :: proc(bi: int) -> bool {
-	return segs[bi].trans_mode == 1 && segs[bi].trans <= 0.01
+	return segs[bi].trans_mode == TRANS_GHOST && segs[bi].trans <= 0.01
 }
 
 // explica POR QUE o dissolver foi recusado no corte de bi (só sobra motivo estrutural agora
 // que a folga deixou de ser exigida: sem clipe adjacente, velocidade alterada, ou dur zero).
 trans_deny_toast :: proc(bi: int) {
 	a := trans_prev(bi)
-	if a < 0 { set_toast("Encoste este clipe em outro na mesma trilha p/ dissolver"); return }
-	if seg_speed(a) != 1 || seg_speed(bi) != 1 { set_toast("Dissolver não combina com velocidade alterada"); return }
-	set_toast("Clipes muito curtos p/ dissolver")
+	if a < 0 { set_toast("Encoste este clipe em outro na mesma trilha p/ a transição"); return }
+	if seg_speed(a) != 1 || seg_speed(bi) != 1 { set_toast("Transição não combina com velocidade alterada"); return }
+	set_toast("Clipes muito curtos p/ a transição")
 }
 
 // atualiza a textura de CADA trilha de vídeo sob o playhead (compositing multi-trilha):

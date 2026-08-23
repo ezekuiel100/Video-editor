@@ -5,6 +5,50 @@ import "core:fmt"
 import "core:math"
 import "base:intrinsics"
 
+// cor da pastilha no corte, por família de transição
+trans_badge_col :: proc(mode: int) -> rl.Color {
+	switch mode {
+	case TRANS_GHOST:  return { 200, 214, 230, 255 }
+	case TRANS_WIPE_L, TRANS_WIPE_R, TRANS_WIPE_U, TRANS_WIPE_D: return { 120, 210, 230, 255 }
+	case TRANS_SLIDE_L, TRANS_SLIDE_R, TRANS_SLIDE_U, TRANS_SLIDE_D: return { 140, 220, 160, 255 }
+	case TRANS_IRIS:   return { 190, 150, 230, 255 }
+	case TRANS_FLASH:  return { 250, 245, 230, 255 }
+	case TRANS_ZOOM:   return { 250, 180, 110, 255 }
+	}
+	return { 248, 214, 122, 255 } // dissolver
+}
+draw_trans_badge_mark :: proc(ix0, iy0, ix1, iy1: f32, mode: int, rc: rl.Color) {
+	switch mode {
+	case TRANS_GHOST:
+		rl.DrawRectangleRec({ ix0, iy0 + (iy1-iy0)*0.15, (ix1-ix0)*0.45, (iy1-iy0)*0.7 }, rl.Color{ 90, 120, 150, 180 })
+		rl.DrawRectangleRec({ ix0 + (ix1-ix0)*0.38, iy0, (ix1-ix0)*0.62, iy1-iy0 }, rc)
+	case TRANS_WIPE_L, TRANS_WIPE_R:
+		mid := ix0 + (ix1-ix0)*0.5
+		rl.DrawRectangleRec({ ix0, iy0, mid-ix0, iy1-iy0 }, rc)
+		rl.DrawLineEx({ mid, iy0 }, { mid, iy1 }, 1.4, rl.WHITE)
+	case TRANS_WIPE_U, TRANS_WIPE_D:
+		mid := iy0 + (iy1-iy0)*0.5
+		rl.DrawRectangleRec({ ix0, iy0, ix1-ix0, mid-iy0 }, rc)
+		rl.DrawLineEx({ ix0, mid }, { ix1, mid }, 1.4, rl.WHITE)
+	case TRANS_SLIDE_L, TRANS_SLIDE_R, TRANS_SLIDE_U, TRANS_SLIDE_D:
+		rl.DrawLineEx({ ix0 + 2, (iy0+iy1)/2 }, { ix1 - 2, (iy0+iy1)/2 }, 1.6, rc)
+		cx := mode == TRANS_SLIDE_L || mode == TRANS_SLIDE_U ? ix0 + 3 : ix1 - 3
+		rl.DrawCircleV({ cx, (iy0+iy1)/2 }, 2.2, rc)
+	case TRANS_IRIS:
+		rl.DrawCircleLines(i32((ix0+ix1)/2), i32((iy0+iy1)/2), min(ix1-ix0, iy1-iy0)*0.32, rc)
+	case TRANS_FLASH:
+		cx := (ix0+ix1)/2; cy := (iy0+iy1)/2
+		rl.DrawLineEx({ cx, iy0 }, { cx, iy1 }, 1.5, rc)
+		rl.DrawLineEx({ ix0, cy }, { ix1, cy }, 1.5, rc)
+	case TRANS_ZOOM:
+		rl.DrawRectangleLinesEx({ ix0 + 1, iy0 + 1, (ix1-ix0)*0.7, (iy1-iy0)*0.7 }, 1.2, rc)
+		rl.DrawRectangleRec({ ix0 + (ix1-ix0)*0.35, iy0 + (iy1-iy0)*0.35, (ix1-ix0)*0.5, (iy1-iy0)*0.5 }, rc)
+	case:
+		rl.DrawTriangle({ ix0, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc)
+		rl.DrawTriangle({ ix1, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc)
+	}
+}
+
 // ---------- timeline ----------
 draw_timeline :: proc(r: rl.Rectangle) {
 	pt := prof_beg(.Timeline); defer prof_end(.Timeline, pt)
@@ -577,14 +621,14 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			hw2 := clamp(td/2 * pps(), 8, 600)
 			cut := vr.x // x do corte (início do clipe que entra)
 			ext := rl.Rectangle{ cut - hw2, vr.y, hw2*2, vr.height }
-			ghost := segs[i].trans_mode == 1
-			tk := ghost ? 3 : 0
-			is_sel := sel_trans == i && (sel_trans_kind == 0 || sel_trans_kind == 3) && (ghost ? sel_trans_kind == 3 : sel_trans_kind == 0)
-			dragging := st.drag == .TransDur && drag_clip == i && (sel_trans_kind == 0 || sel_trans_kind == 3)
+			mode := segs[i].trans_mode
+			ghost := mode == TRANS_GHOST
+			is_sel := sel_trans == i && sel_trans_kind == 0
+			dragging := st.drag == .TransDur && drag_clip == i && sel_trans_kind == 0
 			bw := f32(26); bh := min(vr.height - 8, 26)
 			badge := rl.Rectangle{ cut - bw/2, vr.y + (vr.height - bh)/2, bw, bh }
 			hb := hovered(badge) && st.drag == .None
-			amber := ghost ? rl.Color{ 200, 214, 230, 255 } : rl.Color{ 248, 214, 122, 255 }
+			amber := trans_badge_col(mode)
 			// extensão real do crossfade: visível só no hover/seleção/arrasto (não polui)
 			if hb || is_sel || dragging {
 				on := is_sel || dragging
@@ -597,15 +641,8 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			pd := f32(6)
 			ix0 := badge.x + pd; ix1 := badge.x + bw - pd
 			iy0 := badge.y + pd; iy1 := badge.y + bh - pd
-			rc := ghost ? rl.Color{ 210, 220, 232, 160 } : rl.Color{ 252, 224, 138, 150 }
-			if ghost {
-				// silhueta: retângulo crescente (overlay, não cruzamento)
-				rl.DrawRectangleRec({ ix0, iy0 + (iy1-iy0)*0.15, (ix1-ix0)*0.45, (iy1-iy0)*0.7 }, rl.Color{ 90, 120, 150, 180 })
-				rl.DrawRectangleRec({ ix0 + (ix1-ix0)*0.38, iy0, (ix1-ix0)*0.62, iy1-iy0 }, rc)
-			} else {
-				rl.DrawTriangle({ ix0, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc) // rampa que desce (clipe que sai)
-				rl.DrawTriangle({ ix1, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc) // rampa que sobe (clipe que entra)
-			}
+			rc := rl.Color{ amber.r, amber.g, amber.b, 160 }
+			draw_trans_badge_mark(ix0, iy0, ix1, iy1, mode, rc)
 			if is_sel || dragging {
 				// alças nas bordas da extensão: arrastar ajusta a duração (simétrica no corte)
 				eL := rl.Rectangle{ ext.x - 5, vr.y, 10, vr.height }
@@ -627,7 +664,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			}
 			// clique na pastilha = seleciona a transição (tira a seleção de clipe/bin)
 			if !consumed && st.drag == .None && clicked(badge) {
-				sel_trans = i; sel_trans_kind = tk; selected = -1; bin_sel = -1; consumed = true
+				sel_trans = i; sel_trans_kind = 0; selected = -1; bin_sel = -1; consumed = true
 			}
 		}
 		white := rl.Color{ 235, 238, 244, 235 }

@@ -13,7 +13,7 @@ bulge_ok: bool
 bulge_loc_uv0, bulge_loc_uv1, bulge_loc_center, bulge_loc_strength, bulge_loc_radius, bulge_loc_aspect: i32
 fx_loc_bright, fx_loc_contrast, fx_loc_satur, fx_loc_look, fx_loc_vignette, fx_loc_temp: i32 // uniforms de COR
 fx_loc_rgb: i32 // uniform da separação RGB
-fx_loc_wipe_edge, fx_loc_wipe_feather, fx_loc_wipe_inv: i32 // dissolve orgânico (fumaça + opacidade)
+fx_loc_wipe_edge, fx_loc_wipe_feather, fx_loc_wipe_inv, fx_loc_wipe_kind: i32 // transições de máscara
 BULGE_R_DEF :: f32(0.5) // raio padrão do efeito (quando bulge_r==0)
 WOBBLE_HZ_DEF :: f32(2) // frequência padrão do wobble (Hz, quando wobble_speed==0)
 // desloca a coord de textura em direção ao (bulge>0) ou p/ longe do (bulge<0) centro,
@@ -36,9 +36,10 @@ uniform float look;     // COR: 0 nenhum | 1 P&B | 2 sépia | 3 inverter
 uniform float vignette; // COR: vinheta 0..1
 uniform float temp;     // COR: temperatura -1(frio)..1(quente)
 uniform vec2  rgb;      // EFEITO: separação RGB (deslocamento em coords de textura; 0 = desligado)
-uniform float wipeEdge;    // progresso 0..1 do dissolve orgânico
-uniform float wipeFeather; // 0 = desligado; maciez da fumaça/tinta
+uniform float wipeEdge;    // progresso 0..1 da máscara (orgânico / wipe / íris)
+uniform float wipeFeather; // 0 = desligado; maciez da fumaça/tinta (orgânico)
 uniform float wipeInv;     // 1 = clipe que SAI (máscara invertida)
+uniform float wipeKind;    // 0=off/orgânico | 2..5 wipe L/R/U/D | 10 íris
 float vn(vec2 p, vec2 seed) {
     vec2 i = floor(p); vec2 f = fract(p);
     f = f*f*(3.0-2.0*f);
@@ -95,7 +96,27 @@ void main() {
     }
     c = clamp(c, 0.0, 1.0);
     float a = src.a;
-    if (wipeFeather > 0.001) {
+    if (wipeKind > 1.5) {
+        float e = clamp(wipeEdge, 0.0, 1.0);
+        float f = 0.022;
+        float m = 1.0;
+        if (wipeKind < 2.5) {              // wipe esquerda: B visível em x < e
+            m = 1.0 - smoothstep(e - f, e + f, local.x);
+        } else if (wipeKind < 3.5) {       // wipe direita
+            m = smoothstep((1.0 - e) - f, (1.0 - e) + f, local.x);
+        } else if (wipeKind < 4.5) {       // wipe cima
+            m = 1.0 - smoothstep(e - f, e + f, local.y);
+        } else if (wipeKind < 5.5) {       // wipe baixo
+            m = smoothstep((1.0 - e) - f, (1.0 - e) + f, local.y);
+        } else {                           // íris: círculo que cresce do centro
+            vec2 dd = local - vec2(0.5);
+            float rr = length(vec2(dd.x * aspect, dd.y));
+            float rad = e * length(vec2(0.5 * aspect, 0.5));
+            m = 1.0 - smoothstep(rad - 0.03, rad + 0.03, rr);
+        }
+        if (wipeInv > 0.5) m = 1.0 - m;
+        a *= m;
+    } else if (wipeFeather > 0.001) {
         // Wipe de tinta/fumaça (Filmora): máscara luma orgânica. Manchas escuras
         // revelam primeiro — a imagem some por partes, sem círculo e sem fade limpo.
         vec2 q = local * vec2(2.55, 2.05);
@@ -707,7 +728,7 @@ scrub_player_uses_thumb :: proc(c: ^Clip, lt: f32) -> bool {
 // (usado pelo blend da transição: clipe que sai × (1-p), clipe que entra × p).
 // `vt` é o tempo de EXIBIÇÃO (view_t), não o playhead cru — ver view_t.
 // wipe_feather>0 = dissolve orgânico (fumaça + opacidade). wipe_inv>0 = clipe que SAI.
-draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: bool, wipe_edge: f32 = 0, wipe_feather: f32 = 0, wipe_inv: f32 = 0) {
+draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: bool, wipe_edge: f32 = 0, wipe_feather: f32 = 0, wipe_inv: f32 = 0, wipe_kind: f32 = 0, off_x: f32 = 0, off_y: f32 = 0, scl_mul: f32 = 1) {
 	c := seg_src(i)
 	sg := segs[i]
 	// fade preto (rampa de opacidade) — só na região NORMAL do clipe (não no lead-in de dissolver)
@@ -719,7 +740,12 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	}
 	op := (sg.opacity <= 0 ? f32(1) : sg.opacity) * clamp(opac_mul, 0, 1) * bfade
 	if c.is_text { // clipe de texto: desenha a própria fonte (sem textura)
+		if wipe_kind > 1.5 { // texto não tem máscara no shader: dissolve de opacidade
+			op *= wipe_inv > 0.5 ? (1 - clamp(wipe_edge, 0, 1)) : clamp(wipe_edge, 0, 1)
+		}
 		sg2 := sg; sg2.opacity = op
+		sg2.px += off_x; sg2.py += off_y
+		if scl_mul > 0.01 do sg2.scale = (sg2.scale <= 0 ? f32(1) : sg2.scale) * scl_mul
 		src_t := seg_local(i, vt)
 		draw_text_into(c, sg2, fx, fy, fw, fh, src_t)
 		if sel_box && i == selected {
@@ -756,7 +782,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 			if st.playing do dbg_thumb_frames += 1 // diagnóstico: miniatura mostrada DURANTE o playback (flash borrado)
 		}
 	}
-	s := sg.scale <= 0 ? f32(1) : sg.scale
+	s := (sg.scale <= 0 ? f32(1) : sg.scale) * (scl_mul <= 0.01 ? f32(1) : scl_mul)
 	// RECORTE: fonte = sub-região; ajusta a REGIÃO recortada ao canvas preservando o aspecto dela.
 	// seg_crop_at anima a região no tempo quando zoom_anim (Pan & Zoom); senão = recorte estático.
 	crx, cry, crw, crh := seg_crop_at(i, vt)
@@ -771,7 +797,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	cwpx := crw*cr.width; chpx := crh*cr.height
 	tf := min(fw/cwpx, fh/chpx) // ajusta a região recortada ao canvas preservando aspecto
 	dw := cwpx*tf*s; dh := chpx*tf*s
-	ccx := fx + fw/2 + sg.px*fw; ccy := fy + fh/2 + sg.py*fh
+	ccx := fx + fw/2 + (sg.px + off_x)*fw; ccy := fy + fh/2 + (sg.py + off_y)*fh
 	tint := rl.Color{ 255, 255, 255, u8(clamp(op, 0, 1) * 255) }
 	// COR: só o que o clipe tem (aba "Cor"); os clipes de EFEITO não são de cor.
 	efb := sg.fx_bright; efc := sg.fx_contrast; efs := sg.fx_satur
@@ -793,7 +819,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 			rgb_off = fx_rgb_offset(fs)
 		}
 	}
-	use_fx := bulge_ok && (fx_any(sg) || af >= 0 || wipe_feather > 0.01)
+	use_fx := bulge_ok && (fx_any(sg) || af >= 0 || wipe_feather > 0.01 || wipe_kind > 1.5)
 	if use_fx {
 		br := b_r
 		uv0 := [2]f32{ src.x/tw_, src.y/th_ } // src no espaço da textura EM USO (c.tex ou miniatura)
@@ -817,10 +843,11 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		rl.SetShaderValue(bulge_shader, fx_loc_vignette, &cvg, .FLOAT)
 		rl.SetShaderValue(bulge_shader, fx_loc_temp, &ctp, .FLOAT)
 		rl.SetShaderValue(bulge_shader, fx_loc_rgb, &rgb_off, .VEC2)
-		we := wipe_edge; wf := wipe_feather; wi := wipe_inv
+		we := wipe_edge; wf := wipe_feather; wi := wipe_inv; wk := wipe_kind
 		rl.SetShaderValue(bulge_shader, fx_loc_wipe_edge, &we, .FLOAT)
 		rl.SetShaderValue(bulge_shader, fx_loc_wipe_feather, &wf, .FLOAT)
 		rl.SetShaderValue(bulge_shader, fx_loc_wipe_inv, &wi, .FLOAT)
+		rl.SetShaderValue(bulge_shader, fx_loc_wipe_kind, &wk, .FLOAT)
 		rl.BeginShaderMode(bulge_shader)
 	}
 	rl.DrawTexturePro(tex, src, { ccx, ccy, dw, dh }, { dw/2, dh/2 }, sg.rot, tint)
@@ -871,11 +898,33 @@ composite_video :: proc(fx, fy, fw, fh: f32, sel_box: bool) -> bool {
 			a := trans_prev(tb)
 			half := seg_trans(tb)/2; cut := segs[tb].start
 			p := clamp((vt - (cut - half)) / (2*half), 0, 1) // 0 no início do overlap, 1 no fim
+			mode := segs[tb].trans_mode
 			if seg_ghost(tb) {
 				// tinta: A some nas manchas, B aparece nas mesmas (máscara luma).
 				edge, feather := ghost_wipe_edge(p)
 				if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box, edge, feather, 1) }
 				any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, edge, feather, 0)
+			} else if trans_is_mask(mode) {
+				wk := f32(mode)
+				if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box, p, 0, 1, wk) }
+				any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, p, 0, 0, wk)
+			} else if trans_is_slide(mode) {
+				dx, dy := trans_slide_dir(mode)
+				if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, dx*p, dy*p) }
+				any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, -dx*(1-p), -dy*(1-p))
+			} else if mode == TRANS_ZOOM {
+				if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box) }
+				any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, 0.22 + 0.78*p)
+			} else if mode == TRANS_FLASH {
+				if p < 0.5 {
+					if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box) }
+					wh := u8(clamp(p*2, 0, 1) * 255)
+					rl.DrawRectangleRec({ fx, fy, fw, fh }, rl.Color{ 255, 255, 255, wh })
+				} else {
+					any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box)
+					wh := u8(clamp((1-p)*2, 0, 1) * 255)
+					rl.DrawRectangleRec({ fx, fy, fw, fh }, rl.Color{ 255, 255, 255, wh })
+				}
 			} else {
 				if a >= 0 { any = true; draw_seg_composited(a, vt, 1-p, fx, fy, fw, fh, sel_box) } // SAI (cauda)
 				any = true; draw_seg_composited(tb, vt, p, fx, fy, fw, fh, sel_box)                // ENTRA (cabeça)

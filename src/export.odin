@@ -409,6 +409,56 @@ export_ghost_mask :: proc(fb: ^strings.Builder, start2, d: f32, persist: bool, i
 		mw, mh, M, ow, oh, tag, tag, tag)
 }
 
+// máscara geométrica (wipe / íris) — mesma pipeline barata do dissolve orgânico
+// (miniatura + geq só no luma + alphamerge). invert = clipe que SAI.
+export_wipe_mask :: proc(fb: ^strings.Builder, start2, d: f32, invert: bool, tag, fw, fh, mode: int) {
+	du := max(d, 0.001)
+	P := fmt.tprintf("min(1\\,max(0\\,(T-%.3f)/%.3f))", start2, du)
+	M: string
+	switch mode {
+	case TRANS_WIPE_L: // B visível à esquerda
+		M = fmt.tprintf("min(1\\,max(0\\,((%s)-(X/W))/0.04))", P)
+	case TRANS_WIPE_R:
+		M = fmt.tprintf("min(1\\,max(0\\,((X/W)-(1-(%s)))/0.04))", P)
+	case TRANS_WIPE_U:
+		M = fmt.tprintf("min(1\\,max(0\\,((%s)-(Y/H))/0.04))", P)
+	case TRANS_WIPE_D:
+		M = fmt.tprintf("min(1\\,max(0\\,((Y/H)-(1-(%s)))/0.04))", P)
+	case TRANS_IRIS:
+		M = fmt.tprintf("min(1\\,max(0\\,((%s)*hypot(0.5*(W/H)\\,0.5)-hypot((X/W-0.5)*(W/H)\\,Y/H-0.5))/0.04))", P)
+	case:
+		M = fmt.tprintf("min(1\\,max(0\\,((%s)-(X/W))/0.04))", P)
+	}
+	if invert do M = fmt.tprintf("(1-(%s))", M)
+	mw, mh, ow, oh := ghost_mask_dims(fw, fh)
+	fmt.sbprintf(fb, ",format=rgba,split[gp%d][gw%d];", tag, tag)
+	fmt.sbprintf(fb, "[gw%d]trim=%.3f:%.3f,scale=%d:%d:flags=fast_bilinear,format=gray,geq=lum='255*(%s)',scale=%d:%d:flags=bilinear,format=gray[gm%d];[gp%d][gm%d]alphamerge",
+		tag, start2, start2+du, mw, mh, M, ow, oh, tag, tag, tag)
+}
+
+export_emit_cut_mask :: proc(fb: ^strings.Builder, start2, d: f32, persist, invert: bool, tag, fw, fh, mode: int) {
+	if mode == TRANS_GHOST || persist {
+		export_ghost_mask(fb, start2, d, persist, invert, tag, fw, fh)
+	} else {
+		export_wipe_mask(fb, start2, d, invert, tag, fw, fh, mode)
+	}
+}
+
+// x/y do overlay com deslize na janela da transição (0 = sem). px/py = transform do clipe.
+export_overlay_xy :: proc(px, py, in_dx, in_dy, in_t0, in_d, out_dx, out_dy, out_t0, out_d: f32) -> (x, y: string) {
+	x = fmt.tprintf("(main_w-overlay_w)/2+(%.4f)*main_w", px)
+	y = fmt.tprintf("(main_h-overlay_h)/2+(%.4f)*main_h", py)
+	if in_d > 0.01 {
+		x = fmt.tprintf("%s+if(between(t\\,%.3f\\,%.3f)\\,(%.4f)*(1-(t-%.3f)/%.3f)*main_w\\,0)", x, in_t0, in_t0+in_d, in_dx, in_t0, in_d)
+		y = fmt.tprintf("%s+if(between(t\\,%.3f\\,%.3f)\\,(%.4f)*(1-(t-%.3f)/%.3f)*main_h\\,0)", y, in_t0, in_t0+in_d, in_dy, in_t0, in_d)
+	}
+	if out_d > 0.01 {
+		x = fmt.tprintf("%s+if(between(t\\,%.3f\\,%.3f)\\,(%.4f)*((t-%.3f)/%.3f)*main_w\\,0)", x, out_t0, out_t0+out_d, out_dx, out_t0, out_d)
+		y = fmt.tprintf("%s+if(between(t\\,%.3f\\,%.3f)\\,(%.4f)*((t-%.3f)/%.3f)*main_h\\,0)", y, out_t0, out_t0+out_d, out_dy, out_t0, out_d)
+	}
+	return
+}
+
 // TREMO do Pan & Zoom: o zoompan amostra nearest-neighbor em coords inteiras. O preview
 // é bilinear na GPU (float) → suave. Este ffmpeg NÃO tem zoompan:interp=linear.
 // Cadeia: upsample da fonte (gbrp+lanczos) → zoompan num box MAIOR → lanczos desce.
@@ -533,7 +583,7 @@ export_seg_needs_compose :: proc(i: int) -> bool {
 	op := sg.opacity <= 0 ? 1 : sg.opacity
 	if op < 0.999 do return true
 	if sg.vfin > 0.01 || sg.vfout > 0.01 do return true
-	if seg_trans(i) > 0.01 || sg.trans_mode == 1 do return true
+	if seg_trans(i) > 0.01 || trans_is_mask(sg.trans_mode) do return true
 	if bulge_active(sg) || color_active(sg) do return true
 	return false
 }
@@ -790,20 +840,43 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	// Dissolve orgânico: A e B esticam a janela, mas o mix (opacidade + fumaça) vai no
 	// geq — sem fade=t=in/out do dissolver limpo. ghost_out_* marca o clipe que SAI.
 	thead: [MAX_SEGS]f32; ttail: [MAX_SEGS]f32; tfin: [MAX_SEGS]f32; tfout: [MAX_SEGS]f32
-	ghost_out_d: [MAX_SEGS]f32; ghost_out_t0: [MAX_SEGS]f32
+	ghost_out_d: [MAX_SEGS]f32; ghost_out_t0: [MAX_SEGS]f32; ghost_out_mode: [MAX_SEGS]int
+	slide_in_dx, slide_in_dy, slide_in_t0, slide_in_d: [MAX_SEGS]f32
+	slide_out_dx, slide_out_dy, slide_out_t0, slide_out_d: [MAX_SEGS]f32
+	zoom_t0, zoom_d: [MAX_SEGS]f32
+	flash_t0, flash_d: [MAX_SEGS]f32
+	flash_in, flash_out: [MAX_SEGS]bool
 	for i in 0 ..< nsegs {
 		d := seg_trans(i)
 		if d > 0 {
 			thead[i] = max(thead[i], d/2)
-			if seg_ghost(i) {
-				if a := trans_prev(i); a >= 0 {
-					ttail[a] = max(ttail[a], d/2)
-					ghost_out_d[a] = max(ghost_out_d[a], d)
-					ghost_out_t0[a] = segs[i].start - d/2
-				}
-			} else {
+			a := trans_prev(i)
+			if a >= 0 do ttail[a] = max(ttail[a], d/2)
+			mode := segs[i].trans_mode
+			t0 := segs[i].start - d/2
+			switch {
+			case trans_is_dissolve(mode):
 				tfin[i] = max(tfin[i], d)
-				if a := trans_prev(i); a >= 0 { ttail[a] = max(ttail[a], d/2); tfout[a] = max(tfout[a], d) }
+				if a >= 0 do tfout[a] = max(tfout[a], d)
+			case trans_is_mask(mode):
+				if a >= 0 {
+					ghost_out_d[a] = max(ghost_out_d[a], d)
+					ghost_out_t0[a] = t0
+					ghost_out_mode[a] = mode
+				}
+			case trans_is_slide(mode):
+				dx, dy := trans_slide_dir(mode)
+				slide_in_dx[i] = -dx; slide_in_dy[i] = -dy
+				slide_in_t0[i] = t0; slide_in_d[i] = d
+				if a >= 0 {
+					slide_out_dx[a] = dx; slide_out_dy[a] = dy
+					slide_out_t0[a] = t0; slide_out_d[a] = d
+				}
+			case mode == TRANS_ZOOM:
+				zoom_t0[i] = t0; zoom_d[i] = d
+			case mode == TRANS_FLASH:
+				flash_t0[i] = t0; flash_d[i] = d; flash_in[i] = true
+				if a >= 0 { flash_t0[a] = t0; flash_d[a] = d; flash_out[a] = true }
 			}
 		}
 	}
@@ -975,17 +1048,24 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				fmt.sbprintf(&fb, "[%d:v]trim=0:%.3f,setpts=PTS-STARTPTS+%.3f/TB,scale=%d:%d,format=rgba",
 					seg_inp[i], sg.dur+hd+tl, start2, W, H)
 				export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
+				if flash_out[i] do fmt.sbprintf(&fb, ",fade=t=out:st=%.3f:d=%.3f:c=white", flash_t0[i], flash_d[i]/2)
+				if flash_in[i]  do fmt.sbprintf(&fb, ",fade=t=in:st=%.3f:d=%.3f:c=white", flash_t0[i]+flash_d[i]/2, flash_d[i]/2)
 				gmask := 0
-				if sg.trans_mode == 1 {
-					if td := seg_trans(i); td > 0.01 do export_ghost_mask(&fb, start2, td, false, false, vc*2+gmask, W, H)
-					else do export_ghost_mask(&fb, start2, 1, true, false, vc*2+gmask, W, H)
+				if trans_is_mask(sg.trans_mode) {
+					if td := seg_trans(i); td > 0.01 do export_emit_cut_mask(&fb, start2, td, false, false, vc*2+gmask, W, H, sg.trans_mode)
+					else do export_emit_cut_mask(&fb, start2, 1, true, false, vc*2+gmask, W, H, sg.trans_mode)
 					gmask += 1
 				}
-				if ghost_out_d[i] > 0.01 do export_ghost_mask(&fb, ghost_out_t0[i], ghost_out_d[i], false, true, vc*2+gmask, W, H)
+				if ghost_out_d[i] > 0.01 do export_emit_cut_mask(&fb, ghost_out_t0[i], ghost_out_d[i], false, true, vc*2+gmask, W, H, ghost_out_mode[i])
+				if zoom_d[i] > 0.01 {
+					fmt.sbprintf(&fb, ",scale=w='max(2\\,trunc(iw*(0.22+0.78*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':h='max(2\\,trunc(ih*(0.22+0.78*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':eval=frame",
+						zoom_t0[i], zoom_d[i], zoom_t0[i], zoom_d[i])
+				}
 				fmt.sbprintf(&fb, "[v%d];", vc)
 				nb := fmt.tprintf("c%d", vc)
-				fmt.sbprintf(&fb, "[%s][v%d]overlay=0:0:enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
-					vlabel, vc, start2, tend, nb)
+				ox, oy := export_overlay_xy(0, 0, slide_in_dx[i], slide_in_dy[i], slide_in_t0[i], slide_in_d[i], slide_out_dx[i], slide_out_dy[i], slide_out_t0[i], slide_out_d[i])
+				fmt.sbprintf(&fb, "[%s][v%d]overlay=x='%s':y='%s':enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
+					vlabel, vc, ox, oy, start2, tend, nb)
 				vlabel = nb; vc += 1
 				continue
 			}
@@ -998,7 +1078,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			// rgba só quando o overlay PRECISA de alpha (opacidade, giro, fade, dissolver).
 			// No recorte simples o yuv420p evita 4 bytes/pixel + conversão no overlay — o
 			// caminho mais comum (cortar e exportar) saía ~1.5–2× mais lento à toa.
-			need_a := op < 0.999 || abs(sg.rot) > 0.5 || fin > 0.01 || fout > 0.01 || sg.vfin > 0.01 || sg.vfout > 0.01 || sg.trans_mode == 1 || ghost_out_d[i] > 0.01
+			need_a := op < 0.999 || abs(sg.rot) > 0.5 || fin > 0.01 || fout > 0.01 || sg.vfin > 0.01 || sg.vfout > 0.01 || trans_is_mask(sg.trans_mode) || ghost_out_d[i] > 0.01
 			pix := need_a ? "rgba" : "yuv420p"
 			// vídeo consome (in_off-hd)..(in_off+dur*sp+tl) — hd=pré-roll, tl=pós-roll do
 			// dissolver; imagem usa o input em loop. setpts posiciona em start2.
@@ -1060,17 +1140,24 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			}
 			if op < 0.999 do fmt.sbprintf(&fb, ",colorchannelmixer=aa=%.3f", op)
 			export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
+			if flash_out[i] do fmt.sbprintf(&fb, ",fade=t=out:st=%.3f:d=%.3f:c=white", flash_t0[i], flash_d[i]/2)
+			if flash_in[i]  do fmt.sbprintf(&fb, ",fade=t=in:st=%.3f:d=%.3f:c=white", flash_t0[i]+flash_d[i]/2, flash_d[i]/2)
 			gmask := 0
-			if sg.trans_mode == 1 {
-				if td := seg_trans(i); td > 0.01 do export_ghost_mask(&fb, start2, td, false, false, vc*2+gmask, segW, segH)
-				else do export_ghost_mask(&fb, start2, 1, true, false, vc*2+gmask, segW, segH)
+			if trans_is_mask(sg.trans_mode) {
+				if td := seg_trans(i); td > 0.01 do export_emit_cut_mask(&fb, start2, td, false, false, vc*2+gmask, segW, segH, sg.trans_mode)
+				else do export_emit_cut_mask(&fb, start2, 1, true, false, vc*2+gmask, segW, segH, sg.trans_mode)
 				gmask += 1
 			}
-			if ghost_out_d[i] > 0.01 do export_ghost_mask(&fb, ghost_out_t0[i], ghost_out_d[i], false, true, vc*2+gmask, segW, segH)
+			if ghost_out_d[i] > 0.01 do export_emit_cut_mask(&fb, ghost_out_t0[i], ghost_out_d[i], false, true, vc*2+gmask, segW, segH, ghost_out_mode[i])
+			if zoom_d[i] > 0.01 {
+				fmt.sbprintf(&fb, ",scale=w='max(2\\,trunc(iw*(0.22+0.78*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':h='max(2\\,trunc(ih*(0.22+0.78*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':eval=frame",
+					zoom_t0[i], zoom_d[i], zoom_t0[i], zoom_d[i])
+			}
 			fmt.sbprintf(&fb, "[v%d];", vc)
 			nb := fmt.tprintf("c%d", vc)
-			fmt.sbprintf(&fb, "[%s][v%d]overlay=x='(main_w-overlay_w)/2+(%.4f)*main_w':y='(main_h-overlay_h)/2+(%.4f)*main_h':enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
-				vlabel, vc, sg.px, sg.py, start2, tend, nb)
+			ox, oy := export_overlay_xy(sg.px, sg.py, slide_in_dx[i], slide_in_dy[i], slide_in_t0[i], slide_in_d[i], slide_out_dx[i], slide_out_dy[i], slide_out_t0[i], slide_out_d[i])
+			fmt.sbprintf(&fb, "[%s][v%d]overlay=x='%s':y='%s':enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
+				vlabel, vc, ox, oy, start2, tend, nb)
 			vlabel = nb; vc += 1
 		}
 		// EFEITOS DE FAIXA ancorados NESTA trilha t: aplicam ao COMPOSTO até aqui (trilhas 0..t =

@@ -882,61 +882,61 @@ apply_ghost :: proc(si: int) {
 	tm := trans_max(si)
 	if tm > 0.01 {
 		sg.trans = min(1.2, tm)
-		sg.trans_mode = 1
+		sg.trans_mode = TRANS_GHOST
 		set_toast("Dissolve orgânico aplicado")
 	} else {
 		sg.trans = 0
-		sg.trans_mode = 1
+		sg.trans_mode = TRANS_GHOST
 		if sg.vfin < 0.15 do sg.vfin = min(1, sg.dur*0.4)
 		set_toast("Dissolve orgânico: overlay com máscara de textura")
 	}
 }
 
-// tipos de transição do painel: 0 = dissolver | 1 = fade de entrada | 2 = fade de saída
-// | 3 = dissolve orgânico (opacidade + fumaça / overlay com máscara).
+// transição de CORTE (dissolver / wipe / deslizar / íris / flash / zoom) no segmento si.
+apply_cut_trans :: proc(si, mode: int) {
+	if si < 0 || si >= nsegs do return
+	if seg_speed(si) != 1 { set_toast("Transição não combina com velocidade alterada"); return }
+	tm := trans_max(si)
+	if tm <= 0.01 { trans_deny_toast(si); return }
+	dur := mode == TRANS_GHOST ? f32(1.2) : f32(1)
+	segs[si].trans = min(dur, tm)
+	segs[si].trans_mode = mode
+	set_toast(rl.TextFormat("%s aplicado", trans_mode_name(mode)))
+}
+
+// alvo do corte mais próximo de `time` no clipe si (esquerda = este; direita = o próximo).
+trans_drop_target :: proc(si: int, time: f32) -> int {
+	sg := segs[si]
+	if time > sg.start + sg.dur/2 {
+		if nx := seg_on_track_at(sg.track, sg.start + sg.dur + 0.01); nx >= 0 do return nx
+	}
+	return si
+}
+
+// tipos do painel: 0 dissolver | 1 fade in | 2 fade out | 3 orgânico | 4+ corte (wipe/deslizar/…)
 apply_transition :: proc(kind: int) {
 	if selected < 0 || selected >= nsegs { set_toast("Selecione um clipe na timeline primeiro"); return }
 	sg := &segs[selected]
 	if seg_audio_like(selected) { set_toast("Transições são p/ vídeo/imagem/texto"); return }
 	switch kind {
-	case 0: // dissolver com o clipe anterior adjacente
-		if seg_speed(selected) != 1 { set_toast("Dissolver não combina com velocidade alterada"); return }
-		tm := trans_max(selected)
-		if tm <= 0.01 { trans_deny_toast(selected); return }
-		sg.trans = min(1, tm)
-		sg.trans_mode = 0
-		set_toast("Dissolver aplicado")
-	case 3: // dissolve orgânico no corte, ou overlay com máscara se não houver vizinho
-		apply_ghost(selected)
-	case 1: // fade de entrada (do preto)
-		sg.vfin = clamp(1, 0.1, sg.dur*0.8); set_toast("Fade de entrada aplicado")
-	case 2: // fade de saída (p/ o preto)
-		sg.vfout = clamp(1, 0.1, sg.dur*0.8); set_toast("Fade de saída aplicado")
+	case 1: sg.vfin  = clamp(1, 0.1, sg.dur*0.8); set_toast("Fade de entrada aplicado")
+	case 2: sg.vfout = clamp(1, 0.1, sg.dur*0.8); set_toast("Fade de saída aplicado")
+	case 3: apply_ghost(selected)
+	case:   apply_cut_trans(selected, trans_mode_from_panel(kind))
 	}
 	insp_tab = 0 // mostra os controles no inspector p/ ajustar a duração
 }
 
 // aplica uma transição SOLTA sobre o segmento si na posição `time` (arrastar do painel).
-// Dissolver escolhe o corte mais próximo (esquerda = com o anterior; direita = com o próximo).
+// Transição de corte escolhe o corte mais próximo (esquerda = com o anterior; direita = com o próximo).
 apply_transition_at :: proc(si, kind: int, time: f32) {
 	if si < 0 || si >= nsegs || seg_audio_like(si) { set_toast("Solte sobre um clipe de vídeo/imagem/texto"); return }
 	sg := segs[si]
 	target := si
-	if kind == 0 { // dissolver: corte da esquerda (this) ou da direita (próximo)?
-		if time > sg.start + sg.dur/2 {
-			if nx := seg_on_track_at(sg.track, sg.start + sg.dur + 0.01); nx >= 0 do target = nx
-		}
-		if seg_speed(target) != 1 { set_toast("Dissolver não combina com velocidade alterada"); return }
-		tm := trans_max(target)
-		if tm <= 0.01 { trans_deny_toast(target); return }
-		segs[target].trans = min(1, tm)
-		segs[target].trans_mode = 0
-		set_toast("Dissolver aplicado")
-	} else if kind == 3 {
-		if time > sg.start + sg.dur/2 {
-			if nx := seg_on_track_at(sg.track, sg.start + sg.dur + 0.01); nx >= 0 do target = nx
-		}
-		apply_ghost(target)
+	if trans_panel_is_cut(kind) {
+		target = trans_drop_target(si, time)
+		if kind == 3 do apply_ghost(target)
+		else         do apply_cut_trans(target, trans_mode_from_panel(kind))
 	} else if kind == 1 {
 		segs[target].vfin = clamp(1, 0.1, sg.dur*0.8); set_toast("Fade de entrada aplicado")
 	} else {

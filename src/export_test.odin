@@ -798,6 +798,84 @@ export_aparicao_nao_some_o_clipe_de_saida :: proc(t: ^testing.T) {
 	t_assert_geq_barato(t, g, 1920, 1080)
 }
 
+@(test)
+export_wipe_esquerda_usa_mascara_e_nao_dissolve :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)
+	b := add_seg(1, 4, 0, 3)
+	segs[b].trans = 1
+	segs[b].trans_mode = TRANS_WIPE_L
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "X/W"), "wipe esquerda usa X/W na máscara")
+	testing.expect(t, strings.contains(g, "alphamerge"), "máscara via alphamerge")
+	testing.expect(t, strings.contains(g, "(1-("), "A some no lado já revelado")
+	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.500"), "wipe não é dissolver de alpha")
+	testing.expect(t, !strings.contains(g, "sin(X"), "wipe não é tinta orgânica")
+	t_assert_geq_barato(t, g, 1920, 1080)
+}
+
+@(test)
+export_iris_usa_hypot :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)
+	b := add_seg(1, 4, 0, 3)
+	segs[b].trans = 1
+	segs[b].trans_mode = TRANS_IRIS
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "hypot"), "íris = raio do centro")
+	testing.expect(t, strings.contains(g, "alphamerge"), "máscara via alphamerge")
+	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.500"), "íris não é dissolver")
+}
+
+@(test)
+export_deslizar_esquerda_offset_no_overlay :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)
+	b := add_seg(1, 4, 0, 3)
+	segs[b].trans = 1
+	segs[b].trans_mode = TRANS_SLIDE_L
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "if(between(t"), "deslize anima x/y no overlay")
+	testing.expect(t, strings.contains(g, "*main_w"), "offset em fração do canvas")
+	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.500"), "deslize não dissolve")
+	testing.expect(t, !strings.contains(g, "geq="), "deslize não usa geq")
+}
+
+@(test)
+export_flash_passa_pelo_branco :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)
+	b := add_seg(1, 4, 0, 3)
+	segs[b].trans = 1
+	segs[b].trans_mode = TRANS_FLASH
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "c=white"), "flash usa fade para branco")
+	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.500:d=1.000:alpha=1"), "flash não é dissolver de alpha")
+}
+
+@(test)
+export_zoom_escala_o_clipe_que_entra :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)
+	b := add_seg(1, 4, 0, 3)
+	segs[b].trans = 1
+	segs[b].trans_mode = TRANS_ZOOM
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "eval=frame"), "zoom anima a escala por frame")
+	testing.expect(t, strings.contains(g, "0.22+0.78"), "B cresce de ~22% a 100%")
+	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.500"), "zoom não dissolve")
+}
+
+@(test)
+trans_mode_do_painel_mapeia_os_cortes :: proc(t: ^testing.T) {
+	testing.expect(t, trans_mode_from_panel(0) == TRANS_DISSOLVE, "tile 0 = dissolver")
+	testing.expect(t, trans_mode_from_panel(3) == TRANS_GHOST, "tile 3 = orgânico")
+	testing.expect(t, trans_mode_from_panel(4) == TRANS_WIPE_L, "tile 4 = wipe esquerda")
+	testing.expect(t, trans_mode_from_panel(14) == TRANS_ZOOM, "tile 14 = zoom")
+	testing.expect(t, trans_panel_is_cut(8) && !trans_panel_is_cut(1), "deslizar é de corte; fade in não")
+	testing.expect(t, trans_is_mask(TRANS_IRIS) && trans_is_slide(TRANS_SLIDE_U), "famílias")
+}
+
 // ---------- dissolve orgânico: CUSTO do geq (não só o visual) ----------
 // O que travou o capitalismo: geq interpreta a expressão POR PIXEL. Full-res 1080p
 // ≈ 2M evals/frame; no clipe inteiro, dezenas de segundos de CPU por transição.

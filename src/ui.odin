@@ -835,23 +835,24 @@ draw :: proc() {
 	// fantasma da TRANSIÇÃO sendo arrastada + guia no corte alvo
 	if st.drag == .Trans && trans_drag >= 0 {
 		m := rl.GetMousePosition()
-		names := []cstring{ "Dissolver", "Fade de entrada", "Fade de saída", "Dissolve orgânico" }
 		over := rl.CheckCollisionPointRec(m, g_vlane)
 		if over { // marca o corte/borda alvo com uma linha vertical âmbar
 			si := seg_on_track_at(track_at_y(m.y), tl_t(m.x))
 			if si >= 0 {
 				sg := segs[si]
-				edge := sg.start // dissolver/aparição esquerda / fade entrada
-				if (trans_drag == 0 || trans_drag == 3) && tl_t(m.x) > sg.start + sg.dur/2 do edge = sg.start + sg.dur // direita
+				edge := sg.start // corte esquerdo / fade entrada
+				if trans_panel_is_cut(trans_drag) && tl_t(m.x) > sg.start + sg.dur/2 do edge = sg.start + sg.dur
 				if trans_drag == 2 do edge = sg.start + sg.dur // fade saída
 				ex := tl_x(edge)
 				rl.DrawLineEx({ ex, g_vlane.y }, { ex, g_vlane.y + g_vlane.height }, 2.5, rl.Color{ 245, 200, 90, 235 })
 			}
 		}
-		gr := rl.Rectangle{ m.x - 56, m.y - 16, 112, 30 }
+		name := trans_panel_name(trans_drag)
+		nw := max(f32(112), txt_w(name, 12) + 24)
+		gr := rl.Rectangle{ m.x - nw/2, m.y - 16, nw, 30 }
 		rl.DrawRectangleRounded(gr, 0.3, 6, rl.Color{ 40, 44, 54, 230 })
 		rl.DrawRectangleRoundedLinesEx(gr, 0.3, 6, 1, over ? ACCENT : LINE)
-		txt_c(trans_drag < len(names) ? names[trans_drag] : "Transição", gr.x + 56, gr.y + 7, 12, over ? ACCENT : TEXT)
+		txt_c(name, gr.x + nw/2, gr.y + 7, 12, over ? ACCENT : TEXT)
 	}
 
 	if save_flash_t > 0 {
@@ -1271,9 +1272,11 @@ draw_subbar :: proc(y, media_w, h: f32) {
 // mini-ícone da transição dentro de um tile
 draw_trans_icon :: proc(box: rl.Rectangle, kind: int) {
 	ix := box.x + 20; iy := box.y + 12; iw := box.width - 40; ih := box.height - 30
+	a_col := rl.Color{ 70, 110, 140, 255 }
+	b_col := rl.Color{ 150, 90, 120, 255 }
 	switch kind {
 	case 0: // dissolver: dois blocos sobrepostos + laço âmbar
-		rl.DrawRectangleRec({ ix, iy, iw*0.62, ih }, rl.Color{ 70, 110, 140, 255 })
+		rl.DrawRectangleRec({ ix, iy, iw*0.62, ih }, a_col)
 		rl.DrawRectangleRec({ ix + iw*0.38, iy, iw*0.62, ih }, rl.Color{ 150, 90, 120, 210 })
 		rl.DrawLineEx({ ix+iw*0.38, iy }, { ix+iw, iy+ih }, 1.5, rl.Color{ 245, 212, 120, 230 })
 		rl.DrawLineEx({ ix+iw*0.38, iy+ih }, { ix+iw, iy }, 1.5, rl.Color{ 245, 212, 120, 230 })
@@ -1289,6 +1292,55 @@ draw_trans_icon :: proc(box: rl.Rectangle, kind: int) {
 		rl.DrawCircleV({ ix + iw*0.22, iy + ih*0.30 }, ih*0.16, ink)
 		rl.DrawCircleV({ ix + iw*0.74, iy + ih*0.72 }, ih*0.20, ink)
 		rl.DrawCircleV({ ix + iw*0.48, iy + ih*0.12 }, ih*0.10, ink)
+	case 4: // wipe esquerda
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		rl.DrawRectangleRec({ ix, iy, iw*0.55, ih }, b_col)
+		rl.DrawLineEx({ ix + iw*0.55, iy }, { ix + iw*0.55, iy + ih }, 2, rl.WHITE)
+	case 5: // wipe direita
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		rl.DrawRectangleRec({ ix + iw*0.45, iy, iw*0.55, ih }, b_col)
+		rl.DrawLineEx({ ix + iw*0.45, iy }, { ix + iw*0.45, iy + ih }, 2, rl.WHITE)
+	case 6: // wipe cima
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		rl.DrawRectangleRec({ ix, iy, iw, ih*0.55 }, b_col)
+		rl.DrawLineEx({ ix, iy + ih*0.55 }, { ix + iw, iy + ih*0.55 }, 2, rl.WHITE)
+	case 7: // wipe baixo
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		rl.DrawRectangleRec({ ix, iy + ih*0.45, iw, ih*0.55 }, b_col)
+		rl.DrawLineEx({ ix, iy + ih*0.45 }, { ix + iw, iy + ih*0.45 }, 2, rl.WHITE)
+	case 8: // deslizar esquerda
+		rl.DrawRectangleRec({ ix, iy, iw*0.48, ih }, a_col)
+		rl.DrawRectangleRec({ ix + iw*0.52, iy, iw*0.48, ih }, b_col)
+		rl.DrawLineEx({ ix + iw*0.28, iy + ih/2 }, { ix + iw*0.08, iy + ih/2 }, 2, rl.WHITE)
+		rl.DrawTriangle({ ix + iw*0.08, iy + ih/2 }, { ix + iw*0.16, iy + ih*0.32 }, { ix + iw*0.16, iy + ih*0.68 }, rl.WHITE)
+	case 9: // deslizar direita
+		rl.DrawRectangleRec({ ix, iy, iw*0.48, ih }, a_col)
+		rl.DrawRectangleRec({ ix + iw*0.52, iy, iw*0.48, ih }, b_col)
+		rl.DrawLineEx({ ix + iw*0.72, iy + ih/2 }, { ix + iw*0.92, iy + ih/2 }, 2, rl.WHITE)
+		rl.DrawTriangle({ ix + iw*0.92, iy + ih/2 }, { ix + iw*0.84, iy + ih*0.32 }, { ix + iw*0.84, iy + ih*0.68 }, rl.WHITE)
+	case 10: // deslizar cima
+		rl.DrawRectangleRec({ ix, iy, iw, ih*0.46 }, b_col)
+		rl.DrawRectangleRec({ ix, iy + ih*0.54, iw, ih*0.46 }, a_col)
+		rl.DrawTriangle({ ix + iw/2, iy + 4 }, { ix + iw*0.38, iy + ih*0.28 }, { ix + iw*0.62, iy + ih*0.28 }, rl.WHITE)
+	case 11: // deslizar baixo
+		rl.DrawRectangleRec({ ix, iy, iw, ih*0.46 }, a_col)
+		rl.DrawRectangleRec({ ix, iy + ih*0.54, iw, ih*0.46 }, b_col)
+		rl.DrawTriangle({ ix + iw/2, iy + ih - 4 }, { ix + iw*0.38, iy + ih*0.72 }, { ix + iw*0.62, iy + ih*0.72 }, rl.WHITE)
+	case 12: // íris
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		rl.DrawCircleV({ ix + iw/2, iy + ih/2 }, min(iw, ih)*0.28, b_col)
+		rl.DrawCircleLines(i32(ix + iw/2), i32(iy + ih/2), min(iw, ih)*0.38, rl.WHITE)
+	case 13: // flash
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, rl.Color{ 245, 248, 255, 255 })
+		cx := ix + iw/2; cy := iy + ih/2
+		rl.DrawLineEx({ cx, iy + 4 }, { cx, iy + ih - 4 }, 2, rl.Color{ 250, 200, 60, 255 })
+		rl.DrawLineEx({ ix + 6, cy }, { ix + iw - 6, cy }, 2, rl.Color{ 250, 200, 60, 255 })
+		rl.DrawLineEx({ ix + 10, iy + 8 }, { ix + iw - 10, iy + ih - 8 }, 1.6, rl.Color{ 250, 180, 40, 255 })
+		rl.DrawLineEx({ ix + iw - 10, iy + 8 }, { ix + 10, iy + ih - 8 }, 1.6, rl.Color{ 250, 180, 40, 255 })
+	case 14: // zoom
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		rl.DrawRectangleLinesEx({ ix + iw*0.22, iy + ih*0.18, iw*0.56, ih*0.64 }, 1.5, rl.WHITE)
+		rl.DrawRectangleRec({ ix + iw*0.32, iy + ih*0.30, iw*0.36, ih*0.40 }, b_col)
 	}
 }
 
@@ -1483,26 +1535,43 @@ draw_color_panel :: proc(r: rl.Rectangle) {
 
 draw_transitions_panel :: proc(r: rl.Rectangle) {
 	txt("Transições", r.x + 14, r.y + 12, 15, TEXT)
-	txt("Dissolve orgânico: máscara de tinta/fumaça — a imagem some por partes.",
-		r.x + 14, r.y + 38, 12, MUTED)
-	items := []struct{ name: cstring, kind: int }{ {"Dissolver", 0}, {"Fade de entrada", 1}, {"Fade de saída", 2}, {"Dissolve orgânico", 3} }
-	tw: f32 = 132; th: f32 = 74; gap: f32 = 12
+	txt("Arraste para o corte entre dois clipes na mesma trilha.",
+		r.x + 14, r.y + 36, 12, MUTED)
+	items := []struct{ name: cstring, kind: int }{
+		{"Dissolver", 0}, {"Fade de entrada", 1}, {"Fade de saída", 2}, {"Dissolve orgânico", 3},
+		{"Wipe esquerda", 4}, {"Wipe direita", 5}, {"Wipe cima", 6}, {"Wipe baixo", 7},
+		{"Deslizar esquerda", 8}, {"Deslizar direita", 9}, {"Deslizar cima", 10}, {"Deslizar baixo", 11},
+		{"Íris", 12}, {"Flash", 13}, {"Zoom", 14},
+	}
+	tw: f32 = 118; th: f32 = 64; gap: f32 = 10; lblh: f32 = 22
 	cols := max(1, int((r.width - gap) / (tw + gap)))
-	x0 := r.x + gap; y0 := r.y + 64
+	rows := (len(items) + cols - 1) / cols
+	content_h := f32(rows) * (th + gap + lblh)
+	area := rl.Rectangle{ r.x, r.y + 56, r.width, max(40, r.height - 56 - 32) }
+	maxs := max(f32(0), content_h - area.height + 8)
+	if hovered(area) && st.drag == .None {
+		trans_panel_scroll = clamp(trans_panel_scroll - rl.GetMouseWheelMove() * 40, 0, maxs)
+	} else {
+		trans_panel_scroll = clamp(trans_panel_scroll, 0, maxs)
+	}
+	x0 := r.x + gap; y0 := area.y - trans_panel_scroll
+	rl.BeginScissorMode(i32(area.x), i32(area.y), i32(area.width), i32(area.height))
 	for it, idx in items {
 		col := idx % cols; row := idx / cols
-		box := rl.Rectangle{ x0 + f32(col)*(tw+gap), y0 + f32(row)*(th+28), tw, th }
+		box := rl.Rectangle{ x0 + f32(col)*(tw+gap), y0 + f32(row)*(th+gap+lblh), tw, th }
+		if box.y + box.height < area.y || box.y > area.y + area.height { continue }
 		hot := hovered(box)
 		rl.DrawRectangleRounded(box, 0.08, 6, hot ? rl.Color{ 48, 52, 64, 255 } : PANEL2)
 		rl.DrawRectangleRoundedLinesEx(box, 0.08, 6, 1, hot ? ACCENT : LINE)
 		draw_trans_icon(box, it.kind)
-		txt_c(it.name, box.x + box.width/2, box.y + box.height + 4, 11, TEXT)
+		txt_c(it.name, box.x + box.width/2, box.y + box.height + 3, 11, TEXT)
 		// arrastar até a timeline (soltar entre os clipes); clique = aplica ao selecionado
 		if rl.IsMouseButtonPressed(.LEFT) && hovered(box) && modal == .None {
 			st.drag = .Trans; trans_drag = it.kind
 		}
 	}
-	txt("Ajuste a duração depois na aba \"Vídeo\" do inspector.", r.x + 14, r.y + r.height - 30, 11, MUTED)
+	rl.EndScissorMode()
+	txt("Ajuste a duração na pastilha do corte (alças).", r.x + 14, r.y + r.height - 26, 11, MUTED)
 }
 
 // ícone de um layout de tela dividida: desenha as células (mesma tabela de split_cells)
