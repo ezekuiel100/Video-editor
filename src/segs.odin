@@ -187,10 +187,19 @@ nsegs: int
 
 // EFEITO como CLIPE na timeline (estilo NLE): ocupa [start, start+dur] numa faixa própria
 // acima das trilhas e aplica seu efeito VISUAL a todo o quadro durante esse intervalo. Cada
-// clipe guarda seus PRÓPRIOS parâmetros (editáveis ao dar duplo-clique). kind: 0 = Distorção,
-// 1 = Separação RGB.
+// clipe guarda seus PRÓPRIOS parâmetros (editáveis ao dar duplo-clique).
+// kind: 0 Distorção | 1 RGB | 2 Pixelizar | 3 Desfoque | 4 Granulação | 5 Espelhar
+//       | 6 Nitidez | 7 Holofote | 8 Tremor | 9 Posterizar
 FX_DISTORT :: 0
 FX_RGB     :: 1
+FX_PIXEL   :: 2
+FX_BLUR    :: 3
+FX_GRAIN   :: 4
+FX_MIRROR  :: 5
+FX_SHARP   :: 6
+FX_SPOT    :: 7
+FX_SHAKE   :: 8
+FX_POSTER  :: 9
 FxSeg :: struct {
 	kind:   int,
 	track:  int, // trilha de VÍDEO onde o efeito está (afeta essa trilha e as ABAIXO dela: índice <= track)

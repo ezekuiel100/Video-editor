@@ -1055,3 +1055,19 @@ copiar_clipe_de_efeito_cobre_o_destino :: proc(t: ^testing.T) {
 	testing.expect(t, e.kind == FX_RGB && t_feq(e.amount, 0.55), "tipo e intensidade")
 	testing.expect(t, t_feq(e.start, 15) && t_feq(e.dur, 6), "cobre [15,21) do destino")
 }
+
+@(test)
+fx_biblioteca_tem_os_tipos_novos :: proc(t: ^testing.T) {
+	testing.expect(t, string(fxlib_name(FX_PIXEL)) == "Pixelizar")
+	testing.expect(t, string(fxlib_name(FX_BLUR)) == "Desfoque")
+	testing.expect(t, string(fxlib_name(FX_GRAIN)) == "Granulação")
+	testing.expect(t, string(fxlib_name(FX_MIRROR)) == "Espelhar")
+	testing.expect(t, string(fxlib_name(FX_SHARP)) == "Nitidez")
+	testing.expect(t, string(fxlib_name(FX_SPOT)) == "Holofote")
+	testing.expect(t, string(fxlib_name(FX_SHAKE)) == "Tremor")
+	testing.expect(t, string(fxlib_name(FX_POSTER)) == "Posterizar")
+	testing.expect(t, len(fx_lib) >= 10, "biblioteca tem distorção, RGB e os 8 novos")
+	f := FxSeg{ kind = FX_SPOT }
+	fx_defaults(&f)
+	testing.expect(t, f.amount > 0.5 && f.radius > 0.2, "holofote nasce visível")
+}

@@ -14,6 +14,7 @@ bulge_loc_uv0, bulge_loc_uv1, bulge_loc_center, bulge_loc_strength, bulge_loc_ra
 fx_loc_bright, fx_loc_contrast, fx_loc_satur, fx_loc_look, fx_loc_vignette, fx_loc_temp: i32 // uniforms de COR
 fx_loc_rgb: i32 // uniform da separação RGB
 fx_loc_wipe_edge, fx_loc_wipe_feather, fx_loc_wipe_inv, fx_loc_wipe_kind: i32 // transições de máscara
+fx_loc_kind, fx_loc_amt, fx_loc_time, fx_loc_ang: i32 // clipes de efeito de faixa (além de distorção/RGB)
 BULGE_R_DEF :: f32(0.5) // raio padrão do efeito (quando bulge_r==0)
 WOBBLE_HZ_DEF :: f32(2) // frequência padrão do wobble (Hz, quando wobble_speed==0)
 // desloca a coord de textura em direção ao (bulge>0) ou p/ longe do (bulge<0) centro,
@@ -40,6 +41,10 @@ uniform float wipeEdge;    // progresso 0..1 da máscara (orgânico / wipe / ír
 uniform float wipeFeather; // 0 = desligado; maciez da fumaça/tinta (orgânico)
 uniform float wipeInv;     // 1 = clipe que SAI (máscara invertida)
 uniform float wipeKind;    // 0=off/orgânico | 2..5 wipe L/R/U/D | 10 íris
+uniform float fxKind;      // efeito de faixa: 0 off/distort/rgb | 2 pixel | 3 blur | 4 grain | 5 mirror | 6 sharp | 7 spot | 8 shake | 9 poster
+uniform float fxAmt;       // intensidade 0..1 do efeito de faixa
+uniform float fxTime;      // tempo (s) p/ granulação/tremor
+uniform float fxAng;       // Espelhar: <0.5 horizontal, senão vertical
 float vn(vec2 p, vec2 seed) {
     vec2 i = floor(p); vec2 f = fract(p);
     f = f*f*(3.0-2.0*f);
@@ -67,9 +72,38 @@ void main() {
         float amt = strength*pct*pct;           // suave (zera na borda)
         uv = local - d*amt;                     // amt>0: amostra p/ o centro => amplia
     }
+    if (fxKind > 4.5 && fxKind < 5.5) {           // ESPELHAR: dobra a metade
+        if (fxAng < 0.5) uv.x = 0.5 - abs(uv.x - 0.5);
+        else             uv.y = 0.5 - abs(uv.y - 0.5);
+    }
+    if (fxKind > 7.5 && fxKind < 8.5) {           // TREMOR: desloca o quadro
+        uv += vec2(sin(fxTime*23.0), cos(fxTime*17.0)) * fxAmt * 0.028;
+    }
+    if (fxKind > 1.5 && fxKind < 2.5) {           // PIXELIZAR
+        float nPix = mix(90.0, 8.0, clamp(fxAmt, 0.0, 1.0));
+        uv = (floor(uv * nPix) + 0.5) / nPix;
+    }
     vec2 tex = uv0 + clamp(uv, 0.0, 1.0)*span;
-    vec4 src = texture(texture0, tex);
-    vec3 c = src.rgb;
+    vec4 src;
+    vec3 c;
+    if (fxKind > 2.5 && fxKind < 3.5) {           // DESFOQUE 3×3
+        vec2 o = vec2(fxAmt * 0.012 / max(aspect, 0.2), fxAmt * 0.012);
+        vec3 acc = vec3(0.0);
+        acc += texture(texture0, uv0 + clamp(uv + vec2(-o.x,-o.y), 0.0, 1.0)*span).rgb;
+        acc += texture(texture0, uv0 + clamp(uv + vec2( 0.0,-o.y), 0.0, 1.0)*span).rgb;
+        acc += texture(texture0, uv0 + clamp(uv + vec2( o.x,-o.y), 0.0, 1.0)*span).rgb;
+        acc += texture(texture0, uv0 + clamp(uv + vec2(-o.x, 0.0), 0.0, 1.0)*span).rgb;
+        acc += texture(texture0, tex).rgb;
+        acc += texture(texture0, uv0 + clamp(uv + vec2( o.x, 0.0), 0.0, 1.0)*span).rgb;
+        acc += texture(texture0, uv0 + clamp(uv + vec2(-o.x, o.y), 0.0, 1.0)*span).rgb;
+        acc += texture(texture0, uv0 + clamp(uv + vec2( 0.0, o.y), 0.0, 1.0)*span).rgb;
+        acc += texture(texture0, uv0 + clamp(uv + vec2( o.x, o.y), 0.0, 1.0)*span).rgb;
+        c = acc / 9.0;
+        src = vec4(c, texture(texture0, tex).a);
+    } else {
+        src = texture(texture0, tex);
+        c = src.rgb;
+    }
     if (rgb.x != 0.0 || rgb.y != 0.0) {           // SEPARAÇÃO RGB: R e B amostrados deslocados
         c.r = texture(texture0, clamp(tex + rgb, uv0, uv1)).r;
         c.b = texture(texture0, clamp(tex - rgb, uv0, uv1)).b;
@@ -93,6 +127,29 @@ void main() {
         float rr = length(vec2(vd.x*aspect, vd.y));
         float v = smoothstep(0.75, 0.30, rr);      // 1 no centro -> 0 nas quinas
         c *= mix(1.0, v, vignette);
+    }
+    if (fxKind > 5.5 && fxKind < 6.5) {            // NITIDEZ: unsharp simples
+        float s = 0.004;
+        vec3 nb = texture(texture0, uv0 + clamp(uv+vec2(s,0.0), 0.0, 1.0)*span).rgb
+                + texture(texture0, uv0 + clamp(uv-vec2(s,0.0), 0.0, 1.0)*span).rgb
+                + texture(texture0, uv0 + clamp(uv+vec2(0.0,s), 0.0, 1.0)*span).rgb
+                + texture(texture0, uv0 + clamp(uv-vec2(0.0,s), 0.0, 1.0)*span).rgb;
+        vec3 bl = nb * 0.25;
+        c = c + (c - bl) * fxAmt * 1.8;
+    }
+    if (fxKind > 8.5 && fxKind < 9.5) {            // POSTERIZAR
+        float nPos = mix(12.0, 3.0, clamp(fxAmt, 0.0, 1.0));
+        c = floor(c * nPos + 0.5) / nPos;
+    }
+    if (fxKind > 3.5 && fxKind < 4.5) {            // GRANULAÇÃO
+        float nGr = fract(sin(dot(local * vec2(973.1, 617.3) + fxTime * 51.0, vec2(12.9898, 78.233))) * 43758.5453);
+        c += (nGr - 0.5) * fxAmt * 0.45;
+    }
+    if (fxKind > 6.5 && fxKind < 7.5) {            // HOLOFOTE: escurece fora do raio
+        vec2 sd = local - center;
+        float sdist = length(vec2(sd.x*aspect, sd.y));
+        float sm = smoothstep(radius, radius * 0.35, sdist);
+        c *= mix(1.0 - fxAmt * 0.92, 1.0, sm);
     }
     c = clamp(c, 0.0, 1.0);
     float a = src.a;
@@ -808,6 +865,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	b_cx := clamp(0.5+sg.bulge_x, 0, 1); b_cy := clamp(0.5+sg.bulge_y, 0, 1)
 	b_r := sg.bulge_r <= 0 ? BULGE_R_DEF : sg.bulge_r
 	rgb_off := [2]f32{ 0, 0 } // separação RGB do efeito de faixa (0 = desligado)
+	fxk := f32(0); fxa := f32(0); fxt := f32(0); fxa_ang := f32(0)
 	// efeito de FAIXA que rege ESTA trilha (na trilha do seg ou numa acima — "afeta o que está embaixo")
 	af := is_audio_track(sg.track) ? -1 : fx_for_track(sg.track)
 	if af >= 0 {
@@ -817,6 +875,16 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 			b_cx = clamp(0.5+fs.cx, 0, 1); b_cy = clamp(0.5+fs.cy, 0, 1); b_r = fs.radius <= 0 ? BULGE_R_DEF : fs.radius
 		} else if fs.kind == FX_RGB {
 			rgb_off = fx_rgb_offset(fs)
+		} else if fs.kind >= FX_PIXEL {
+			fxk = f32(fs.kind); fxa = fs.amount; fxt = vt; fxa_ang = fs.angle
+			if fs.kind == FX_SPOT {
+				b_cx = clamp(0.5+fs.cx, 0, 1); b_cy = clamp(0.5+fs.cy, 0, 1)
+				b_r = fs.radius <= 0 ? BULGE_R_DEF : fs.radius
+			}
+			if fs.kind == FX_SHAKE {
+				hz := fs.speed <= 0 ? f32(8) : fs.speed
+				fxt = vt * hz / 8 // o shader usa constantes 23/17; speed escala o tempo
+			}
 		}
 	}
 	use_fx := bulge_ok && (fx_any(sg) || af >= 0 || wipe_feather > 0.01 || wipe_kind > 1.5)
@@ -848,6 +916,10 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		rl.SetShaderValue(bulge_shader, fx_loc_wipe_feather, &wf, .FLOAT)
 		rl.SetShaderValue(bulge_shader, fx_loc_wipe_inv, &wi, .FLOAT)
 		rl.SetShaderValue(bulge_shader, fx_loc_wipe_kind, &wk, .FLOAT)
+		rl.SetShaderValue(bulge_shader, fx_loc_kind, &fxk, .FLOAT)
+		rl.SetShaderValue(bulge_shader, fx_loc_amt, &fxa, .FLOAT)
+		rl.SetShaderValue(bulge_shader, fx_loc_time, &fxt, .FLOAT)
+		rl.SetShaderValue(bulge_shader, fx_loc_ang, &fxa_ang, .FLOAT)
 		rl.BeginShaderMode(bulge_shader)
 	}
 	rl.DrawTexturePro(tex, src, { ccx, ccy, dw, dh }, { dw/2, dh/2 }, sg.rot, tint)

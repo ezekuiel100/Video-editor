@@ -1357,10 +1357,32 @@ draw_bulge_icon :: proc(box: rl.Rectangle, col: rl.Color) {
 // Arraste um tile p/ a faixa de efeitos da timeline -> cria um clipe com parâmetros PRÓPRIOS
 // (editáveis no duplo-clique). ---
 FxLibItem :: struct { name: cstring, kind: int }
-fx_lib := [?]FxLibItem{ { "Distorção", FX_DISTORT }, { "Separação RGB", FX_RGB } }
+fx_lib := [?]FxLibItem{
+	{ "Distorção", FX_DISTORT },
+	{ "Separação RGB", FX_RGB },
+	{ "Pixelizar", FX_PIXEL },
+	{ "Desfoque", FX_BLUR },
+	{ "Granulação", FX_GRAIN },
+	{ "Espelhar", FX_MIRROR },
+	{ "Nitidez", FX_SHARP },
+	{ "Holofote", FX_SPOT },
+	{ "Tremor", FX_SHAKE },
+	{ "Posterizar", FX_POSTER },
+}
 
 fxlib_name :: proc(kind: int) -> cstring {
-	switch kind { case FX_DISTORT: return "Distorção"; case FX_RGB: return "Separação RGB" }
+	switch kind {
+	case FX_DISTORT: return "Distorção"
+	case FX_RGB:     return "Separação RGB"
+	case FX_PIXEL:   return "Pixelizar"
+	case FX_BLUR:    return "Desfoque"
+	case FX_GRAIN:   return "Granulação"
+	case FX_MIRROR:  return "Espelhar"
+	case FX_SHARP:   return "Nitidez"
+	case FX_SPOT:    return "Holofote"
+	case FX_SHAKE:   return "Tremor"
+	case FX_POSTER:  return "Posterizar"
+	}
 	return "Efeito"
 }
 // valores padrão de um clipe de efeito recém-criado, por tipo
@@ -1368,6 +1390,14 @@ fx_defaults :: proc(f: ^FxSeg) {
 	switch f.kind {
 	case FX_DISTORT: f.amount = 0.5; f.radius = BULGE_R_DEF; f.cx = 0; f.cy = 0; f.wobble = 0; f.speed = WOBBLE_HZ_DEF
 	case FX_RGB:     f.amount = 0.5; f.angle = 0.25 // "cima-baixo" (vertical) por padrão
+	case FX_PIXEL:   f.amount = 0.45
+	case FX_BLUR:    f.amount = 0.45
+	case FX_GRAIN:   f.amount = 0.40
+	case FX_MIRROR:  f.amount = 1; f.angle = 0 // horizontal
+	case FX_SHARP:   f.amount = 0.45
+	case FX_SPOT:    f.amount = 0.70; f.radius = 0.45; f.cx = 0; f.cy = 0
+	case FX_SHAKE:   f.amount = 0.40; f.speed = 8
+	case FX_POSTER:  f.amount = 0.50
 	}
 }
 add_fxseg :: proc(kind: int, start: f32, track := 0) -> int {
@@ -1418,6 +1448,43 @@ draw_fx_icon :: proc(box: rl.Rectangle, kind: int) {
 		rl.DrawRectangleRec({ cx-4, cy,   20, 16 }, rl.Color{ 235, 70, 70, 190 })
 		rl.DrawRectangleRec({ cx,   cy-2, 20, 16 }, rl.Color{ 70, 220, 90, 190 })
 		rl.DrawRectangleRec({ cx+4, cy+2, 20, 16 }, rl.Color{ 80, 120, 245, 190 })
+	case FX_PIXEL: // grade
+		gx := box.x + 28; gy := box.y + 16
+		for row in 0 ..< 3 do for col in 0 ..< 3 {
+			rl.DrawRectangleRec({ gx + f32(col)*16, gy + f32(row)*12, 14, 10 }, rl.Color{ 180, 210, 255, u8(160 + (row+col)*20) })
+		}
+	case FX_BLUR:
+		cx := box.x + box.width/2; cy := box.y + box.height/2
+		rl.DrawCircleV({ cx, cy }, 18, rl.Color{ 160, 190, 230, 70 })
+		rl.DrawCircleV({ cx, cy }, 11, rl.Color{ 180, 210, 245, 110 })
+		rl.DrawCircleV({ cx, cy }, 5, rl.Color{ 230, 240, 255, 220 })
+	case FX_GRAIN:
+		cx := box.x + 32; cy := box.y + 18
+		for i in 0 ..< 18 {
+			px := cx + f32((i * 17) % 40); py := cy + f32((i * 11) % 28)
+			rl.DrawCircleV({ px, py }, 1.4, rl.Color{ 230, 230, 220, 220 })
+		}
+	case FX_MIRROR:
+		mx := box.x + box.width/2; my := box.y + 16
+		rl.DrawTriangle({ mx, my }, { mx - 22, my + 34 }, { mx, my + 34 }, rl.Color{ 140, 200, 255, 220 })
+		rl.DrawTriangle({ mx, my }, { mx + 22, my + 34 }, { mx, my + 34 }, rl.Color{ 90, 150, 220, 180 })
+		rl.DrawLineEx({ mx, my }, { mx, my + 34 }, 1.5, rl.WHITE)
+	case FX_SHARP:
+		cx := box.x + box.width/2; cy := box.y + box.height/2
+		rl.DrawTriangle({ cx, cy - 16 }, { cx - 14, cy + 12 }, { cx + 14, cy + 12 }, rl.Color{ 250, 230, 140, 230 })
+		rl.DrawTriangle({ cx, cy - 8 }, { cx - 7, cy + 6 }, { cx + 7, cy + 6 }, rl.Color{ 40, 46, 60, 255 })
+	case FX_SPOT:
+		rl.DrawRectangleRec({ box.x + 18, box.y + 12, box.width - 36, box.height - 24 }, rl.Color{ 18, 18, 24, 255 })
+		rl.DrawCircleV({ box.x + box.width/2, box.y + box.height/2 }, 12, rl.Color{ 255, 240, 180, 230 })
+		rl.DrawCircleV({ box.x + box.width/2, box.y + box.height/2 }, 5, rl.Color{ 255, 255, 245, 255 })
+	case FX_SHAKE:
+		cx := box.x + box.width/2 - 12; cy := box.y + box.height/2 - 10
+		rl.DrawRectangleRec({ cx - 6, cy, 24, 18 }, rl.Color{ 120, 160, 220, 160 })
+		rl.DrawRectangleRec({ cx + 4, cy - 3, 24, 18 }, rl.Color{ 230, 210, 120, 200 })
+	case FX_POSTER:
+		px := box.x + 26; py := box.y + 16
+		cols := []rl.Color{ { 70, 90, 200, 255 }, { 80, 180, 120, 255 }, { 230, 190, 70, 255 }, { 220, 90, 80, 255 } }
+		for c, i in cols do rl.DrawRectangleRec({ px, py + f32(i)*8, 52, 8 }, c)
 	}
 }
 
@@ -1477,6 +1544,33 @@ draw_fx_settings :: proc(r: rl.Rectangle) {
 		txt("Direção", x, y, 13, TEXT); txt(rl.TextFormat("%d°", i32(f.angle*360)), vx, y, 13, ACCENT); y += 20
 		ui_slider(41, { x, y, cw, 16 }, &f.angle, 0, 1); y += 28
 		txt("0° = horizontal · 90° = cima-baixo.", x, y, 11, MUTED); y += 22
+	case FX_PIXEL, FX_BLUR, FX_GRAIN, FX_SHARP, FX_POSTER:
+		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
+	case FX_MIRROR:
+		txt("Direção", x, y, 13, MUTED); y += 22
+		horz := f.angle < 0.5
+		if ui_btn({ x, y, (cw-8)/2, 26 }, "Horizontal", horz) do f.angle = 0
+		if ui_btn({ x + (cw-8)/2 + 8, y, (cw-8)/2, 26 }, "Vertical", !horz) do f.angle = 0.5
+		y += 36
+		txt("Dobra a metade do quadro sobre a outra.", x, y, 11, MUTED); y += 22
+	case FX_SPOT:
+		if f.radius <= 0 do f.radius = 0.45
+		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
+		txt("Raio", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(41, { x, y, cw, 16 }, &f.radius, 0.1, 1); y += 28
+		txt("Centro X", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(f.cx*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(42, { x, y, cw, 16 }, &f.cx, -0.5, 0.5); y += 28
+		txt("Centro Y", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(f.cy*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(43, { x, y, cw, 16 }, &f.cy, -0.5, 0.5); y += 28
+		txt("Arraste o alvo no preview para mover o centro.", x, y, 11, MUTED); y += 22
+	case FX_SHAKE:
+		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
+		if f.speed <= 0 do f.speed = 8
+		txt("Velocidade", x, y, 13, TEXT); txt(rl.TextFormat("%.1f Hz", f64(f.speed)), vx-8, y, 13, ACCENT); y += 20
+		ui_slider(41, { x, y, cw, 16 }, &f.speed, 1, 16); y += 28
 	}
 	y += 8
 	// rodapé estilo NLE: REDEFINIR (contorno) à esquerda, OK (preenchido) à direita.
@@ -2586,7 +2680,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// alvo do CENTRO da distorção do CLIPE DE EFEITO selecionado (arrasta no preview p/ mover
 	// o centro sem os sliders). Só quando é Distorção e está sob o playhead (efeito visível).
 	if !crop_mode && src_preview < 0 && fx_sel >= 0 && fx_sel < nfx && g_frame.width > 0 &&
-	   fxsegs[fx_sel].kind == FX_DISTORT && st.playhead >= fxsegs[fx_sel].start && st.playhead < fxsegs[fx_sel].start + fxsegs[fx_sel].dur {
+	   (fxsegs[fx_sel].kind == FX_DISTORT || fxsegs[fx_sel].kind == FX_SPOT) && st.playhead >= fxsegs[fx_sel].start && st.playhead < fxsegs[fx_sel].start + fxsegs[fx_sel].dur {
 		f := fxsegs[fx_sel]
 		m := rl.GetMousePosition()
 		ccx := g_frame.x + g_frame.width/2 + f.cx*g_frame.width

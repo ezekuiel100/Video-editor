@@ -551,6 +551,50 @@ export_color_filters :: proc(fb: ^strings.Builder, sg: Seg) {
 	}
 }
 
+// filtro de um clipe de EFEITO DE FAIXA (já com o pad de entrada impresso). Sem geq RGB —
+// isso travava o export (ver t_assert_geq_barato). Distortion com mapa vai por outro ramo.
+export_emit_track_fx :: proc(fb: ^strings.Builder, e: FxSeg, k, W, H: int) {
+	amt := clamp(e.amount, 0, 1)
+	switch e.kind {
+	case FX_DISTORT: // fallback (mapa falhou): aproximação por lente
+		cx := clamp(0.5+e.cx, 0, 1); cy := clamp(0.5+e.cy, 0, 1)
+		fmt.sbprintf(fb, "lenscorrection=cx=%.4f:cy=%.4f:k1=%.4f:k2=0:i=bilinear", cx, cy, -e.amount*0.4)
+	case FX_RGB:
+		off := fx_rgb_offset(e); rh := off[0]*f32(W); rv := off[1]*f32(H)
+		fmt.sbprintf(fb, "rgbashift=rh=%.1f:rv=%.1f:bh=%.1f:bv=%.1f", rh, rv, -rh, -rv)
+	case FX_PIXEL:
+		bs := 2.5 + amt*40 // bloco ~2.5..42 px
+		fmt.sbprintf(fb, "scale=w=max(2\\,trunc(iw/%.2f/2)*2):h=max(2\\,trunc(ih/%.2f/2)*2):flags=neighbor,scale=%d:%d:flags=neighbor", bs, bs, W, H)
+	case FX_BLUR:
+		r := 1.0 + amt*14
+		fmt.sbprintf(fb, "boxblur=%.1f:1", r)
+	case FX_GRAIN:
+		s := 1.0 + amt*48
+		fmt.sbprintf(fb, "noise=alls=%.0f:allf=t+u", s)
+	case FX_MIRROR:
+		if e.angle < 0.5 {
+			fmt.sbprintf(fb, "crop=iw/2:ih:0:0,split[fxL%d][fxR%d];[fxR%d]hflip[fxRf%d];[fxL%d][fxRf%d]hstack", k, k, k, k, k, k)
+		} else {
+			fmt.sbprintf(fb, "crop=iw:ih/2:0:0,split[fxT%d][fxB%d];[fxB%d]vflip[fxBf%d];[fxT%d][fxBf%d]vstack", k, k, k, k, k, k)
+		}
+	case FX_SHARP:
+		fmt.sbprintf(fb, "unsharp=5:5:%.2f:5:5:0", amt*2.0)
+	case FX_SPOT:
+		cx := clamp(0.5+e.cx, 0, 1); cy := clamp(0.5+e.cy, 0, 1)
+		fmt.sbprintf(fb, "vignette=angle=%.4f:x0=w*%.4f:y0=h*%.4f:mode=forward", 0.40+amt*0.90, cx, cy)
+	case FX_SHAKE:
+		amp := amt * 28 // pixels
+		hz := e.speed <= 0 ? f32(8) : e.speed
+		fmt.sbprintf(fb, "scale=iw*1.14:ih*1.14,crop=%d:%d:x='(in_w-out_w)/2+%.1f*sin(2*PI*t*%.2f)':y='(in_h-out_h)/2+%.1f*cos(2*PI*t*%.2f)'",
+			W, H, amp, hz, amp, hz)
+	case FX_POSTER:
+		step := max(8, 256 / (2 + int(amt*10 + 0.5))) // 8..128
+		fmt.sbprintf(fb, "lutrgb=r='trunc(val/%d)*%d':g='trunc(val/%d)*%d':b='trunc(val/%d)*%d'", step, step, step, step, step, step)
+	case:
+		fmt.sbprintf(fb, "copy")
+	}
+}
+
 // dimensões (pares) do segmento após escala no export — MESMA fórmula usada ao montar o
 // filtro; extraída p/ gerar os mapas do bulge com o tamanho exato do stream no remap.
 seg_export_dims :: proc(i, W, H: int) -> (int, int) {
@@ -1162,7 +1206,8 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		}
 		// EFEITOS DE FAIXA ancorados NESTA trilha t: aplicam ao COMPOSTO até aqui (trilhas 0..t =
 		// "o que está embaixo" do efeito), ANTES de compor as trilhas acima. Via split+overlay+
-		// enable (roda sempre, só aparece em [start,end]). Distorção = remap/lenscorrection; RGB = rgbashift.
+		// enable (roda sempre, só aparece em [start,end]). Distorção = remap/lenscorrection; RGB = rgbashift;
+		// os outros tipos = filtros baratos (scale/boxblur/noise/unsharp/vignette/lutrgb — sem geq RGB).
 		for k in 0 ..< nfx {
 			e := fxsegs[k]
 			if e.track != t do continue // só os efeitos desta trilha (as de cima aplicam depois)
@@ -1174,14 +1219,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				fmt.sbprintf(&fb, "[%s]format=rgb24[%spf];[%spf][%d:v][%d:v]remap[%s];", op, op, op, fx_xin[k], fx_yin[k], ox)
 			} else {
 				fmt.sbprintf(&fb, "[%s]", op)
-				switch e.kind {
-				case FX_DISTORT: // fallback (mapa falhou): aproximação por lente
-					cx := clamp(0.5+e.cx, 0, 1); cy := clamp(0.5+e.cy, 0, 1)
-					fmt.sbprintf(&fb, "lenscorrection=cx=%.4f:cy=%.4f:k1=%.4f:k2=0:i=bilinear", cx, cy, -e.amount*0.4)
-				case FX_RGB:
-					off := fx_rgb_offset(e); rh := off[0]*f32(W); rv := off[1]*f32(H)
-					fmt.sbprintf(&fb, "rgbashift=rh=%.1f:rv=%.1f:bh=%.1f:bv=%.1f", rh, rv, -rh, -rv)
-				}
+				export_emit_track_fx(&fb, e, k, W, H)
 				fmt.sbprintf(&fb, "[%s];", ox)
 			}
 			fmt.sbprintf(&fb, "[%s][%s]overlay=0:0:enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];", ob, ox, es, ee, oo)

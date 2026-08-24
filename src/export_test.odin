@@ -1176,3 +1176,38 @@ export_previa_sempre_emite_vpout :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(g, "fifo"), "este ffmpeg não tem o filtro fifo — export morria")
 	testing.expect(t, t_has(args, "pipe:1"), "prévia sai em pipe:1")
 }
+
+// efeitos de faixa NOVOS: filtros baratos (sem geq RGB, que travava o export).
+// O clipe de efeito vive numa trilha ACIMA do vídeo (exclusivo no espaço).
+@(test)
+export_fx_novos_usam_filtros_baratos :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 20, 0)
+	kinds := []int{ FX_PIXEL, FX_BLUR, FX_GRAIN, FX_MIRROR, FX_SHARP, FX_SPOT, FX_SHAKE, FX_POSTER }
+	nfx = len(kinds)
+	for k, i in kinds {
+		fxsegs[i] = FxSeg{ kind = k, track = 1, start = f32(i) * 2, dur = 1.5, amount = 0.5, radius = 0.4, speed = 8 }
+	}
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "flags=neighbor"), "pixelizar = scale neighbor")
+	testing.expect(t, strings.contains(g, "boxblur="), "desfoque")
+	testing.expect(t, strings.contains(g, "noise=alls="), "granulação")
+	testing.expect(t, strings.contains(g, "hstack"), "espelhar horizontal")
+	testing.expect(t, strings.contains(g, "unsharp="), "nitidez")
+	testing.expect(t, strings.contains(g, "vignette=angle="), "holofote")
+	testing.expect(t, strings.contains(g, "sin(2*PI*t"), "tremor")
+	testing.expect(t, strings.contains(g, "lutrgb="), "posterizar")
+	testing.expect(t, !strings.contains(g, "geq=r="), "efeitos novos não usam geq RGB")
+}
+
+@(test)
+export_fx_espelhar_vertical_usa_vstack :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 6, 0)
+	nfx = 1
+	fxsegs[0] = FxSeg{ kind = FX_MIRROR, track = 1, start = 0, dur = 3, amount = 1, angle = 0.5 }
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "vstack"), "espelhar vertical")
+	testing.expect(t, strings.contains(g, "vflip"), "metade de baixo é a de cima invertida")
+	testing.expect(t, !strings.contains(g, "hstack"), "não mistura com o horizontal")
+}
