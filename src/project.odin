@@ -15,7 +15,7 @@ clear_project :: proc() {
 	// prévia pendente do export abriria a prévia de OUTRA mídia, a que caísse no slot
 	preview_pending = -1
 	nsegs = 0; selected = -1; bin_sel = -1; drag_clip = -1; sel_trans = -1; st.drag = .None
-	nfx = 0; fx_sel = -1; fxlib_drag = -1
+	nfx = 0; fx_sel = -1; fxlib_drag = -1; fx_clear_marks()
 	g_nv = 3; g_na = 2; tl_vscroll = 0 // volta à contagem de trilhas padrão
 	for i in 0 ..< MAXTRACKS { track_muted[i] = false; track_locked[i] = false; track_hidden[i] = false; track_h[i] = 0 } // trilhas limpas (h=0 => padrão)
 	bin_clear_marks(); seg_clear_marks()

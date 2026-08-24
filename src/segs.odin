@@ -216,6 +216,7 @@ fxsegs:      [MAX_FX]FxSeg
 nfx:         int
 fx_sel:      int = -1 // clipe de efeito selecionado (-1 = nenhum)
 fxlib_drag:  int = -1 // índice em fx_lib sendo arrastado do painel p/ a timeline
+fx_marked:   [MAX_FX]bool // seleção múltipla (Ctrl/Shift+clique, marquee); mover/Delete em grupo
 
 // --- undo/redo: snapshot do documento (só os segmentos — Seg é struct puro, cópia
 // barata). Detecção AUTOMÁTICA: qualquer mudança em segs vira uma entrada quando a
@@ -467,6 +468,30 @@ overlaps_any :: proc(tr, moving: int, start, dur: f32) -> bool {
 // seleção múltipla de segmentos: contagem, limpeza, e invasão ignorando TODOS os marcados
 seg_marks_count :: proc() -> int { n := 0; for k in 0 ..< nsegs do if seg_marked[k] do n += 1; return n }
 seg_clear_marks :: proc() { for k in 0 ..< MAX_SEGS do seg_marked[k] = false }
+fx_marks_count :: proc() -> int { n := 0; for k in 0 ..< nfx do if fx_marked[k] do n += 1; return n }
+fx_clear_marks :: proc() { for k in 0 ..< MAX_FX do fx_marked[k] = false }
+// outro efeito NÃO marcado (e ≠ mv) na trilha cobre [start,dur)? Marcados se movem juntos.
+fx_hit_unmarked :: proc(tr, mv: int, start, dur: f32) -> bool {
+	for k in 0 ..< nfx {
+		if k == mv || fx_marked[k] || fxsegs[k].track != tr do continue
+		if start < fxsegs[k].start + fxsegs[k].dur - 0.001 && start + dur > fxsegs[k].start + 0.001 do return true
+	}
+	return false
+}
+fx_busy_unmarked :: proc(tr, mv: int, start, dur: f32) -> bool {
+	for i in 0 ..< nsegs do if seg_blocks(i) && segs[i].track == tr && start < segs[i].start + segs[i].dur - 0.001 && start + dur > segs[i].start + 0.001 do return true
+	return fx_hit_unmarked(tr, mv, start, dur)
+}
+// o grupo marcado de efeitos cabe no deslocamento (dr linhas, dl segundos)?
+fx_group_fits :: proc(dr: int, dl: f32) -> bool {
+	for k in 0 ..< nfx {
+		if !fx_marked[k] || track_locked[fxsegs[k].track] do continue
+		d := track_shift_rows(fxsegs[k].track, dr)
+		if d < 0 || d >= g_nv || track_locked[d] do return false
+		if fx_busy_unmarked(d, k, fxsegs[k].start + dl, fxsegs[k].dur) do return false
+	}
+	return true
+}
 // [start,start+dur) na trilha tr invade algum segmento NÃO-marcado? (p/ mover o grupo)
 overlaps_nonmarked :: proc(tr: int, start, dur: f32) -> bool {
 	for i in 0 ..< nsegs {
@@ -1709,6 +1734,8 @@ restore_after :: proc() { // conserta índices e o preview após aplicar um snap
 	if sel_trans >= nsegs do sel_trans = -1
 	clear_sel_gap()
 	seg_clear_marks() // índices do snapshot não batem com as marcas antigas
+	fx_clear_marks()
+	if fx_sel >= nfx do fx_sel = -1
 	drag_clip = -1; play_clip = -1; st.playing = false; st.drag = .None
 	committed = snap_now()
 	dirty = true // desfazer/refazer também deixa o documento diferente do salvo

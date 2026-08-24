@@ -12,6 +12,7 @@ package main
 // exercitar remove_seg/seek_global inteiros sem janela.
 
 import "core:testing"
+import rl "vendor:raylib"
 
 t_feq :: proc(a, b: f32) -> bool { return abs(a - b) < 0.001 }
 
@@ -19,7 +20,7 @@ t_feq :: proc(a, b: f32) -> bool { return abs(a - b) < 0.001 }
 t_reset :: proc() {
 	nsegs = 0
 	for i in 0 ..< MAX_SEGS { segs[i] = Seg{}; seg_marked[i] = false }
-	nfx = 0
+	nfx = 0; fx_sel = -1; fx_clear_marks()
 	for i in 0 ..< MAX_CLIPS do clips[i] = Clip{}
 	nclips = 2
 	clips[0].probed = true; clips[0].dur = 100
@@ -1054,6 +1055,53 @@ copiar_clipe_de_efeito_cobre_o_destino :: proc(t: ^testing.T) {
 	e := fxsegs[nfx - 1]
 	testing.expect(t, e.kind == FX_RGB && t_feq(e.amount, 0.55), "tipo e intensidade")
 	testing.expect(t, t_feq(e.start, 15) && t_feq(e.dur, 6), "cobre [15,21) do destino")
+}
+
+@(test)
+marquee_seleciona_efeitos :: proc(t: ^testing.T) {
+	t_reset()
+	st.zoom = 1
+	nfx = 2
+	fxsegs[0] = FxSeg{ kind = FX_DISTORT, track = 1, start = 0, dur = 3 }
+	fxsegs[1] = FxSeg{ kind = FX_RGB, track = 1, start = 8, dur = 3 }
+	view := rl.Rectangle{ 0, -2000, 20000, 20000 }
+	mq := fx_rect(0)
+	mq.width += 4; mq.height += 4
+	tl_marquee_apply(mq, view, false)
+	testing.expect(t, fx_marked[0], "efeito sob o retângulo entra na seleção")
+	testing.expect(t, !fx_marked[1], "efeito fora do retângulo fica de fora")
+	testing.expect(t, fx_sel == 0, "foco no primeiro marcado")
+
+	tl_marquee_apply(fx_rect(1), view, true)
+	testing.expect(t, fx_marked[0] && fx_marked[1], "Ctrl/soma acrescenta o segundo")
+	testing.expect(t, fx_marks_count() == 2, "os dois ficam marcados")
+}
+
+@(test)
+marquee_nao_marca_efeito_em_trilha_travada :: proc(t: ^testing.T) {
+	t_reset()
+	st.zoom = 1
+	nfx = 1
+	fxsegs[0] = FxSeg{ kind = FX_BLUR, track = 0, start = 0, dur = 4 }
+	track_locked[0] = true
+	view := rl.Rectangle{ 0, -2000, 20000, 20000 }
+	tl_marquee_apply(fx_rect(0), view, false)
+	testing.expect(t, !fx_marked[0], "trilha travada não entra na marquee")
+	testing.expect(t, fx_sel < 0, "sem foco")
+}
+
+@(test)
+remove_fxseg_desloca_marcas :: proc(t: ^testing.T) {
+	t_reset()
+	nfx = 3
+	fxsegs[0] = FxSeg{ kind = FX_PIXEL, track = 1, start = 0, dur = 2 }
+	fxsegs[1] = FxSeg{ kind = FX_BLUR, track = 1, start = 3, dur = 2 }
+	fxsegs[2] = FxSeg{ kind = FX_GRAIN, track = 1, start = 6, dur = 2 }
+	fx_marked[1] = true; fx_marked[2] = true; fx_sel = 2
+	remove_fxseg(1)
+	testing.expect(t, nfx == 2, "compactou")
+	testing.expect(t, fx_marked[1] && fxsegs[1].kind == FX_GRAIN, "marca do 3º desceu com ele")
+	testing.expect(t, fx_sel == 1, "foco acompanhou o índice")
 }
 
 @(test)

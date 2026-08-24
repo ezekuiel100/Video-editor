@@ -181,6 +181,7 @@ update :: proc() {
 				if fi >= 0 { // direito num clipe de efeito: seleciona ele
 					fx_sel = fi; selected = -1; sel_trans = -1; bin_sel = -1
 					clear_sel_gap(); seg_clear_marks()
+					if !fx_marked[fi] { fx_clear_marks(); fx_marked[fi] = true }
 				} else if si >= 0 { // clique direito também seleciona (age no que se vê)
 					selected = si; sel_trans = -1; bin_sel = -1; fx_sel = -1
 					clear_sel_gap()
@@ -237,8 +238,19 @@ update :: proc() {
 			if rm > 1 do set_toast(rl.TextFormat("%d mídias removidas", rm))
 		} else if bin_sel >= 0 && bin_sel < nclips && !intrinsics.atomic_load(&clips[bin_sel].failed) {
 			remove_media(bin_sel)
+		} else if fx_marks_count() > 1 {
+			n := 0
+			for k := nfx - 1; k >= 0; k -= 1 {
+				if !fx_marked[k] do continue
+				if track_locked[fxsegs[k].track] do continue
+				remove_fxseg(k); n += 1
+			}
+			fx_clear_marks(); fx_sel = -1
+			if n == 0 do set_toast("Trilha bloqueada")
+			else do set_toast(rl.TextFormat("%d efeitos removidos", n))
 		} else if fx_sel >= 0 && fx_sel < nfx { // clipe de efeito selecionado
-			remove_fxseg(fx_sel); set_toast("Efeito removido")
+			if track_locked[fxsegs[fx_sel].track] { set_toast("Trilha bloqueada") }
+			else do remove_fxseg(fx_sel); set_toast("Efeito removido")
 		} else if sel_trans >= 0 && sel_trans < nsegs { // transição/fade selecionado tem prioridade
 			if track_locked[segs[sel_trans].track] { set_toast("Trilha bloqueada") }
 			else {
@@ -494,12 +506,34 @@ update :: proc() {
 			bin_drop_tr = tr; bin_drop_start = free_start(tr, -1, s, clips[bin_drag].dur)
 			bin_drop_dur = clips[bin_drag].dur; bin_drop_show = true
 		}
-	} else if st.drag == .FxClip && fx_sel >= 0 && fx_sel < nfx {
+	} else if st.drag == .FxClip && fx_sel >= 0 && fx_sel < nfx && !track_locked[fxsegs[fx_sel].track] {
 		f := &fxsegs[fx_sel]
-		ty := track_at_y(m.y)                                        // trilha de vídeo sob o cursor
-		tr := is_audio_track(ty) ? f.track : clamp(ty, 0, g_nv - 1)  // efeito só em trilha de vídeo
-		cand := max(0, tl_t(m.x) - fx_grab_dt)
-		if !fx_busy(tr, fx_sel, cand, f.dur) { f.start = cand; f.track = tr } // EXCLUSIVO: rejeita se invadir seg/efeito
+		if fx_marks_count() > 1 && fx_marked[fx_sel] {
+			// MOVER EM GRUPO: mesmo Δt e Δtrilha; rejeita se alguém invadir clipe/efeito de fora.
+			want := max(0, tl_t(m.x) - fx_grab_dt)
+			delta := want - f.start
+			ty := track_at_y(m.y)
+			tgt := is_audio_track(ty) ? f.track : clamp(ty, 0, g_nv - 1)
+			drow := track_row(tgt) - track_row(f.track)
+			minstart := f32(1e30)
+			for k in 0 ..< nfx do if fx_marked[k] && !track_locked[fxsegs[k].track] && fxsegs[k].start < minstart do minstart = fxsegs[k].start
+			if minstart + delta < 0 do delta = -minstart
+			ok := fx_group_fits(drow, delta)
+			if !ok && drow != 0 { drow = 0; ok = fx_group_fits(0, delta) }
+			if ok && (abs(delta) > 0.0001 || drow != 0) {
+				for k in 0 ..< nfx {
+					if !fx_marked[k] || track_locked[fxsegs[k].track] do continue
+					fxsegs[k].track = track_shift_rows(fxsegs[k].track, drow)
+					fxsegs[k].start = max(0, fxsegs[k].start + delta)
+				}
+			}
+		} else {
+			ty := track_at_y(m.y)                                        // trilha de vídeo sob o cursor
+			tr := is_audio_track(ty) ? f.track : clamp(ty, 0, g_nv - 1)  // efeito só em trilha de vídeo
+			if track_locked[tr] do tr = f.track
+			cand := max(0, tl_t(m.x) - fx_grab_dt)
+			if !fx_busy(tr, fx_sel, cand, f.dur) { f.start = cand; f.track = tr } // EXCLUSIVO: rejeita se invadir seg/efeito
+		}
 	} else if st.drag == .FxTrim && fx_sel >= 0 && fx_sel < nfx {
 		f := &fxsegs[fx_sel]
 		maxend := fx_wall_r(f.track, fx_sel, f.start + 0.05)          // não passa por cima do vizinho

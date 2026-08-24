@@ -950,9 +950,12 @@ CtxItem :: struct {
 ctx_items :: proc(it: ^[14]CtxItem) -> int {
 	n := 0
 	if ctx_fx >= 0 && ctx_fx < nfx {
+		grp := fx_marks_count() > 1 && fx_marked[ctx_fx]
 		it[n] = { "Copiar efeito", true, 10 }; n += 1
 		it[n] = { "Colar ajustes aqui", fx_clipbrd_ok(), 11 }; n += 1
-		it[n] = { "Excluir  (Del)", true, 12 }; n += 1
+		if grp do it[n] = { "Excluir grupo  (Del)", true, 12 }
+		else do it[n] = { "Excluir  (Del)", true, 12 }
+		n += 1
 	} else if ctx_seg >= 0 && ctx_seg < nsegs && seg_ready(ctx_seg) {
 		grp := seg_marks_count() > 1 && seg_marked[ctx_seg] // agir no grupo marcado
 		sg := segs[ctx_seg]
@@ -1053,8 +1056,21 @@ ctx_run :: proc(id: int) {
 	case 11: // colar efeitos no clipe (ou grupo) / no tempo do clique
 		if sane do paste_effects_targets(ctx_seg)
 		else do paste_fx_at(ctx_track, max(0, ctx_time))
-	case 12: // excluir clipe de efeito
-		if ctx_fx >= 0 && ctx_fx < nfx { remove_fxseg(ctx_fx); set_toast("Efeito removido") }
+	case 12: // excluir clipe de efeito (ou o grupo marcado)
+		if ctx_fx < 0 || ctx_fx >= nfx do return
+		if fx_marks_count() > 1 && fx_marked[ctx_fx] {
+			nrm := 0
+			for k := nfx - 1; k >= 0; k -= 1 {
+				if !fx_marked[k] || track_locked[fxsegs[k].track] do continue
+				remove_fxseg(k); nrm += 1
+			}
+			fx_clear_marks(); fx_sel = -1
+			if nrm == 0 do set_toast("Trilha bloqueada")
+			else do set_toast(rl.TextFormat("%d efeitos removidos", nrm))
+		} else {
+			if track_locked[fxsegs[ctx_fx].track] { set_toast("Trilha bloqueada"); return }
+			remove_fxseg(ctx_fx); set_toast("Efeito removido")
+		}
 	}
 }
 
@@ -1404,13 +1420,15 @@ add_fxseg :: proc(kind: int, start: f32, track := 0) -> int {
 	if nfx >= MAX_FX { set_toast("Máximo de efeitos na timeline"); return -1 }
 	f := FxSeg{ kind = kind, track = clamp(track, 0, g_nv - 1), start = max(0, start), dur = 3 }
 	fx_defaults(&f)
-	fxsegs[nfx] = f; fx_sel = nfx; nfx += 1
+	fx_clear_marks()
+	fxsegs[nfx] = f; fx_sel = nfx; fx_marked[nfx] = true; nfx += 1
 	return nfx - 1
 }
 remove_fxseg :: proc(i: int) {
 	if i < 0 || i >= nfx do return
-	for k in i ..< nfx-1 do fxsegs[k] = fxsegs[k+1]
+	for k in i ..< nfx-1 { fxsegs[k] = fxsegs[k+1]; fx_marked[k] = fx_marked[k+1] }
 	nfx -= 1
+	fx_marked[nfx] = false
 	if fx_sel == i do fx_sel = -1; else if fx_sel > i do fx_sel -= 1
 }
 // efeito de faixa que rege a trilha de vídeo `s` no playhead. Um efeito na trilha T afeta
@@ -2763,8 +2781,10 @@ draw_fx_on_tracks :: proc(clip: rl.Rectangle) {
 		bar := fx_rect(i)
 		if bar.y + bar.height < clip.y || bar.y > clip.y + clip.height { i += 1; continue } // fora da viewport
 		sel := i == fx_sel
+		mk := fx_marked[i]
 		rl.DrawRectangleRounded(bar, 0.12, 5, sel ? rl.Color{ 140, 118, 52, 245 } : rl.Color{ 108, 92, 44, 225 })
-		rl.DrawRectangleRoundedLinesEx(bar, 0.12, 5, sel ? 2 : 1, sel ? rl.Color{ 240, 214, 120, 255 } : rl.Color{ 175, 155, 88, 210 })
+		if mk && !sel do rl.DrawRectangleRounded(bar, 0.12, 5, rl.Color{ 240, 214, 120, 50 })
+		rl.DrawRectangleRoundedLinesEx(bar, 0.12, 5, (sel || mk) ? 2 : 1, (sel || mk) ? rl.Color{ 240, 214, 120, 255 } : rl.Color{ 175, 155, 88, 210 })
 		// faixa âmbar no topo p/ "cara de efeito" (distingue de um clipe de vídeo azul)
 		rl.DrawRectangleRec({ bar.x + 2, bar.y + 2, bar.width - 4, 3 }, rl.Color{ 220, 190, 90, 220 })
 		has_x := sel && bar.width > 46
@@ -2781,11 +2801,28 @@ draw_fx_on_tracks :: proc(clip: rl.Rectangle) {
 		if sel do rl.DrawRectangleRec({ bar.x + bar.width - 3, bar.y + 3, 2, bar.height - 6 }, rl.Color{ 250, 230, 160, 255 })
 		near_grip := rl.CheckCollisionPointRec(m, grip)
 		if near_grip do rl.SetMouseCursor(.RESIZE_EW)
-		if modal == .None && st.drag == .None && !over_x && rl.IsMouseButtonPressed(.LEFT) && rl.CheckCollisionPointRec(m, bar) {
-			fx_sel = i; selected = -1; sel_trans = -1; bin_sel = -1
-			st.active_tab = 2 // abre a aba Efeitos p/ mostrar as configurações do efeito
-			if near_grip { st.drag = .FxTrim } // apara a borda direita (redimensiona)
-			else { st.drag = .FxClip; fx_grab_dt = tl_t(m.x) - f.start } // move
+		if modal == .None && st.drag == .None && !tl_marquee && !over_x && rl.IsMouseButtonPressed(.LEFT) && rl.CheckCollisionPointRec(m, bar) {
+			if track_locked[f.track] {
+				set_toast("Trilha bloqueada")
+			} else {
+				ctrl := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
+				shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
+				selected = -1; sel_trans = -1; bin_sel = -1; seg_clear_marks(); clear_sel_gap()
+				st.active_tab = 2 // abre a aba Efeitos p/ mostrar as configurações do efeito
+				if (ctrl || shift) && !near_grip {
+					fx_marked[i] = !fx_marked[i]
+					if fx_marked[i] do fx_sel = i
+					else if fx_sel == i {
+						fx_sel = -1
+						for k in 0 ..< nfx do if fx_marked[k] { fx_sel = k; break }
+					}
+				} else {
+					if near_grip || !fx_marked[i] { fx_clear_marks(); fx_marked[i] = true }
+					fx_sel = i
+					if near_grip { st.drag = .FxTrim }
+					else { st.drag = .FxClip; fx_grab_dt = tl_t(m.x) - f.start }
+				}
+			}
 		}
 		i += 1
 	}

@@ -50,6 +50,32 @@ draw_trans_badge_mark :: proc(ix0, iy0, ix1, iy1: f32, mode: int, rc: rl.Color) 
 }
 
 // ---------- timeline ----------
+// marca clipes e efeitos cujo retângulo cruza `mq`, visíveis em `view`.
+// add=false substitui a seleção; add=true (Ctrl/Shift) soma.
+tl_marquee_apply :: proc(mq, view: rl.Rectangle, add: bool) {
+	if !add { seg_clear_marks(); fx_clear_marks() }
+	for i in 0 ..< nsegs {
+		if !seg_ready(i) || track_locked[segs[i].track] do continue
+		sr := rl.Rectangle{ tl_x(segs[i].start), track_y(segs[i].track) + 4, segs[i].dur * pps(), th(segs[i].track) - 8 }
+		if sr.y + sr.height < view.y || sr.y > view.y + view.height do continue
+		if rl.CheckCollisionRecs(sr, mq) do seg_marked[i] = true
+	}
+	for i in 0 ..< nfx {
+		if track_locked[fxsegs[i].track] do continue
+		sr := fx_rect(i)
+		if sr.y + sr.height < view.y || sr.y > view.y + view.height do continue
+		if rl.CheckCollisionRecs(sr, mq) do fx_marked[i] = true
+	}
+	if selected < 0 || !seg_marked[selected] {
+		selected = -1
+		for i in 0 ..< nsegs do if seg_marked[i] { selected = i; break }
+	}
+	if fx_sel < 0 || !fx_marked[fx_sel] {
+		fx_sel = -1
+		for i in 0 ..< nfx do if fx_marked[i] { fx_sel = i; break }
+	}
+}
+
 draw_timeline :: proc(r: rl.Rectangle) {
 	pt := prof_beg(.Timeline); defer prof_end(.Timeline, pt)
 	toolbar_h: f32 = 34
@@ -939,7 +965,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		} else if hit >= 0 {
 			ctrl := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
 			shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
-			bin_sel = -1; bin_clear_marks(); sel_trans = -1; fx_sel = -1 // selecionar seg volta a biblioteca de efeitos
+			bin_sel = -1; bin_clear_marks(); sel_trans = -1; fx_sel = -1; fx_clear_marks() // selecionar seg volta a biblioteca de efeitos
 			clear_sel_gap()
 			if (ctrl || shift) && edge == 0 {
 				// Ctrl/Shift+clique: ALTERNA a marcação (seleção múltipla), sem iniciar arrasto
@@ -966,7 +992,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			}
 		} else if hovered(ruler) {
 			st.drag = .Playhead // arrastar na RÉGUA move o playhead (scrub)
-			selected = -1; seg_clear_marks(); bin_sel = -1; bin_clear_marks(); sel_trans = -1
+			selected = -1; seg_clear_marks(); fx_sel = -1; fx_clear_marks(); bin_sel = -1; bin_clear_marks(); sel_trans = -1
 			clear_sel_gap()
 		} else if hovered(vlane) {
 			// área VAZIA das trilhas: inicia MARQUEE de seleção (arrastar seleciona vários).
@@ -975,7 +1001,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			mshift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 			tl_marquee = true; tl_marquee_start = mp; tl_marquee_moved = false
 			tl_marquee_add = mctrl || mshift
-			if !tl_marquee_add { selected = -1; seg_clear_marks(); clear_sel_gap() }
+			if !tl_marquee_add { selected = -1; seg_clear_marks(); fx_sel = -1; fx_clear_marks(); clear_sel_gap() }
 			bin_sel = -1; bin_clear_marks(); sel_trans = -1
 		}
 		// só silencia se um arrasto REALMENTE começou (st.drag deixou de ser None
@@ -991,26 +1017,14 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		}
 	}
 
-	// --- MARQUEE de seleção da timeline: arrastar em área vazia marca os segmentos tocados ---
+	// --- MARQUEE de seleção da timeline: arrastar em área vazia marca clipes E efeitos tocados ---
 	if tl_marquee {
 		mm := rl.GetMousePosition()
 		if abs(mm.x - tl_marquee_start.x) > 4 || abs(mm.y - tl_marquee_start.y) > 4 do tl_marquee_moved = true
 		if tl_marquee_moved {
 			mq := rl.Rectangle{ min(tl_marquee_start.x, mm.x), min(tl_marquee_start.y, mm.y),
 			                    abs(mm.x - tl_marquee_start.x), abs(mm.y - tl_marquee_start.y) }
-			if !tl_marquee_add do seg_clear_marks()
-			for i in 0 ..< nsegs {
-				if !seg_ready(i) || track_locked[segs[i].track] do continue // trilha travada não entra na seleção
-				sr := rl.Rectangle{ tl_x(segs[i].start), track_y(segs[i].track) + 4, segs[i].dur*pps(), th(segs[i].track) - 8 }
-				// mesmo culling do hit-test: um segmento rolado p/ fora da vista não pode ser
-				// marcado por um retângulo que o usuário desenhou sobre a régua/bandas
-				if sr.y + sr.height < rows_clip.y || sr.y > rows_clip.y + rows_clip.height do continue
-				if rl.CheckCollisionRecs(sr, mq) do seg_marked[i] = true
-			}
-			if selected < 0 || !seg_marked[selected] { // mantém um foco válido p/ o inspector
-				selected = -1
-				for i in 0 ..< nsegs do if seg_marked[i] { selected = i; break }
-			}
+			tl_marquee_apply(mq, rows_clip, tl_marquee_add)
 			rl.DrawRectangleRec(mq, rl.Color{ 120, 170, 240, 45 })
 			rl.DrawRectangleLinesEx(mq, 1, rl.Color{ 150, 190, 245, 220 })
 		}
@@ -1127,9 +1141,15 @@ draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
 	lb := rl.Rectangle{ r.x + 38, iy, 20, 16 }
 	if clicked(lb) {
 		track_locked[t] = !track_locked[t]
-		if track_locked[t] do for i in 0 ..< nsegs do if segs[i].track == t { // solta seleção/marcação
-			seg_marked[i] = false
-			if selected == i do selected = -1
+		if track_locked[t] {
+			for i in 0 ..< nsegs do if segs[i].track == t { // solta seleção/marcação
+				seg_marked[i] = false
+				if selected == i do selected = -1
+			}
+			for i in 0 ..< nfx do if fxsegs[i].track == t {
+				fx_marked[i] = false
+				if fx_sel == i do fx_sel = -1
+			}
 		}
 	}
 	rl.DrawRectangleRounded(lb, 0.25, 4, locked ? rl.Color{ 210, 160, 50, 255 } : (hovered(lb) ? HOVER : PANEL2))
