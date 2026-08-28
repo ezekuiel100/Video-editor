@@ -1362,7 +1362,11 @@ thumb_decode :: proc(c: ^Clip, t: f32, dst: []u8) -> bool {
 		}
 		os.close(r)
 		_, _ = os.process_wait(p)
-		if total == THUMB_FR do return true
+		if total == THUMB_FR {
+			if hw != "" && frame_is_green(dst[:THUMB_FR]) {
+				dbg("GREEN", "clip='%s' thumb verde HW em %.1fs -> tenta SW", c.name, t)
+			} else do return true
+		}
 		if hw == "" do return false
 		hw_reject(c) // NVDEC recusou: refaz por software
 	}
@@ -1499,7 +1503,12 @@ scrub_decode_frame :: proc(c: ^Clip, t: f32, buf: []u8, fast := false) -> bool {
 		}
 		_, _ = os.process_wait(p)
 		if intrinsics.atomic_load(&app_closing) do return false // fechando: não retenta por software
-		if total == sf do return true
+		if total == sf {
+			if hw != "" && frame_is_green(buf[:sf]) {
+				dbg("GREEN", "clip='%s' scrub verde HW em %.1fs -> tenta SW", c.name, t)
+				// cai no fallback abaixo (como se fosse falha)
+			} else do return true
+		}
 		if hw == "" do return false
 		// NVDEC recusou. No scrub (fast) NÃO chama hw_reject: isso marcaria no_hw no clipe e
 		// derrubaria o decoder AO VIVO p/ software (playback travado). Só desliga o HW do scrub
@@ -1733,6 +1742,17 @@ dup_read :: proc(si: int) -> bool {
 	if total < sf { // fim do vídeo: registra e congela (não respawna em loop)
 		end := dup_now(d)
 		if d.leof <= 0 || end < d.leof do d.leof = max(end, 0.001)
+		dup_live_stop(d)
+		return false
+	}
+	if d.lon && frame_is_green(dup_rd_buf[:sf]) {
+		c := seg_src(si)
+		if use_cuvid(c) != "" {
+			dbg("GREEN", "dup seg=%d verde HW em %.1fs -> dup respawn SW", si, dup_now(d))
+			// marca HW ruim pro clip (igual stream) pra dup_open cair em SW no próximo spawn
+			hw_reject(c)
+		}
+		d.leof = max(dup_now(d), 0.001)
 		dup_live_stop(d)
 		return false
 	}
@@ -1983,6 +2003,21 @@ pipe_ready :: proc(f: ^os.File) -> (ok: bool, dead: bool) {
 	return avail > 0, false
 }
 
+// verde de concealment do NVDEC: faixa G dominante (R/B baixos).
+// Vertical 9:16 em 1280x720 só 31% da área é conteúdo (resto é barra preta),
+// então o verde nunca chega a 50% do frame todo.
+frame_is_green :: proc(buf: []u8) -> bool {
+	if len(buf) < 300 do return false
+	green := 0; sampled := 0
+	for i := 0; i+2 < len(buf); i += 32*3 {
+		r := buf[i]; g := buf[i+1]; b := buf[i+2]
+		sampled += 1
+		if g > 80 && int(g) > int(r)+40 && int(g) > int(b)+40 do green += 1
+	}
+	// >18% já é verde (31% conteúdo verde em vertical passa; vídeo normal <5%)
+	return sampled > 0 && green*5 > sampled
+}
+
 // lê um frame do decoder ao vivo para fbuf (sem GL). pump=true (só main thread)
 // só entra no read se o pipe já tem dados — senão devolve false e o stream segue.
 stream_read_raw :: proc(c: ^Clip, pump := false) -> bool {
@@ -2015,6 +2050,14 @@ stream_read_raw :: proc(c: ^Clip, pump := false) -> bool {
 		// fim REAL (ou já era software): registra onde o stream acaba
 		if c.eof_at <= 0 || end < c.eof_at do c.eof_at = max(end, 0.001)
 		dbg("EOF", "clip='%s' fim do stream em %.1fs (%s)", c.name, end, c.live_hw ? "HW" : "SW")
+		stream_stop(c)
+		return false
+	}
+	// HW entregou quadro verde de concealment (GOP quebrado) como se fosse sucesso.
+	// SW no mesmo ponto entrega quadro normal (VLC prova). Detecta e força fallback.
+	if c.live_hw && frame_is_green(c.fbuf[:sf]) {
+		dbg("GREEN", "clip='%s' quadro verde HW em %.1fs -> fallback SW", c.name, live_now(c))
+		hw_reject(c)
 		stream_stop(c)
 		return false
 	}
