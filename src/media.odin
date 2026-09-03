@@ -236,7 +236,10 @@ Clip :: struct {
 	                    // marcaria no_hw e derrubaria o DECODER AO VIVO p/ software = playback travado);
 	                    // só desliga o HW do scrub. O decoder ao vivo tem seu próprio caminho hw/sw.
 	aid:    int,    // id único p/ nomear o áudio temporário
-	dur:    f32,    // duração total da fonte (s)
+	dur:    f32,    // duração da fonte na timeline (s) — costuma ser a do container/áudio
+	v_dur:  f32,    // fim do STREAM de vídeo (s); 0 = desconhecido (= usar dur). Em lives o
+	                // áudio pode durar além do vídeo: a timeline segue `dur`, o export congela
+	                // um frame depois de `v_dur` em vez de gerar MP4 de 0 bytes.
 	vw, vh: i32,    // dimensões de EXIBIÇÃO da fonte (já corrigidas por rotação); 0 = desconhecido. Autodetecta proj_ar
 	tex:    rl.Texture2D,
 	tex_ok: bool,
@@ -443,11 +446,14 @@ timeline_max_src_bitrate :: proc() -> int {
 	return best
 }
 
-video_probe :: proc(path: string) -> (dur: f32, codec: string, vw, vh: i32, fps: f32) {
+video_probe :: proc(path: string) -> (dur, v_dur: f32, codec: string, vw, vh: i32, fps: f32) {
 	_, out, _, e := os.process_exec(os.Process_Desc{
 		command = []string{
 			"ffprobe", "-v", "error", "-select_streams", "v:0",
-			"-show_entries", "stream=codec_name,width,height,avg_frame_rate,r_frame_rate:stream_side_data=rotation:stream_tags=rotate:format=duration",
+			// stream=duration (vídeo) + format=duration (container). Em lives o áudio
+			// costuma durar além do vídeo: a timeline usa o format; o export congela
+			// frame depois do stream de vídeo.
+			"-show_entries", "stream=codec_name,width,height,duration,avg_frame_rate,r_frame_rate:stream_side_data=rotation:stream_tags=rotate:format=duration",
 			"-of", "default=nw=1", path,
 		},
 	}, context.temp_allocator)
@@ -487,8 +493,15 @@ parse_fps :: proc(s: string) -> f32 {
 // dimensões de EXIBIÇÃO: com rotação de ±90/±270 (celular gravado deitado guarda os pixels
 // 1920x1080 + rotation=-90) o ffmpeg auto-rotaciona no decode, então trocamos w/h p/ casar com
 // o que o DEC_VF produz. "N/A" e linhas sem `=` são ignoradas.
-probe_parse :: proc(out: string) -> (dur: f32, codec: string, vw, vh: i32, fps: f32) {
+//
+// `duration=` pode aparecer 2× (stream= e format=). Com os dois:
+//   v_dur = menor (quase sempre o stream de vídeo)
+//   dur   = maior (container / áudio) — a timeline ainda cobre a cauda de áudio
+// Com um só, os dois ficam iguais.
+probe_parse :: proc(out: string) -> (dur, v_dur: f32, codec: string, vw, vh: i32, fps: f32) {
 	rot := 0
+	d0, d1: f32
+	nd := 0
 	for ln in strings.split_lines(strings.trim_space(out), context.temp_allocator) {
 		l := strings.trim_space(ln)
 		eq := strings.index_byte(l, '=')
@@ -496,7 +509,12 @@ probe_parse :: proc(out: string) -> (dur: f32, codec: string, vw, vh: i32, fps: 
 		key := l[:eq]; val := strings.trim_space(l[eq+1:])
 		if val == "" || val == "N/A" do continue
 		switch {
-		case key == "duration":   if v, ok := strconv.parse_f64(val);     ok do dur = f32(v)
+		case key == "duration":
+			if v, ok := strconv.parse_f64(val); ok {
+				fv := f32(v)
+				if nd == 0 { d0 = fv } else if nd == 1 { d1 = fv }
+				nd += 1
+			}
 		case key == "codec_name": codec = val
 		case key == "width":      if v, ok := strconv.parse_int(val, 10); ok do vw = i32(v)
 		case key == "height":     if v, ok := strconv.parse_int(val, 10); ok do vh = i32(v)
@@ -508,8 +526,23 @@ probe_parse :: proc(out: string) -> (dur: f32, codec: string, vw, vh: i32, fps: 
 			if v, ok := strconv.parse_int(val, 10); ok do rot = v
 		}
 	}
+	switch nd {
+	case 1: dur, v_dur = d0, d0
+	case 2:
+		dur = max(d0, d1)
+		v_dur = min(d0, d1)
+	}
 	if abs(rot) % 180 == 90 do vw, vh = vh, vw // ±90/±270: as dimensões de exibição se invertem
 	return
+}
+
+// fim útil do VÍDEO na fonte (s). Prefere eof_at (visto ao decodificar); senão v_dur do
+// probe; senão dur (arquivos sem divergência áudio/vídeo).
+clip_video_end :: proc(c: ^Clip) -> f32 {
+	if c == nil do return 0
+	if c.eof_at > 0 do return c.eof_at
+	if c.v_dur > 0 do return c.v_dur
+	return c.dur
 }
 
 // ---------- decode por GPU (NVDEC/cuvid) ----------
@@ -1116,7 +1149,7 @@ import_worker :: proc(c: ^Clip) {
 		// sem RAM nem para 1 frame: falha limpa (image_decode escreveria num slice vazio)
 		if c.cache == nil { intrinsics.atomic_store(&c.failed, true); intrinsics.atomic_store(&c.probed, true); return }
 		if !image_decode(c) { intrinsics.atomic_store(&c.failed, true); intrinsics.atomic_store(&c.probed, true); return }
-		if _, _, iw, ih, _ := video_probe(c.path); iw > 0 { c.vw = iw; c.vh = ih } // dims p/ autodetectar proj_ar
+		if _, _, _, iw, ih, _ := video_probe(c.path); iw > 0 { c.vw = iw; c.vh = ih } // dims p/ autodetectar proj_ar
 		intrinsics.atomic_store(&c.cached, 1)
 		intrinsics.atomic_store(&c.probed, true)
 		decode_thumbs(c) // tira a miniatura do próprio frame (caminho de cache)
@@ -1139,13 +1172,14 @@ import_worker :: proc(c: ^Clip) {
 		return
 	}
 
-	dur, codec, vw, vh, sfps := video_probe(c.path)
+	dur, v_dur, codec, vw, vh, sfps := video_probe(c.path)
 	if dur <= 0 {
 		intrinsics.atomic_store(&c.failed, true)
 		intrinsics.atomic_store(&c.probed, true)
 		return
 	}
 	c.dur = dur
+	c.v_dur = v_dur > 0 ? v_dur : dur
 	c.vcodec = strings.clone(codec)
 	c.vw = vw; c.vh = vh // publicado antes do store de `probed`: a main thread lê p/ autodetectar proj_ar
 	// AQUI, antes dos dois caminhos (cache e streaming) publicarem `probed`: quando o clipe
@@ -2049,6 +2083,9 @@ stream_read_raw :: proc(c: ^Clip, pump := false) -> bool {
 		}
 		// fim REAL (ou já era software): registra onde o stream acaba
 		if c.eof_at <= 0 || end < c.eof_at do c.eof_at = max(end, 0.001)
+		// Atualiza v_dur (fim do vídeo) sem encolher c.dur: a cauda de áudio continua
+		// usável na timeline; o export congela um frame depois deste ponto.
+		if c.v_dur <= 0 || c.eof_at < c.v_dur do c.v_dur = c.eof_at
 		dbg("EOF", "clip='%s' fim do stream em %.1fs (%s)", c.name, end, c.live_hw ? "HW" : "SW")
 		stream_stop(c)
 		return false

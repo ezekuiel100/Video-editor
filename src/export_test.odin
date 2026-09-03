@@ -360,6 +360,30 @@ graph_timeline_vazia_nao_monta :: proc(t: ^testing.T) {
 }
 
 @(test)
+export_freeze_trecho_alem_do_video :: proc(t: ^testing.T) {
+	t_export_reset()
+	clips[0].dur = 100
+	clips[0].v_dur = 50
+	clips[0].eof_at = 50 // fim real do stream (container mentiu)
+	add_seg(0, 0, 60, 10) // in_off=60 > eof_at=50 → zona só-áudio: congela frame
+	args, g, ok := export_build_args("saida.mp4", false, true)
+	testing.expect(t, ok, "corte além do vídeo tem de montar com freeze (não recusar)")
+	testing.expect(t, exp_still[0], "segmento marcado como still/freeze")
+	testing.expect(t, exp_ainp[0] >= 0, "áudio vem em input separado do PNG")
+	testing.expect(t, strings.contains(g, "loop=-1:size=1"), "grafo usa loop de still")
+	_ = args
+	// dentro do vídeo: sem freeze
+	t_export_reset()
+	clips[0].dur = 100
+	clips[0].v_dur = 50
+	clips[0].eof_at = 50
+	add_seg(0, 0, 10, 10) // in_off=10 < 50
+	_, _, ok2 := export_build_args("saida.mp4", false, true)
+	testing.expect(t, ok2, "corte dentro do vídeo real tem de montar")
+	testing.expect(t, !exp_still[0], "dentro do vídeo não usa freeze")
+}
+
+@(test)
 export_recusa_com_midia_importando :: proc(t: ^testing.T) {
 	t_export_reset()
 	add_seg(0, 0, 0, 10)
@@ -1058,6 +1082,24 @@ export_cortes_sequenciais_usam_concat :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(g, "concat=n=2:v=1:a=0"), "dois cortes em sequência: concat, não overlay")
 	testing.expect(t, !strings.contains(g, "overlay="), "sem sobreposição não tem overlay")
 	testing.expect(t, strings.count(g, "setsar=1") >= 2, "concat exige SAR idêntico — JPEG com 2877:2876 vs scale 1380960:1379761 quebrava")
+}
+
+// Canvas Custom 640x1280 + fonte 720x1280: o concat morria se o scale fosse
+// pulado (probe == box) e o decode real viesse 720. Sempre scale+pad no canvas.
+@(test)
+export_concat_encaixa_fonte_diferente_do_canvas :: proc(t: ^testing.T) {
+	t_export_reset()
+	clips[0].vw = 720; clips[0].vh = 1280
+	clips[1].vw = 720; clips[1].vh = 1280
+	proj_w = 640; proj_h = 1280
+	add_seg(0, 0, 0, 10)
+	add_seg(1, 10, 0, 8)
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "concat=n=2:v=1:a=0"), "cortes em sequência ainda usam concat")
+	testing.expect(t, strings.contains(g, "force_original_aspect_ratio=decrease"), "scale não estica; letterbox")
+	testing.expect(t, strings.contains(g, "scale=640:1280"), "encaixa no canvas, não no box da fonte")
+	testing.expect(t, strings.contains(g, "pad=640:1280"), "todo pedaço termina no canvas")
+	testing.expect(t, strings.count(g, "pad=640:1280") >= 2, "os dois clipes padam, não só um")
 }
 
 // Slideshow de JPEG: NÃO usar `-loop 1 -t DUR` no demuxer (redecodifica 30×/s em

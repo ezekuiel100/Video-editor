@@ -130,14 +130,15 @@ dump_export_cli :: proc() -> bool {
 		if i >= MAX_CLIPS do break
 		clips[i] = Clip{}
 		clips[i].path = p
-		dur, _, vw, vh, _ := video_probe(p)
+		dur, v_dur, _, vw, vh, _ := video_probe(p)
 		clips[i].dur = dur
+		clips[i].v_dur = v_dur > 0 ? v_dur : dur
 		clips[i].vw = vw
 		clips[i].vh = vh
 		clips[i].src_audio = probe_has_audio(p)
 		intrinsics.atomic_store(&clips[i].probed, true)
 		nclips += 1
-		fmt.printfln("media %d: %s dur=%.3f %dx%d audio=%v", i, p, dur, vw, vh, clips[i].src_audio)
+		fmt.printfln("media %d: %s dur=%.3f v_dur=%.3f %dx%d audio=%v", i, p, dur, clips[i].v_dur, vw, vh, clips[i].src_audio)
 	}
 	for s in segd {
 		f := s.fields
@@ -205,6 +206,10 @@ export_prev_tex_ok: bool
 export_paused: bool // (main) ffmpeg suspenso
 export_cancel: bool // (main) exportação cancelada pelo usuário (não é falha)
 export_tmp_files: [dynamic]string // PNGs de texto gerados p/ o export (removidos no fim)
+// preenchidos só durante export_build_args: segmento vira still (último frame congelado)
+// quando o corte cai depois do fim do stream de vídeo (áudio da live continua).
+exp_still: [MAX_SEGS]bool
+exp_ainp:  [MAX_SEGS]int // input de áudio; -1 = usar o mesmo de seg_inp (vídeo)
 g_exp_pause_btn:  rl.Rectangle // rects dos botões do overlay (draw preenche, update lê)
 g_exp_cancel_btn: rl.Rectangle
 
@@ -618,6 +623,16 @@ export_scale_clause :: proc(segW, segH, src_w, src_h: int, cropped: bool) -> str
 	return fmt.tprintf(",scale=%d:%d:flags=fast_bilinear", segW, segH)
 }
 
+// concat exige TODOS os pedaços com o mesmo WxH. Nunca pular scale/pad com base no
+// probe: vw/vh da fonte pode divergir do que o ffmpeg decodifica (rotação, 720 vs
+// 640 no canvas Custom) e o concat morre com "Input link in0:v0 parameters do not match".
+// force_original_aspect_ratio=decrease + pad = letterbox, igual ao preview.
+export_concat_fit :: proc(fb: ^strings.Builder, segW, segH, W, H: int) {
+	flags := export_qual == .High ? "" : ":flags=fast_bilinear"
+	fmt.sbprintf(fb, ",scale=%d:%d:force_original_aspect_ratio=decrease%s", segW, segH, flags)
+	fmt.sbprintf(fb, ",pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black", W, H)
+}
+
 // clipe que PRECISA do canvas+overlay (PiP, fade, transição, texto, efeitos…).
 export_seg_needs_compose :: proc(i: int) -> bool {
 	sg := segs[i]
@@ -693,47 +708,52 @@ export_emit_direct_clip :: proc(fb: ^strings.Builder, i, W, H, piece: int, seg_i
 	sp := sg.speed <= 0 ? 1 : sg.speed
 	segW, segH := seg_export_dims(i, W, H)
 	t0, t1, _, _ := seg_src_span(i, 0, 0)
-	if cc.is_img {
+	still := cc.is_img || exp_still[i]
+	if still {
 		// 1 frame: crop/scale UMA vez, depois clona. trim na fonte de 1/30s perderia
 		// a duração; o still_loop no fim segura sg.dur @ 30fps.
+		// O 1º filtro NÃO pode vir com vírgula à frente: se scale for no-op
+		// (fonte == canvas) `[0:v],fps=30` vira filtro vazio e o ffmpeg aborta.
 		fmt.sbprintf(fb, "[%d:v]", seg_inp[i])
 		if sg.zoom_anim {
 			// 2× UMA vez, depois clona, depois anima — sem reescalar 14 MP/frame
 			fmt.sbprintf(fb, "%s", export_still_supersample(int(cc.vw), int(cc.vh)))
 			strings.write_string(fb, export_still_loop(sg.dur))
 			export_emit_kenburns(fb, i, segW, segH, 0, 0, "yuv420p")
-			if segW != W || segH != H {
-				fmt.sbprintf(fb, ",pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black", W, H)
-			}
+			export_concat_fit(fb, W, H, W, H)
 			fmt.sbprintf(fb, ",setsar=1[p%d];", piece)
 			return
 		}
-	} else {
-		fmt.sbprintf(fb, "[%d:v]trim=%.3f:%.3f,setpts=(PTS-STARTPTS)/%.5f", seg_inp[i], t0, t1, sp)
-		if sg.zoom_anim {
-			export_emit_kenburns(fb, i, segW, segH, 0, 0, "yuv420p")
-			if segW != W || segH != H {
-				fmt.sbprintf(fb, ",pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black", W, H)
-			}
-			fmt.sbprintf(fb, ",setsar=1[p%d];", piece)
-			return
+		fmt.sbprintf(fb, "format=yuv420p")
+		if seg_cropped(i) {
+			crx, cry, crw, crh := seg_crop(i)
+			fmt.sbprintf(fb, ",crop=iw*%.5f:ih*%.5f:iw*%.5f:ih*%.5f", crw, crh, crx, cry)
 		}
+		export_concat_fit(fb, W, H, W, H)
+		fmt.sbprintf(fb, ",fps=30")
+		fmt.sbprintf(fb, ",setsar=1")
+		strings.write_string(fb, export_still_loop(sg.dur))
+		fmt.sbprintf(fb, "[p%d];", piece)
+		return
+	}
+	fmt.sbprintf(fb, "[%d:v]trim=%.3f:%.3f,setpts=(PTS-STARTPTS)/%.5f", seg_inp[i], t0, t1, sp)
+	if sg.zoom_anim {
+		export_emit_kenburns(fb, i, segW, segH, 0, 0, "yuv420p")
+		export_concat_fit(fb, W, H, W, H)
+		fmt.sbprintf(fb, ",setsar=1[p%d];", piece)
+		return
 	}
 	if seg_cropped(i) {
 		crx, cry, crw, crh := seg_crop(i)
 		fmt.sbprintf(fb, ",crop=iw*%.5f:ih*%.5f:iw*%.5f:ih*%.5f", crw, crh, crx, cry)
 	}
-	strings.write_string(fb, export_scale_clause(segW, segH, int(cc.vw), int(cc.vh), seg_cropped(i)))
+	export_concat_fit(fb, W, H, W, H)
 	fmt.sbprintf(fb, ",fps=30")
-	if segW != W || segH != H {
-		fmt.sbprintf(fb, ",pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black", W, H)
-	}
 	// setsar=1: o concat recusa pedaços do MESMO tamanho com SAR diferente.
 	// JPEG/retrato traz SAR tipo 2877:2876; o scale de outra foto sai 1380960:1379761
 	// — tamanho 1440x1918 nos dois, e o export morria ("Input link in0:v0 parameters
 	// do not match"). Sem isto um slideshow de fotos quebra.
 	fmt.sbprintf(fb, ",format=yuv420p,setsar=1")
-	if cc.is_img do strings.write_string(fb, export_still_loop(sg.dur))
 	fmt.sbprintf(fb, "[p%d];", piece)
 }
 
@@ -744,7 +764,7 @@ export_emit_direct_video :: proc(fb: ^strings.Builder, idxs: []int, W, H: int, t
 	for idx in idxs {
 		sg := segs[idx]
 		if sg.start > tcur + GAP {
-			fmt.sbprintf(fb, "color=c=black:s=%dx%d:r=30:d=%.3f,format=yuv420p,setsar=1[p%d];", W, H, sg.start - tcur, piece)
+			fmt.sbprintf(fb, "color=c=black:s=%dx%d:r=30:d=%.3f,format=yuv420p,setsar=1,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black[p%d];", W, H, sg.start - tcur, W, H, piece)
 			piece += 1
 		}
 		export_emit_direct_clip(fb, idx, W, H, piece, seg_inp)
@@ -752,7 +772,7 @@ export_emit_direct_video :: proc(fb: ^strings.Builder, idxs: []int, W, H: int, t
 		tcur = sg.start + sg.dur
 	}
 	if tcur < total - GAP {
-		fmt.sbprintf(fb, "color=c=black:s=%dx%d:r=30:d=%.3f,format=yuv420p,setsar=1[p%d];", W, H, total - tcur, piece)
+		fmt.sbprintf(fb, "color=c=black:s=%dx%d:r=30:d=%.3f,format=yuv420p,setsar=1,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black[p%d];", W, H, total - tcur, W, H, piece)
 		piece += 1
 	}
 	if piece <= 0 do return "p0"
@@ -760,6 +780,21 @@ export_emit_direct_video :: proc(fb: ^strings.Builder, idxs: []int, W, H: int, t
 	for k in 0 ..< piece do fmt.sbprintf(fb, "[p%d]", k)
 	fmt.sbprintf(fb, "concat=n=%d:v=1:a=0[vcat];", piece)
 	return "vcat"
+}
+
+// extrai 1 frame do vídeo em `t` (s) p/ PNG — usado quando o corte cai depois do fim
+// do stream de vídeo (congela o último quadro e segue o áudio).
+write_freeze_png :: proc(src: string, t: f32, out_png: string) -> bool {
+	ss := max(t, 0)
+	_, _, _, e := os.process_exec(os.Process_Desc{
+		command = []string{
+			"ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+			"-ss", fmt.tprintf("%.3f", ss), "-i", src,
+			"-frames:v", "1", "-q:v", "2", out_png,
+		},
+	}, context.temp_allocator)
+	if e != nil do return false
+	return os.exists(out_png) && !os.is_dir(out_png)
 }
 
 // gera os mapas de deslocamento (xmap/ymap) do efeito Distorção p/ o filtro `remap` do
@@ -841,6 +876,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	}
 	W, H := export_dims()
 	want_video := export_fmt != .MP3 // MP3 = só áudio: pula todo o ramo de vídeo do filtro
+	for i in 0 ..< MAX_SEGS { exp_still[i] = false; exp_ainp[i] = -1 }
 
 	args = make([dynamic]string, context.temp_allocator)
 	// -nostdin: app GUI não tem stdin útil; sem isto o ffmpeg às vezes fica à espera
@@ -973,25 +1009,61 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		if c.is_img {
 			// 1 frame @ 30fps. A duração vai no filtro `loop` DEPOIS do scale — ver export_still_loop.
 			append(&args, "-framerate", "30")
+			append(&args, "-i", c.path)
+			seg_inp[i] = inp; inp += 1
+		} else if want_video && !c.is_audio && !segs[i].aonly {
+			// ZONA SÓ-ÁUDIO (live com áudio > vídeo): o corte começa depois do último
+			// frame. Em vez de falhar com MP4 de 0 bytes, congela o último quadro num PNG
+			// e usa como still; o áudio vem num 2º input do arquivo original.
+			SEEK_PAD :: f32(2)
+			t0, _, _, _ := seg_src_span(i, thead[i], ttail[i])
+			vend := clip_video_end(c)
+			if vend > 0 && t0 >= vend - 0.05 {
+				ft := max(vend - 0.15, 0)
+				fp := fmt.tprintf("%s_%d_%d_freeze%d.png", AUDIO_BASE, u32(win.GetCurrentProcessId()), c.aid, i)
+				// testes dry usam path falso ("A.mp4"): só monta o comando. dump-export
+				// e o botão real têm arquivo no disco — grava o PNG mesmo em dry p/ o
+				// ffmpeg do dump achar o frame.
+				if os.exists(c.path) {
+					if !write_freeze_png(c.path, ft, fp) {
+						set_toast("Falha ao capturar frame para a parte sem vídeo")
+						return nil, "", false
+					}
+					append(&export_tmp_files, strings.clone(fp))
+				}
+				append(&args, "-framerate", "30", "-i", fp)
+				seg_inp[i] = inp; inp += 1
+				exp_still[i] = true
+				if c.src_audio {
+					if ss := segs[i].in_off - SEEK_PAD; ss > 0.001 do append(&args, "-ss", fmt.tprintf("%.3f", ss), "-copyts")
+					append(&args, "-i", c.path)
+					exp_ainp[i] = inp; inp += 1
+				}
+			} else {
+				// SEEK NA ENTRADA (-ss ANTES do -i): o ffmpeg pula pro keyframe e decodifica só até
+				// o ponto pedido. Antes o corte era SÓ no filtro (trim), o que obriga a DECODIFICAR
+				// O ARQUIVO DESDE O ZERO até o in-point — num trecho aos 60min de uma live de 4h a
+				// exportação levava minutos só p/ COMEÇAR (medido: >120s, contra 0.7s com -ss).
+				// `-copyts` PRESERVA os timestamps originais: sem ele o seek rebaseia p/ zero e todo
+				// `trim`/`atrim` do grafo (que usa tempo ABSOLUTO da fonte) teria de ser deslocado à
+				// mão — é onde um erro dessincronizaria áudio/vídeo em silêncio. Com -copyts o grafo
+				// fica INTACTO. Verificado: vídeo bit-idêntico (inclusive com múltiplos inputs); o
+				// áudio muda só ~-93 dBFS (arredondamento do decoder AAC ao iniciar noutro ponto).
+				// Cada segmento tem seu PRÓPRIO input, então o -ss é por segmento, sem interferência.
+				// Recua um keyframe (SEEK_PAD) do trecho pedido: garante que o trim tenha material
+				// antes do in-point mesmo se o keyframe cair depois dele.
+				if ss := t0 - SEEK_PAD; ss > 0.001 do append(&args, "-ss", fmt.tprintf("%.3f", ss), "-copyts")
+				append(&args, "-i", c.path)
+				seg_inp[i] = inp; inp += 1
+			}
 		} else {
-			// SEEK NA ENTRADA (-ss ANTES do -i): o ffmpeg pula pro keyframe e decodifica só até
-			// o ponto pedido. Antes o corte era SÓ no filtro (trim), o que obriga a DECODIFICAR
-			// O ARQUIVO DESDE O ZERO até o in-point — num trecho aos 60min de uma live de 4h a
-			// exportação levava minutos só p/ COMEÇAR (medido: >120s, contra 0.7s com -ss).
-			// `-copyts` PRESERVA os timestamps originais: sem ele o seek rebaseia p/ zero e todo
-			// `trim`/`atrim` do grafo (que usa tempo ABSOLUTO da fonte) teria de ser deslocado à
-			// mão — é onde um erro dessincronizaria áudio/vídeo em silêncio. Com -copyts o grafo
-			// fica INTACTO. Verificado: vídeo bit-idêntico (inclusive com múltiplos inputs); o
-			// áudio muda só ~-93 dBFS (arredondamento do decoder AAC ao iniciar noutro ponto).
-			// Cada segmento tem seu PRÓPRIO input, então o -ss é por segmento, sem interferência.
-			// Recua um keyframe (SEEK_PAD) do trecho pedido: garante que o trim tenha material
-			// antes do in-point mesmo se o keyframe cair depois dele.
+			// áudio puro / MP3 / aonly: só o arquivo-fonte
 			SEEK_PAD :: f32(2)
 			t0, _, _, _ := seg_src_span(i, thead[i], ttail[i])
 			if ss := t0 - SEEK_PAD; ss > 0.001 do append(&args, "-ss", fmt.tprintf("%.3f", ss), "-copyts")
+			append(&args, "-i", c.path)
+			seg_inp[i] = inp; inp += 1
 		}
-		append(&args, "-i", c.path)
-		seg_inp[i] = inp; inp += 1
 		// EFEITO Distorção: mapas xmap/ymap viram inputs p/ o remap (tamanho segW×segH).
 		// Estático = 1 par (remap repete o frame). Wobble = 1 PERÍODO de mapas em sequência,
 		// consumidos em loop (stream_loop) sincronizados ao vídeo em fps=30.
@@ -1131,9 +1203,15 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			// funciona entre quaisquer clipes sem o usuário aparar nada. (hd/tl só são >0 em
 			// transições, onde sp==1, então a matemática de folga usa dur diretamente.)
 			t0, t1, freeze_hd, freeze_tl := seg_src_span(i, hd, tl)
+			still := cc.is_img || exp_still[i]
+			if still { // PNG / frame congelado: input de 1 frame, trim em tempo local 0..dur
+				t0 = 0
+				t1 = sg.dur + hd + tl
+				freeze_hd, freeze_tl = 0, 0
+			}
 			// trim em tempo ABSOLUTO da fonte: o input pode vir seekado (-ss), mas o -copyts
 			// preserva os timestamps, então esta conta independe do seek (ver montagem dos inputs)
-			if cc.is_img {
+			if still {
 				if sg.zoom_anim {
 					fmt.sbprintf(&fb, "[%d:v]%s,loop=-1:size=1:start=0,trim=%.3f:%.3f,setpts=PTS-STARTPTS",
 						seg_inp[i], export_still_supersample(int(cc.vw), int(cc.vh)), t0, t1)
@@ -1252,9 +1330,11 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		sp := sg.speed <= 0 ? 1 : sg.speed
 		sep := strings.builder_len(fb) > 0 ? ";" : "" // MP3: sem grafo de vídeo, a 1ª cadeia não leva ";"
 		// atrim em tempo ABSOLUTO da fonte (o -copyts do input preserva os timestamps, então o
-		// seek de entrada não desloca nada aqui — nada a compensar)
+		// seek de entrada não desloca nada aqui — nada a compensar).
+		// exp_ainp: quando o vídeo é um PNG de freeze, o áudio vem noutro -i do arquivo.
+		ainp := exp_ainp[i] >= 0 ? exp_ainp[i] : seg_inp[i]
 		fmt.sbprintf(&fb, "%s[%d:a]atrim=%.3f:%.3f,asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,volume=%.3f",
-			sep, seg_inp[i], sg.in_off, sg.in_off+sg.dur*sp, vv)
+			sep, ainp, sg.in_off, sg.in_off+sg.dur*sp, vv)
 		// velocidade: atempo aceita 0.5..2 por estágio; encadeia p/ cobrir 0.25..4.
 		// Vem ANTES dos fades p/ que o stream já tenha duração `dur` (tempo de timeline).
 		if abs(sp-1) > 0.001 {
