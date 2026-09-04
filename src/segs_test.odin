@@ -1108,6 +1108,7 @@ remove_fxseg_desloca_marcas :: proc(t: ^testing.T) {
 fx_biblioteca_tem_os_tipos_novos :: proc(t: ^testing.T) {
 	testing.expect(t, string(fxlib_name(FX_PIXEL)) == "Pixelizar")
 	testing.expect(t, string(fxlib_name(FX_BLUR)) == "Desfoque")
+	testing.expect(t, string(fxlib_name(FX_BLUR_PART)) == "Desfoque local")
 	testing.expect(t, string(fxlib_name(FX_GRAIN)) == "Granulação")
 	testing.expect(t, string(fxlib_name(FX_MIRROR)) == "Espelhar")
 	testing.expect(t, string(fxlib_name(FX_SHARP)) == "Nitidez")
@@ -1121,8 +1122,12 @@ fx_biblioteca_tem_os_tipos_novos :: proc(t: ^testing.T) {
 	testing.expect(t, string(fxlib_name(FX_KALEIDO)) == "Caleidoscópio")
 	testing.expect(t, string(fxlib_name(FX_SCAN)) == "Varredura")
 	testing.expect(t, string(fxlib_name(FX_EDGE)) == "Contorno")
-	testing.expect(t, len(fx_lib) >= 17, "biblioteca tem os tipos novos")
+	testing.expect(t, len(fx_lib) >= 18, "biblioteca tem os tipos novos")
 	f := FxSeg{ kind = FX_SPOT }
 	fx_defaults(&f)
 	testing.expect(t, f.amount > 0.5 && f.radius > 0.2, "holofote nasce visível")
+	p := FxSeg{ kind = FX_BLUR_PART }
+	fx_defaults(&p)
+	testing.expect(t, p.radius > 0.1 && p.amount > 0.3, "desfoque local nasce visível")
+	testing.expect(t, p.angle < 0.5, "nasce quadrado")
 }

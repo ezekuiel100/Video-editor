@@ -41,7 +41,7 @@ uniform float wipeEdge;    // progresso 0..1 da máscara (orgânico / wipe / ír
 uniform float wipeFeather; // 0 = desligado; maciez da fumaça/tinta (orgânico)
 uniform float wipeInv;     // 1 = clipe que SAI (máscara invertida)
 uniform float wipeKind;    // 0=off/orgânico | 2..5 wipe L/R/U/D | 10 íris | 18 relógio
-uniform float fxKind;      // 2 pixel | 3 blur | 4 grain | 5 mirror | 6 sharp | 7 spot | 8 shake | 9 poster | 10 invert | 11 wave | 12 hue | 13 glow | 14 kaleido | 15 scan | 16 edge
+uniform float fxKind;      // 2 pixel | 3 blur | 4 grain | 5 mirror | 6 sharp | 7 spot | 8 shake | 9 poster | 10 invert | 11 wave | 12 hue | 13 glow | 14 kaleido | 15 scan | 16 edge | 17 blur-part
 uniform float fxAmt;       // intensidade 0..1 do efeito de faixa
 uniform float fxTime;      // tempo (s) p/ granulação/tremor
 uniform float fxAng;       // Espelhar: <0.5 horizontal, senão vertical
@@ -100,7 +100,7 @@ void main() {
     vec2 tex = uv0 + clamp(uv, 0.0, 1.0)*span;
     vec4 src;
     vec3 c;
-    if (fxKind > 2.5 && fxKind < 3.5) {           // DESFOQUE 3×3
+    if ((fxKind > 2.5 && fxKind < 3.5) || (fxKind > 16.5 && fxKind < 17.5)) {  // DESFOQUE 3×3 (inteiro ou local)
         vec2 o = vec2(fxAmt * 0.012 / max(aspect, 0.2), fxAmt * 0.012);
         vec3 acc = vec3(0.0);
         acc += texture(texture0, uv0 + clamp(uv + vec2(-o.x,-o.y), 0.0, 1.0)*span).rgb;
@@ -112,7 +112,15 @@ void main() {
         acc += texture(texture0, uv0 + clamp(uv + vec2(-o.x, o.y), 0.0, 1.0)*span).rgb;
         acc += texture(texture0, uv0 + clamp(uv + vec2( 0.0, o.y), 0.0, 1.0)*span).rgb;
         acc += texture(texture0, uv0 + clamp(uv + vec2( o.x, o.y), 0.0, 1.0)*span).rgb;
-        c = acc / 9.0;
+        vec3 sharp = texture(texture0, tex).rgb;
+        if (fxKind > 16.5) {                      // só a região (quadrado ou círculo)
+            vec2 bd = vec2((local.x - center.x) * aspect, local.y - center.y);
+            float dlt = fxAng < 0.5 ? max(abs(bd.x), abs(bd.y)) : length(bd);
+            float m = 1.0 - smoothstep(radius * 0.82, radius, dlt);
+            c = mix(sharp, acc / 9.0, m);
+        } else {
+            c = acc / 9.0;
+        }
         src = vec4(c, texture(texture0, tex).a);
     } else {
         src = texture(texture0, tex);
@@ -949,7 +957,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 			rgb_off = fx_rgb_offset(fs)
 		} else if fs.kind >= FX_PIXEL {
 			fxk = f32(fs.kind); fxa = fs.amount; fxt = vt; fxa_ang = fs.angle
-			if fs.kind == FX_SPOT {
+			if fs.kind == FX_SPOT || fs.kind == FX_BLUR_PART {
 				b_cx = clamp(0.5+fs.cx, 0, 1); b_cy = clamp(0.5+fs.cy, 0, 1)
 				b_r = fs.radius <= 0 ? BULGE_R_DEF : fs.radius
 			}

@@ -210,23 +210,25 @@ nsegs: int
 // kind: 0 Distorção | 1 RGB | 2 Pixelizar | 3 Desfoque | 4 Granulação | 5 Espelhar
 //       | 6 Nitidez | 7 Holofote | 8 Tremor | 9 Posterizar | 10 Inverter | 11 Onda
 //       | 12 Matiz | 13 Brilho | 14 Caleidoscópio | 15 Varredura | 16 Contorno
-FX_DISTORT :: 0
-FX_RGB     :: 1
-FX_PIXEL   :: 2
-FX_BLUR    :: 3
-FX_GRAIN   :: 4
-FX_MIRROR  :: 5
-FX_SHARP   :: 6
-FX_SPOT    :: 7
-FX_SHAKE   :: 8
-FX_POSTER  :: 9
-FX_INVERT  :: 10
-FX_WAVE    :: 11
-FX_HUE     :: 12
-FX_GLOW    :: 13
-FX_KALEIDO :: 14
-FX_SCAN    :: 15
-FX_EDGE    :: 16
+//       | 17 Desfoque local (só uma região)
+FX_DISTORT   :: 0
+FX_RGB       :: 1
+FX_PIXEL     :: 2
+FX_BLUR      :: 3
+FX_GRAIN     :: 4
+FX_MIRROR    :: 5
+FX_SHARP     :: 6
+FX_SPOT      :: 7
+FX_SHAKE     :: 8
+FX_POSTER    :: 9
+FX_INVERT    :: 10
+FX_WAVE      :: 11
+FX_HUE       :: 12
+FX_GLOW      :: 13
+FX_KALEIDO   :: 14
+FX_SCAN      :: 15
+FX_EDGE      :: 16
+FX_BLUR_PART :: 17
 FxSeg :: struct {
 	kind:   int,
 	track:  int, // trilha de VÍDEO onde o efeito está (afeta essa trilha e as ABAIXO dela: índice <= track)

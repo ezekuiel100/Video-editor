@@ -1277,7 +1277,7 @@ export_previa_sempre_emite_vpout :: proc(t: ^testing.T) {
 export_fx_novos_usam_filtros_baratos :: proc(t: ^testing.T) {
 	t_export_reset()
 	add_seg(0, 0, 0, 20, 0)
-	kinds := []int{ FX_PIXEL, FX_BLUR, FX_GRAIN, FX_MIRROR, FX_SHARP, FX_SPOT, FX_SHAKE, FX_POSTER, FX_INVERT, FX_WAVE, FX_HUE, FX_GLOW, FX_KALEIDO, FX_SCAN, FX_EDGE }
+	kinds := []int{ FX_PIXEL, FX_BLUR, FX_GRAIN, FX_MIRROR, FX_SHARP, FX_SPOT, FX_SHAKE, FX_POSTER, FX_INVERT, FX_WAVE, FX_HUE, FX_GLOW, FX_KALEIDO, FX_SCAN, FX_EDGE, FX_BLUR_PART }
 	nfx = len(kinds)
 	for k, i in kinds {
 		fxsegs[i] = FxSeg{ kind = k, track = 1, start = f32(i) * 2, dur = 1.5, amount = 0.5, radius = 0.4, speed = 8 }
@@ -1285,6 +1285,7 @@ export_fx_novos_usam_filtros_baratos :: proc(t: ^testing.T) {
 	_, g := t_build(t)
 	testing.expect(t, strings.contains(g, "flags=neighbor"), "pixelizar = scale neighbor")
 	testing.expect(t, strings.contains(g, "boxblur="), "desfoque")
+	testing.expect(t, strings.contains(g, "overlay="), "desfoque local cola a região")
 	testing.expect(t, strings.contains(g, "noise=alls="), "granulação")
 	testing.expect(t, strings.contains(g, "hstack"), "espelhar horizontal")
 	testing.expect(t, strings.contains(g, "unsharp="), "nitidez")
@@ -1296,6 +1297,31 @@ export_fx_novos_usam_filtros_baratos :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(g, "blend=all_mode=screen"), "brilho")
 	testing.expect(t, strings.contains(g, "edgedetect="), "contorno")
 	testing.expect(t, !strings.contains(g, "geq=r="), "efeitos novos não usam geq RGB")
+}
+
+@(test)
+export_fx_desfoque_local_crop_overlay :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 6, 0)
+	nfx = 1
+	fxsegs[0] = FxSeg{ kind = FX_BLUR_PART, track = 1, start = 0, dur = 3, amount = 0.6, radius = 0.25, cx = 0.1, cy = -0.1 }
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "bpA0"), "split da região")
+	testing.expect(t, strings.contains(g, "boxblur="), "desfoca o recorte")
+	testing.expect(t, strings.contains(g, "crop="), "recorta a parte")
+	testing.expect(t, !strings.contains(g, "geq=r="), "sem geq RGB")
+}
+
+@(test)
+export_fx_desfoque_local_circulo_usa_mascara :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 0, 6, 0)
+	nfx = 1
+	fxsegs[0] = FxSeg{ kind = FX_BLUR_PART, track = 1, start = 0, dur = 3, amount = 0.6, radius = 0.25, angle = 0.5 }
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "geq=lum="), "círculo = máscara luma")
+	testing.expect(t, strings.contains(g, "alphamerge"), "cola com alpha")
+	testing.expect(t, !strings.contains(g, "geq=r="), "sem geq RGB")
 }
 
 @(test)

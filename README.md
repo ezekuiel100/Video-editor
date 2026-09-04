@@ -14,6 +14,7 @@ Editor de vídeo não-linear, escrito em **[Odin](https://odin-lang.org/)** com 
 - **Bin de mídia** — importação assíncrona (probe + decode + áudio numa thread por mídia), miniaturas, arrastar pra timeline.
 - **Filmstrip de miniaturas** e **forma de onda real** ao longo de cada clipe.
 - **Transições e fades** — dissolver, dissolve orgânico, wipes (4 direções), deslizar (4 direções), íris, flash, zoom, giro, whip, glitch, flip, zoom out, relógio, tremor; fade de vídeo (preto) de entrada/saída; fades de áudio.
+- **Desfoque local** — efeito de faixa que desfoca só uma região (quadrado ou círculo, posição e tamanho no preview); o **Desfoque** continua valendo para o quadro inteiro.
 - **Transform no preview** — mover, escalar, recorte (crop), distorção; tudo WYSIWYG com o export.
 - **Controles de áudio por segmento** — volume (0–200%), mudo, fade in/out.
 - **Voz para texto** — transcreve o áudio do clipe (Whisper local, modelo **Máximo** / `small`) e cria uma faixa de legendas sincronizada. GPU NVIDIA se houver. Depois de transcrever (ou no inspector da faixa → **Editar falas**) dá para corrigir, apagar ou acrescentar falas. Estilos **YouTube** (caixa), **CapCut** (contorno + maiúsculas), **Marca** (marcador amarelo) e **Sombra**. A barra mostra o percentual real (download, extração, Whisper). Motor + `ggml-small.bin` vêm em `stt/` (instalador / `fetch-stt.ps1`); o pacote CUDA baixa na primeira vez.

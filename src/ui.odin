@@ -1410,6 +1410,7 @@ fx_lib := [?]FxLibItem{
 	{ "Separação RGB", FX_RGB },
 	{ "Pixelizar", FX_PIXEL },
 	{ "Desfoque", FX_BLUR },
+	{ "Desfoque local", FX_BLUR_PART },
 	{ "Granulação", FX_GRAIN },
 	{ "Espelhar", FX_MIRROR },
 	{ "Nitidez", FX_SHARP },
@@ -1430,8 +1431,9 @@ fxlib_name :: proc(kind: int) -> cstring {
 	case FX_DISTORT: return "Distorção"
 	case FX_RGB:     return "Separação RGB"
 	case FX_PIXEL:   return "Pixelizar"
-	case FX_BLUR:    return "Desfoque"
-	case FX_GRAIN:   return "Granulação"
+	case FX_BLUR:      return "Desfoque"
+	case FX_BLUR_PART: return "Desfoque local"
+	case FX_GRAIN:     return "Granulação"
 	case FX_MIRROR:  return "Espelhar"
 	case FX_SHARP:   return "Nitidez"
 	case FX_SPOT:    return "Holofote"
@@ -1453,8 +1455,9 @@ fx_defaults :: proc(f: ^FxSeg) {
 	case FX_DISTORT: f.amount = 0.5; f.radius = BULGE_R_DEF; f.cx = 0; f.cy = 0; f.wobble = 0; f.speed = WOBBLE_HZ_DEF
 	case FX_RGB:     f.amount = 0.5; f.angle = 0.25 // "cima-baixo" (vertical) por padrão
 	case FX_PIXEL:   f.amount = 0.45
-	case FX_BLUR:    f.amount = 0.45
-	case FX_GRAIN:   f.amount = 0.40
+	case FX_BLUR:      f.amount = 0.45
+	case FX_BLUR_PART: f.amount = 0.55; f.radius = 0.22; f.cx = 0; f.cy = 0; f.angle = 0 // quadrado
+	case FX_GRAIN:     f.amount = 0.40
 	case FX_MIRROR:  f.amount = 1; f.angle = 0 // horizontal
 	case FX_SHARP:   f.amount = 0.45
 	case FX_SPOT:    f.amount = 0.70; f.radius = 0.45; f.cx = 0; f.cy = 0
@@ -1529,6 +1532,11 @@ draw_fx_icon :: proc(box: rl.Rectangle, kind: int) {
 		rl.DrawCircleV({ cx, cy }, 18, rl.Color{ 160, 190, 230, 70 })
 		rl.DrawCircleV({ cx, cy }, 11, rl.Color{ 180, 210, 245, 110 })
 		rl.DrawCircleV({ cx, cy }, 5, rl.Color{ 230, 240, 255, 220 })
+	case FX_BLUR_PART:
+		cx := box.x + box.width/2; cy := box.y + box.height/2
+		rl.DrawRectangleRec({ box.x + 16, box.y + 10, box.width - 32, box.height - 20 }, rl.Color{ 70, 90, 120, 255 })
+		rl.DrawRectangleRec({ cx - 16, cy - 12, 32, 24 }, rl.Color{ 160, 190, 230, 90 })
+		rl.DrawRectangleLinesEx({ cx - 16, cy - 12, 32, 24 }, 1.5, rl.Color{ 230, 240, 255, 220 })
 	case FX_GRAIN:
 		cx := box.x + 32; cy := box.y + 18
 		for i in 0 ..< 18 {
@@ -1674,6 +1682,22 @@ draw_fx_settings :: proc(r: rl.Rectangle) {
 		if ui_btn({ x + (cw-8)/2 + 8, y, (cw-8)/2, 26 }, "Vertical", !horz) do f.angle = 0.5
 		y += 36
 		txt("Dobra a metade do quadro sobre a outra.", x, y, 11, MUTED); y += 22
+	case FX_BLUR_PART:
+		if f.radius <= 0 do f.radius = 0.22
+		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
+		txt("Tamanho", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(41, { x, y, cw, 16 }, &f.radius, 0.08, 0.7); y += 28
+		txt("Centro X", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(f.cx*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(42, { x, y, cw, 16 }, &f.cx, -0.5, 0.5); y += 28
+		txt("Centro Y", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(f.cy*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(43, { x, y, cw, 16 }, &f.cy, -0.5, 0.5); y += 28
+		txt("Forma", x, y, 13, MUTED); y += 22
+		quad := f.angle < 0.5
+		if ui_btn({ x, y, (cw-8)/2, 26 }, "Quadrado", quad) do f.angle = 0
+		if ui_btn({ x + (cw-8)/2 + 8, y, (cw-8)/2, 26 }, "Círculo", !quad) do f.angle = 0.5
+		y += 36
+		txt("Arraste o alvo no preview para mover a região.", x, y, 11, MUTED); y += 22
 	case FX_SPOT:
 		if f.radius <= 0 do f.radius = 0.45
 		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
@@ -2816,17 +2840,20 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// alvo do CENTRO da distorção do CLIPE DE EFEITO selecionado (arrasta no preview p/ mover
 	// o centro sem os sliders). Só quando é Distorção e está sob o playhead (efeito visível).
 	if !crop_mode && src_preview < 0 && fx_sel >= 0 && fx_sel < nfx && g_frame.width > 0 &&
-	   (fxsegs[fx_sel].kind == FX_DISTORT || fxsegs[fx_sel].kind == FX_SPOT) && st.playhead >= fxsegs[fx_sel].start && st.playhead < fxsegs[fx_sel].start + fxsegs[fx_sel].dur {
+	   (fxsegs[fx_sel].kind == FX_DISTORT || fxsegs[fx_sel].kind == FX_SPOT || fxsegs[fx_sel].kind == FX_BLUR_PART) && st.playhead >= fxsegs[fx_sel].start && st.playhead < fxsegs[fx_sel].start + fxsegs[fx_sel].dur {
 		f := fxsegs[fx_sel]
 		m := rl.GetMousePosition()
 		ccx := g_frame.x + g_frame.width/2 + f.cx*g_frame.width
 		ccy := g_frame.y + g_frame.height/2 + f.cy*g_frame.height
-		rr := (f.radius <= 0 ? BULGE_R_DEF : f.radius) * g_frame.height
+		rr := (f.radius <= 0 ? (f.kind == FX_BLUR_PART ? f32(0.22) : BULGE_R_DEF) : f.radius) * g_frame.height
 		// recorta ao quadro do vídeo p/ o anel não vazar pra fora do preview
 		rl.BeginScissorMode(i32(g_frame.x), i32(g_frame.y), i32(g_frame.width), i32(g_frame.height))
-		// anel LISO desenhado à mão (DrawCircleLines/DrawRing deixavam um "bico"/emenda num ponto)
-		{
-			ringcol := rl.Color{ 245, 205, 90, 150 }; N :: 160
+		ringcol := rl.Color{ 245, 205, 90, 150 }
+		if f.kind == FX_BLUR_PART && f.angle < 0.5 {
+			rl.DrawRectangleLinesEx({ ccx - rr, ccy - rr, rr*2, rr*2 }, 1.5, ringcol)
+		} else {
+			// anel LISO desenhado à mão (DrawCircleLines/DrawRing deixavam um "bico"/emenda num ponto)
+			N :: 160
 			prev := rl.Vector2{ ccx + rr, ccy }
 			for k in 1 ..= N {
 				a := f32(k)/f32(N) * 2*math.PI

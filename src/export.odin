@@ -617,6 +617,24 @@ export_emit_track_fx :: proc(fb: ^strings.Builder, e: FxSeg, k, W, H: int) {
 	case FX_BLUR:
 		r := 1.0 + amt*14
 		fmt.sbprintf(fb, "boxblur=%.1f:1", r)
+	case FX_BLUR_PART: // recorta a região, desfoca, cola de volta (sem geq RGB)
+		r := 1.0 + amt*14
+		cx := clamp(0.5+e.cx, 0, 1); cy := clamp(0.5+e.cy, 0, 1)
+		rad := e.radius <= 0 ? f32(0.22) : clamp(e.radius, 0.05, 1)
+		if e.angle < 0.5 { // quadrado: crop + overlay
+			side := int(2*rad*f32(H) + 0.5); if side < 2 do side = 2; side -= side % 2
+			cw := min(side, W); ch := min(side, H); cw -= cw % 2; ch -= ch % 2
+			if cw < 2 do cw = 2; if ch < 2 do ch = 2
+			ox := int(cx*f32(W) - f32(cw)/2 + 0.5); oy := int(cy*f32(H) - f32(ch)/2 + 0.5)
+			ox = clamp(ox, 0, max(0, W-cw)); oy = clamp(oy, 0, max(0, H-ch))
+			fmt.sbprintf(fb, "split[bpA%d][bpB%d];[bpB%d]boxblur=%.1f:1[bpBb%d];[bpBb%d]crop=%d:%d:%d:%d[bpC%d];[bpA%d][bpC%d]overlay=%d:%d",
+				k, k, k, r, k, k, cw, ch, ox, oy, k, k, k, ox, oy)
+		} else { // círculo: blur full + máscara luma (geq só no gray, miniatura)
+			mw, mh, ow, oh := ghost_mask_dims(W, H)
+			M := fmt.tprintf("min(1\\,max(0\\,(%.4f-hypot((X/W-%.4f)*(W/H)\\,Y/H-%.4f))/0.03))", rad, cx, cy)
+			fmt.sbprintf(fb, "split[bpA%d][bpB%d];[bpB%d]boxblur=%.1f:1,format=rgba,split[bpR%d][bpW%d];[bpW%d]scale=%d:%d:flags=fast_bilinear,format=gray,geq=lum='255*(%s)',scale=%d:%d:flags=bilinear,format=gray[bpM%d];[bpR%d][bpM%d]alphamerge[bpC%d];[bpA%d][bpC%d]overlay=0:0",
+				k, k, k, r, k, k, k, mw, mh, M, ow, oh, k, k, k, k, k, k)
+		}
 	case FX_GRAIN:
 		s := 1.0 + amt*48
 		fmt.sbprintf(fb, "noise=alls=%.0f:allf=t+u", s)
