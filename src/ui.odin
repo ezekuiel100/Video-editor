@@ -1857,7 +1857,8 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 				ensure_tex(c)
 				if c.tex_ok do rl.DrawTexturePro(c.tex, {0,0,f32(cdw(c)),f32(cdh(c))}, box, {0,0}, 0, rl.WHITE)
 			}
-			txt(timecode(c.dur), tx + tw - 62, ty + th - 15, 11, rl.WHITE)
+			// imagem/texto não têm duração de fonte — o 00:00:05:00 (IMG_DUR) parecia um vídeo
+			if !c.is_img && !c.is_text do txt(timecode(c.dur), tx + tw - 62, ty + th - 15, 11, rl.WHITE)
 			if c.streaming do txt("streaming", tx + 4, ty + 3, 10, rl.Color{120,190,230,220})
 		} else {
 			txt_c("importando...", tx + tw/2, ty + th/2 - 6, 12, rl.Color{200,200,90,230})
