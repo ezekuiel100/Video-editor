@@ -1416,6 +1416,13 @@ fx_lib := [?]FxLibItem{
 	{ "Holofote", FX_SPOT },
 	{ "Tremor", FX_SHAKE },
 	{ "Posterizar", FX_POSTER },
+	{ "Inverter", FX_INVERT },
+	{ "Onda", FX_WAVE },
+	{ "Matiz", FX_HUE },
+	{ "Brilho", FX_GLOW },
+	{ "Caleidoscópio", FX_KALEIDO },
+	{ "Varredura", FX_SCAN },
+	{ "Contorno", FX_EDGE },
 }
 
 fxlib_name :: proc(kind: int) -> cstring {
@@ -1430,6 +1437,13 @@ fxlib_name :: proc(kind: int) -> cstring {
 	case FX_SPOT:    return "Holofote"
 	case FX_SHAKE:   return "Tremor"
 	case FX_POSTER:  return "Posterizar"
+	case FX_INVERT:  return "Inverter"
+	case FX_WAVE:    return "Onda"
+	case FX_HUE:     return "Matiz"
+	case FX_GLOW:    return "Brilho"
+	case FX_KALEIDO: return "Caleidoscópio"
+	case FX_SCAN:    return "Varredura"
+	case FX_EDGE:    return "Contorno"
 	}
 	return "Efeito"
 }
@@ -1446,6 +1460,13 @@ fx_defaults :: proc(f: ^FxSeg) {
 	case FX_SPOT:    f.amount = 0.70; f.radius = 0.45; f.cx = 0; f.cy = 0
 	case FX_SHAKE:   f.amount = 0.40; f.speed = 8
 	case FX_POSTER:  f.amount = 0.50
+	case FX_INVERT:  f.amount = 1
+	case FX_WAVE:    f.amount = 0.45; f.speed = 2
+	case FX_HUE:     f.amount = 0.25
+	case FX_GLOW:    f.amount = 0.50
+	case FX_KALEIDO: f.amount = 0.40
+	case FX_SCAN:    f.amount = 0.45
+	case FX_EDGE:    f.amount = 0.55
 	}
 }
 add_fxseg :: proc(kind: int, start: f32, track := 0) -> int {
@@ -1535,6 +1556,43 @@ draw_fx_icon :: proc(box: rl.Rectangle, kind: int) {
 		px := box.x + 26; py := box.y + 16
 		cols := []rl.Color{ { 70, 90, 200, 255 }, { 80, 180, 120, 255 }, { 230, 190, 70, 255 }, { 220, 90, 80, 255 } }
 		for c, i in cols do rl.DrawRectangleRec({ px, py + f32(i)*8, 52, 8 }, c)
+	case FX_INVERT:
+		rl.DrawRectangleRec({ box.x + 22, box.y + 14, 30, 38 }, rl.Color{ 230, 230, 240, 255 })
+		rl.DrawRectangleRec({ box.x + 52, box.y + 14, 30, 38 }, rl.Color{ 28, 30, 40, 255 })
+	case FX_WAVE:
+		cx := box.x + 22; cy := box.y + box.height/2
+		for i in 0 ..< 8 {
+			x0 := cx + f32(i)*8; x1 := x0 + 8
+			y0 := cy + math.sin(f32(i)*0.9)*12; y1 := cy + math.sin(f32(i+1)*0.9)*12
+			rl.DrawLineEx({ x0, y0 }, { x1, y1 }, 2.2, rl.Color{ 120, 210, 255, 230 })
+		}
+	case FX_HUE:
+		cx := box.x + box.width/2; cy := box.y + box.height/2
+		cols := []rl.Color{ { 230, 70, 80, 255 }, { 230, 200, 60, 255 }, { 70, 200, 90, 255 }, { 70, 140, 230, 255 } }
+		for i in 0 ..< 4 {
+			a := f32(i) * math.PI/2
+			rl.DrawCircleV({ cx + math.cos(a)*10, cy + math.sin(a)*10 }, 8, cols[i])
+		}
+	case FX_GLOW:
+		cx := box.x + box.width/2; cy := box.y + box.height/2
+		rl.DrawCircleV({ cx, cy }, 20, rl.Color{ 255, 220, 80, 50 })
+		rl.DrawCircleV({ cx, cy }, 12, rl.Color{ 255, 240, 140, 120 })
+		rl.DrawCircleV({ cx, cy }, 5, rl.Color{ 255, 255, 230, 255 })
+	case FX_KALEIDO:
+		cx := box.x + box.width/2; cy := box.y + box.height/2
+		rl.DrawTriangle({ cx, cy }, { cx - 16, cy - 18 }, { cx + 16, cy - 18 }, rl.Color{ 180, 120, 230, 220 })
+		rl.DrawTriangle({ cx, cy }, { cx - 16, cy + 18 }, { cx + 16, cy + 18 }, rl.Color{ 120, 90, 200, 180 })
+		rl.DrawTriangle({ cx, cy }, { cx - 22, cy - 8 }, { cx - 22, cy + 8 }, rl.Color{ 210, 160, 255, 160 })
+		rl.DrawTriangle({ cx, cy }, { cx + 22, cy - 8 }, { cx + 22, cy + 8 }, rl.Color{ 210, 160, 255, 160 })
+	case FX_SCAN:
+		px := box.x + 24; py := box.y + 16
+		for i in 0 ..< 8 {
+			rl.DrawRectangleRec({ px, py + f32(i)*4.5, 56, 2.2 }, rl.Color{ 80, 220, 120, u8(140 + (i%2)*80) })
+		}
+	case FX_EDGE:
+		cx := box.x + box.width/2; cy := box.y + box.height/2
+		rl.DrawRectangleLinesEx({ cx - 16, cy - 12, 32, 24 }, 2, rl.Color{ 240, 240, 250, 230 })
+		rl.DrawCircleLines(i32(cx), i32(cy), 6, rl.Color{ 240, 240, 250, 230 })
 	}
 }
 
@@ -1548,16 +1606,28 @@ draw_effects_panel :: proc(r: rl.Rectangle) {
 
 	tw: f32 = 104; th: f32 = 66; gap: f32 = 12; lblh: f32 = 22
 	cols := max(1, int((r.width - gap) / (tw + gap)))
-	x0 := r.x + gap; y0 := r.y + 76
+	rows := (len(fx_lib) + cols - 1) / cols
+	content_h := f32(rows) * (th + gap + lblh)
+	area := rl.Rectangle{ r.x, r.y + 76, r.width, max(40, r.height - 76) }
+	maxs := max(f32(0), content_h - area.height + 8)
+	if hovered(area) && st.drag == .None {
+		fx_panel_scroll = clamp(fx_panel_scroll - rl.GetMouseWheelMove() * 40, 0, maxs)
+	} else {
+		fx_panel_scroll = clamp(fx_panel_scroll, 0, maxs)
+	}
+	x0 := r.x + gap; y0 := area.y - fx_panel_scroll
+	rl.BeginScissorMode(i32(area.x), i32(area.y), i32(area.width), i32(area.height))
 	for it, idx in fx_lib {
 		col := idx % cols; row := idx / cols
 		box := rl.Rectangle{ x0 + f32(col)*(tw+gap), y0 + f32(row)*(th+gap+lblh), tw, th }
+		if box.y + box.height < area.y || box.y > area.y + area.height { continue }
 		hot := hovered(box)
 		draw_fx_icon(box, it.kind)
 		rl.DrawRectangleRoundedLinesEx(box, 0.1, 6, hot ? 2 : 1, hot ? ACCENT : LINE)
 		txt_c(it.name, box.x + box.width/2, box.y + box.height + 4, 12, TEXT)
 		if rl.IsMouseButtonPressed(.LEFT) && hovered(box) && modal == .None { st.drag = .FxLib; fxlib_drag = it.kind }
 	}
+	rl.EndScissorMode()
 }
 
 // CONFIGURAÇÕES do clipe de efeito selecionado (aberto no duplo-clique). Sliders próprios por
@@ -1621,6 +1691,19 @@ draw_fx_settings :: proc(r: rl.Rectangle) {
 		if f.speed <= 0 do f.speed = 8
 		txt("Velocidade", x, y, 13, TEXT); txt(rl.TextFormat("%.1f Hz", f64(f.speed)), vx-8, y, 13, ACCENT); y += 20
 		ui_slider(41, { x, y, cw, 16 }, &f.speed, 1, 16); y += 28
+	case FX_WAVE:
+		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
+		if f.speed <= 0 do f.speed = 2
+		txt("Velocidade", x, y, 13, TEXT); txt(rl.TextFormat("%.1f Hz", f64(f.speed)), vx-8, y, 13, ACCENT); y += 20
+		ui_slider(41, { x, y, cw, 16 }, &f.speed, 0.3, 8); y += 28
+	case FX_HUE:
+		txt("Matiz", x, y, 13, TEXT); txt(rl.TextFormat("%d°", i32(f.amount*360)), vx, y, 13, ACCENT); y += 20
+		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
+		txt("Gira as cores do quadro (0–360°).", x, y, 11, MUTED); y += 22
+	case FX_INVERT, FX_GLOW, FX_KALEIDO, FX_SCAN, FX_EDGE:
+		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
 	}
 	y += 8
 	// rodapé estilo NLE: REDEFINIR (contorno) à esquerda, OK (preenchido) à direita.

@@ -41,7 +41,7 @@ uniform float wipeEdge;    // progresso 0..1 da máscara (orgânico / wipe / ír
 uniform float wipeFeather; // 0 = desligado; maciez da fumaça/tinta (orgânico)
 uniform float wipeInv;     // 1 = clipe que SAI (máscara invertida)
 uniform float wipeKind;    // 0=off/orgânico | 2..5 wipe L/R/U/D | 10 íris | 18 relógio
-uniform float fxKind;      // efeito de faixa: 0 off/distort/rgb | 2 pixel | 3 blur | 4 grain | 5 mirror | 6 sharp | 7 spot | 8 shake | 9 poster
+uniform float fxKind;      // 2 pixel | 3 blur | 4 grain | 5 mirror | 6 sharp | 7 spot | 8 shake | 9 poster | 10 invert | 11 wave | 12 hue | 13 glow | 14 kaleido | 15 scan | 16 edge
 uniform float fxAmt;       // intensidade 0..1 do efeito de faixa
 uniform float fxTime;      // tempo (s) p/ granulação/tremor
 uniform float fxAng;       // Espelhar: <0.5 horizontal, senão vertical
@@ -78,6 +78,20 @@ void main() {
     }
     if (fxKind > 7.5 && fxKind < 8.5) {           // TREMOR: desloca o quadro
         uv += vec2(sin(fxTime*23.0), cos(fxTime*17.0)) * fxAmt * 0.028;
+    }
+    if (fxKind > 10.5 && fxKind < 11.5) {          // ONDA
+        uv.x += sin(uv.y * mix(6.0, 18.0, fxAmt) + fxTime * 6.2832) * fxAmt * 0.045;
+        uv.y += cos(uv.x * 9.0 + fxTime * 4.0) * fxAmt * 0.022;
+    }
+    if (fxKind > 13.5 && fxKind < 14.5) {          // CALEIDOSCÓPIO
+        vec2 p = uv - vec2(0.5);
+        float a = atan(p.y, p.x);
+        float rr = length(p);
+        float slices = mix(4.0, 12.0, clamp(fxAmt, 0.0, 1.0));
+        float sa = 6.2831853 / slices;
+        a = mod(a, sa);
+        a = abs(a - sa * 0.5);
+        uv = vec2(cos(a), sin(a)) * rr + vec2(0.5);
     }
     if (fxKind > 1.5 && fxKind < 2.5) {           // PIXELIZAR
         float nPix = mix(90.0, 8.0, clamp(fxAmt, 0.0, 1.0));
@@ -150,6 +164,43 @@ void main() {
         float sdist = length(vec2(sd.x*aspect, sd.y));
         float sm = smoothstep(radius, radius * 0.35, sdist);
         c *= mix(1.0 - fxAmt * 0.92, 1.0, sm);
+    }
+    if (fxKind > 9.5 && fxKind < 10.5) {           // INVERTER
+        c = mix(c, vec3(1.0) - c, clamp(fxAmt, 0.0, 1.0));
+    }
+    if (fxKind > 11.5 && fxKind < 12.5) {          // MATIZ
+        float ang = fxAmt * 6.2831853;
+        float cosA = cos(ang); float sinA = sin(ang);
+        mat3 hueM = mat3(
+            vec3(0.213+0.787*cosA-0.213*sinA, 0.213-0.213*cosA+0.143*sinA, 0.213-0.213*cosA-0.787*sinA),
+            vec3(0.715-0.715*cosA-0.715*sinA, 0.715+0.285*cosA+0.140*sinA, 0.715-0.715*cosA+0.715*sinA),
+            vec3(0.072-0.072*cosA+0.928*sinA, 0.072-0.072*cosA-0.283*sinA, 0.072+0.928*cosA+0.072*sinA)
+        );
+        c = clamp(hueM * c, 0.0, 1.0);
+    }
+    if (fxKind > 12.5 && fxKind < 13.5) {          // BRILHO (glow)
+        vec2 o = vec2(0.012 / max(aspect, 0.2), 0.012);
+        vec3 acc = texture(texture0, uv0 + clamp(uv + vec2(-o.x,0.0), 0.0, 1.0)*span).rgb
+                 + texture(texture0, uv0 + clamp(uv + vec2( o.x,0.0), 0.0, 1.0)*span).rgb
+                 + texture(texture0, uv0 + clamp(uv + vec2(0.0,-o.y), 0.0, 1.0)*span).rgb
+                 + texture(texture0, uv0 + clamp(uv + vec2(0.0, o.y), 0.0, 1.0)*span).rgb;
+        vec3 bloom = max(acc * 0.25 - vec3(0.35), vec3(0.0));
+        c += bloom * fxAmt * 1.6;
+    }
+    if (fxKind > 14.5 && fxKind < 15.5) {          // VARREDURA
+        float dens = mix(90.0, 240.0, clamp(fxAmt, 0.0, 1.0));
+        float sl = 0.45 + 0.55 * abs(sin(local.y * dens + fxTime * 6.0));
+        c *= mix(1.0, sl, clamp(fxAmt, 0.0, 1.0) * 0.85);
+        c.g *= 1.0 + fxAmt * 0.04;
+    }
+    if (fxKind > 15.5 && fxKind < 16.5) {          // CONTORNO
+        float s = 0.004;
+        vec3 n1 = texture(texture0, uv0 + clamp(uv+vec2(s,0.0), 0.0, 1.0)*span).rgb;
+        vec3 n2 = texture(texture0, uv0 + clamp(uv-vec2(s,0.0), 0.0, 1.0)*span).rgb;
+        vec3 n3 = texture(texture0, uv0 + clamp(uv+vec2(0.0,s), 0.0, 1.0)*span).rgb;
+        vec3 n4 = texture(texture0, uv0 + clamp(uv-vec2(0.0,s), 0.0, 1.0)*span).rgb;
+        float eg = length(n1 - n2) + length(n3 - n4);
+        c = mix(c, vec3(eg * 1.8), clamp(fxAmt, 0.0, 1.0));
     }
     c = clamp(c, 0.0, 1.0);
     float a = src.a;
@@ -905,6 +956,10 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 			if fs.kind == FX_SHAKE {
 				hz := fs.speed <= 0 ? f32(8) : fs.speed
 				fxt = vt * hz / 8 // o shader usa constantes 23/17; speed escala o tempo
+			}
+			if fs.kind == FX_WAVE {
+				hz := fs.speed <= 0 ? f32(2) : fs.speed
+				fxt = vt * hz
 			}
 		}
 	}

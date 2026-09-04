@@ -639,6 +639,28 @@ export_emit_track_fx :: proc(fb: ^strings.Builder, e: FxSeg, k, W, H: int) {
 	case FX_POSTER:
 		step := max(8, 256 / (2 + int(amt*10 + 0.5))) // 8..128
 		fmt.sbprintf(fb, "lutrgb=r='trunc(val/%d)*%d':g='trunc(val/%d)*%d':b='trunc(val/%d)*%d'", step, step, step, step, step, step)
+	case FX_INVERT:
+		fmt.sbprintf(fb, "negate")
+	case FX_WAVE:
+		amp := amt * 18
+		hz := e.speed <= 0 ? f32(2) : e.speed
+		fmt.sbprintf(fb, "scale=iw*1.12:ih*1.08,crop=%d:%d:x='(in_w-out_w)/2+%.1f*sin(2*PI*Y/48+2*PI*t*%.2f)':y='(in_h-out_h)/2'",
+			W, H, amp, hz)
+	case FX_HUE:
+		fmt.sbprintf(fb, "hue=h=%.1f", amt*360)
+	case FX_GLOW:
+		fmt.sbprintf(fb, "split[glA%d][glB%d];[glB%d]boxblur=%.1f:1[glBb%d];[glA%d][glBb%d]blend=all_mode=screen:all_opacity=%.2f",
+			k, k, k, 4.0+amt*10, k, k, k, 0.28+amt*0.55)
+	case FX_KALEIDO:
+		fmt.sbprintf(fb, "crop=iw/2:ih/2:iw/4:ih/4,split[ka%d][kb%d];[kb%d]hflip[kbh%d];[ka%d][kbh%d]hstack[ktop%d];[ktop%d]split[kt%d][kb2%d];[kb2%d]vflip[kbv%d];[kt%d][kbv%d]vstack,scale=%d:%d",
+			k, k, k, k, k, k, k, k, k, k, k, k, k, k, W, H)
+	case FX_SCAN:
+		hh := max(2, H / (4 + int(amt*12 + 0.5)))
+		hh -= hh % 2
+		if hh < 2 do hh = 2
+		fmt.sbprintf(fb, "scale=%d:%d:flags=neighbor,scale=%d:%d:flags=neighbor,eq=brightness=%.2f", W, hh, W, H, -amt*0.08)
+	case FX_EDGE:
+		fmt.sbprintf(fb, "edgedetect=low=%.2f:high=%.2f:mode=colormix", 0.05+amt*0.15, 0.18+amt*0.40)
 	case:
 		fmt.sbprintf(fb, "copy")
 	}

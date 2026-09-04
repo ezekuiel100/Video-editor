@@ -1277,7 +1277,7 @@ export_previa_sempre_emite_vpout :: proc(t: ^testing.T) {
 export_fx_novos_usam_filtros_baratos :: proc(t: ^testing.T) {
 	t_export_reset()
 	add_seg(0, 0, 0, 20, 0)
-	kinds := []int{ FX_PIXEL, FX_BLUR, FX_GRAIN, FX_MIRROR, FX_SHARP, FX_SPOT, FX_SHAKE, FX_POSTER }
+	kinds := []int{ FX_PIXEL, FX_BLUR, FX_GRAIN, FX_MIRROR, FX_SHARP, FX_SPOT, FX_SHAKE, FX_POSTER, FX_INVERT, FX_WAVE, FX_HUE, FX_GLOW, FX_KALEIDO, FX_SCAN, FX_EDGE }
 	nfx = len(kinds)
 	for k, i in kinds {
 		fxsegs[i] = FxSeg{ kind = k, track = 1, start = f32(i) * 2, dur = 1.5, amount = 0.5, radius = 0.4, speed = 8 }
@@ -1291,6 +1291,10 @@ export_fx_novos_usam_filtros_baratos :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(g, "vignette=angle="), "holofote")
 	testing.expect(t, strings.contains(g, "sin(2*PI*t"), "tremor")
 	testing.expect(t, strings.contains(g, "lutrgb="), "posterizar")
+	testing.expect(t, strings.contains(g, "negate"), "inverter")
+	testing.expect(t, strings.contains(g, "hue=h="), "matiz")
+	testing.expect(t, strings.contains(g, "blend=all_mode=screen"), "brilho")
+	testing.expect(t, strings.contains(g, "edgedetect="), "contorno")
 	testing.expect(t, !strings.contains(g, "geq=r="), "efeitos novos não usam geq RGB")
 }
 
