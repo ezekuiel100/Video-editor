@@ -896,8 +896,60 @@ trans_mode_do_painel_mapeia_os_cortes :: proc(t: ^testing.T) {
 	testing.expect(t, trans_mode_from_panel(3) == TRANS_GHOST, "tile 3 = orgânico")
 	testing.expect(t, trans_mode_from_panel(4) == TRANS_WIPE_L, "tile 4 = wipe esquerda")
 	testing.expect(t, trans_mode_from_panel(14) == TRANS_ZOOM, "tile 14 = zoom")
+	testing.expect(t, trans_mode_from_panel(15) == TRANS_SPIN, "tile 15 = giro")
+	testing.expect(t, trans_mode_from_panel(16) == TRANS_WHIP, "tile 16 = whip")
+	testing.expect(t, trans_mode_from_panel(17) == TRANS_GLITCH, "tile 17 = glitch")
+	testing.expect(t, trans_mode_from_panel(21) == TRANS_SHAKE, "tile 21 = tremor")
 	testing.expect(t, trans_panel_is_cut(8) && !trans_panel_is_cut(1), "deslizar é de corte; fade in não")
 	testing.expect(t, trans_is_mask(TRANS_IRIS) && trans_is_slide(TRANS_SLIDE_U), "famílias")
+	testing.expect(t, trans_is_mask(TRANS_CLOCK) && trans_is_slide(TRANS_WHIP), "relógio=máscara, whip=deslize")
+}
+
+@(test)
+export_giro_usa_rotate :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)
+	b := add_seg(1, 4, 0, 3)
+	segs[b].trans = 0.4
+	segs[b].trans_mode = TRANS_SPIN
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "rotate=a="), "giro anima rotate")
+	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.800"), "giro não dissolve")
+}
+
+@(test)
+export_glitch_usa_rgbashift :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)
+	b := add_seg(1, 4, 0, 3)
+	segs[b].trans = 0.4
+	segs[b].trans_mode = TRANS_GLITCH
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "rgbashift="), "glitch usa rgbashift")
+}
+
+@(test)
+export_relogio_e_mascara_geq :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)
+	b := add_seg(1, 4, 0, 3)
+	segs[b].trans = 1
+	segs[b].trans_mode = TRANS_CLOCK
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "atan2"), "wipe de relógio")
+	testing.expect(t, strings.contains(g, "alphamerge"), "máscara via alphamerge")
+}
+
+@(test)
+export_zoom_out_cresce_o_clipe_que_sai :: proc(t: ^testing.T) {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)
+	b := add_seg(1, 4, 0, 3)
+	segs[b].trans = 1
+	segs[b].trans_mode = TRANS_ZOOM_OUT
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "1+0.85"), "A cresce")
+	testing.expect(t, strings.contains(g, "1.85-0.85"), "B encolhe")
 }
 
 // ---------- dissolve orgânico: CUSTO do geq (não só o visual) ----------

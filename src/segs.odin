@@ -113,6 +113,13 @@ TRANS_SLIDE_D  :: 9
 TRANS_IRIS     :: 10
 TRANS_FLASH    :: 11
 TRANS_ZOOM     :: 12
+TRANS_SPIN     :: 13 // giro 360° (CapCut / TikTok)
+TRANS_WHIP     :: 14 // whip pan rápido
+TRANS_GLITCH   :: 15 // glitch RGB
+TRANS_FLIP     :: 16 // flip horizontal (vira a página)
+TRANS_ZOOM_OUT :: 17 // zoom inverso (afasta)
+TRANS_CLOCK    :: 18 // wipe de relógio
+TRANS_SHAKE    :: 19 // tremor no corte
 
 // tile do painel: 0 dissolver | 1 fade in | 2 fade out | 3 orgânico | 4+ = TRANS_* + 2
 trans_panel_is_cut :: proc(kind: int) -> bool { return kind == 0 || kind == 3 || kind >= 4 }
@@ -125,16 +132,20 @@ trans_mode_from_panel :: proc(kind: int) -> int {
 	return TRANS_DISSOLVE
 }
 trans_is_mask :: proc(m: int) -> bool {
-	return m == TRANS_GHOST || (m >= TRANS_WIPE_L && m <= TRANS_WIPE_D) || m == TRANS_IRIS
+	return m == TRANS_GHOST || (m >= TRANS_WIPE_L && m <= TRANS_WIPE_D) || m == TRANS_IRIS || m == TRANS_CLOCK
 }
-trans_is_slide :: proc(m: int) -> bool { return m >= TRANS_SLIDE_L && m <= TRANS_SLIDE_D }
+trans_is_slide :: proc(m: int) -> bool { return (m >= TRANS_SLIDE_L && m <= TRANS_SLIDE_D) || m == TRANS_WHIP }
 trans_is_dissolve :: proc(m: int) -> bool { return m == TRANS_DISSOLVE }
+trans_tiktok_fast :: proc(m: int) -> bool {
+	return m == TRANS_WHIP || m == TRANS_GLITCH || m == TRANS_SHAKE || m == TRANS_SPIN || m == TRANS_FLIP
+}
 trans_slide_dir :: proc(m: int) -> (dx, dy: f32) {
 	switch m {
 	case TRANS_SLIDE_L: return -1, 0
 	case TRANS_SLIDE_R: return  1, 0
 	case TRANS_SLIDE_U: return  0, -1
 	case TRANS_SLIDE_D: return  0,  1
+	case TRANS_WHIP:    return -1.25, 0 // overshoot: o whip “passa” do quadro
 	}
 	return 0, 0
 }
@@ -153,6 +164,13 @@ trans_mode_name :: proc(m: int) -> cstring {
 	case TRANS_IRIS:     return "Íris"
 	case TRANS_FLASH:    return "Flash"
 	case TRANS_ZOOM:     return "Zoom"
+	case TRANS_SPIN:     return "Giro"
+	case TRANS_WHIP:     return "Whip"
+	case TRANS_GLITCH:   return "Glitch"
+	case TRANS_FLIP:     return "Flip"
+	case TRANS_ZOOM_OUT: return "Zoom out"
+	case TRANS_CLOCK:    return "Relógio"
+	case TRANS_SHAKE:    return "Tremor"
 	}
 	return "Transição"
 }

@@ -13,7 +13,13 @@ trans_badge_col :: proc(mode: int) -> rl.Color {
 	case TRANS_SLIDE_L, TRANS_SLIDE_R, TRANS_SLIDE_U, TRANS_SLIDE_D: return { 140, 220, 160, 255 }
 	case TRANS_IRIS:   return { 190, 150, 230, 255 }
 	case TRANS_FLASH:  return { 250, 245, 230, 255 }
-	case TRANS_ZOOM:   return { 250, 180, 110, 255 }
+	case TRANS_ZOOM, TRANS_ZOOM_OUT: return { 250, 180, 110, 255 }
+	case TRANS_SPIN:   return { 255, 160, 200, 255 }
+	case TRANS_WHIP:   return { 120, 200, 255, 255 }
+	case TRANS_GLITCH: return { 90, 255, 200, 255 }
+	case TRANS_FLIP:   return { 180, 180, 255, 255 }
+	case TRANS_CLOCK:  return { 230, 200, 120, 255 }
+	case TRANS_SHAKE:  return { 255, 140, 100, 255 }
 	}
 	return { 248, 214, 122, 255 } // dissolver
 }
@@ -40,9 +46,26 @@ draw_trans_badge_mark :: proc(ix0, iy0, ix1, iy1: f32, mode: int, rc: rl.Color) 
 		cx := (ix0+ix1)/2; cy := (iy0+iy1)/2
 		rl.DrawLineEx({ cx, iy0 }, { cx, iy1 }, 1.5, rc)
 		rl.DrawLineEx({ ix0, cy }, { ix1, cy }, 1.5, rc)
-	case TRANS_ZOOM:
+	case TRANS_ZOOM, TRANS_ZOOM_OUT:
 		rl.DrawRectangleLinesEx({ ix0 + 1, iy0 + 1, (ix1-ix0)*0.7, (iy1-iy0)*0.7 }, 1.2, rc)
 		rl.DrawRectangleRec({ ix0 + (ix1-ix0)*0.35, iy0 + (iy1-iy0)*0.35, (ix1-ix0)*0.5, (iy1-iy0)*0.5 }, rc)
+	case TRANS_SPIN:
+		rl.DrawCircleLines(i32((ix0+ix1)/2), i32((iy0+iy1)/2), min(ix1-ix0, iy1-iy0)*0.32, rc)
+	case TRANS_WHIP:
+		rl.DrawLineEx({ ix0 + 1, (iy0+iy1)/2 }, { ix1 - 1, (iy0+iy1)/2 }, 1.6, rc)
+	case TRANS_GLITCH:
+		rl.DrawRectangleRec({ ix0, iy0, (ix1-ix0)*0.45, (iy1-iy0)*0.4 }, rc)
+		rl.DrawRectangleRec({ ix0 + (ix1-ix0)*0.4, iy0 + (iy1-iy0)*0.45, (ix1-ix0)*0.55, (iy1-iy0)*0.4 }, rc)
+	case TRANS_FLIP:
+		mid := ix0 + (ix1-ix0)*0.5
+		rl.DrawLineEx({ mid, iy0 }, { mid, iy1 }, 1.4, rc)
+	case TRANS_CLOCK:
+		cx := (ix0+ix1)/2; cy := (iy0+iy1)/2
+		rl.DrawCircleLines(i32(cx), i32(cy), min(ix1-ix0, iy1-iy0)*0.28, rc)
+		rl.DrawLineEx({ cx, cy }, { cx, iy0 + 1 }, 1.2, rc)
+	case TRANS_SHAKE:
+		rl.DrawLineEx({ ix0, iy0 + 2 }, { ix1, iy1 - 2 }, 1.4, rc)
+		rl.DrawLineEx({ ix0, iy1 - 2 }, { ix1, iy0 + 2 }, 1.4, rc)
 	case:
 		rl.DrawTriangle({ ix0, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc)
 		rl.DrawTriangle({ ix1, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc)

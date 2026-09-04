@@ -13,7 +13,7 @@ Editor de vídeo não-linear, escrito em **[Odin](https://odin-lang.org/)** com 
   - Dividir no playhead (`S`), ferramenta lâmina (`B`), aparar bordas (arrastar), *ripple* / anti-sobreposição.
 - **Bin de mídia** — importação assíncrona (probe + decode + áudio numa thread por mídia), miniaturas, arrastar pra timeline.
 - **Filmstrip de miniaturas** e **forma de onda real** ao longo de cada clipe.
-- **Transições e fades** — dissolver, dissolve orgânico, wipes (4 direções), deslizar (4 direções), íris, flash, zoom; fade de vídeo (preto) de entrada/saída; fades de áudio.
+- **Transições e fades** — dissolver, dissolve orgânico, wipes (4 direções), deslizar (4 direções), íris, flash, zoom, giro, whip, glitch, flip, zoom out, relógio, tremor; fade de vídeo (preto) de entrada/saída; fades de áudio.
 - **Transform no preview** — mover, escalar, recorte (crop), distorção; tudo WYSIWYG com o export.
 - **Controles de áudio por segmento** — volume (0–200%), mudo, fade in/out.
 - **Voz para texto** — transcreve o áudio do clipe (Whisper local, modelo **Máximo** / `small`) e cria uma faixa de legendas sincronizada. GPU NVIDIA se houver. Depois de transcrever (ou no inspector da faixa → **Editar falas**) dá para corrigir, apagar ou acrescentar falas. Estilos **YouTube** (caixa), **CapCut** (contorno + maiúsculas), **Marca** (marcador amarelo) e **Sombra**. A barra mostra o percentual real (download, extração, Whisper). Motor + `ggml-small.bin` vêm em `stt/` (instalador / `fetch-stt.ps1`); o pacote CUDA baixa na primeira vez.
@@ -21,7 +21,7 @@ Editor de vídeo não-linear, escrito em **[Odin](https://odin-lang.org/)** com 
 - **Vídeos longos** — clipes de até ~5 h via *streaming* (decode ao vivo) + áudio sob demanda em janela móvel.
 - **Decode por GPU** — usa `h264_cuvid` em placas NVIDIA no *streaming* e no *scrub*, com *fallback* automático por software. O cache em RAM é **sempre por software** de propósito: o NVDEC entrega alguns frames a mais em certos arquivos (1221 em vez de 1218 num teste), e o cache indexa por `int(t*fps)` assumindo frames uniformes — o desencontro virava *judder*.
 - **Export** — `ffmpeg filter_complex` reproduzindo transforms/fades/velocidade do preview.
-- **Screenshot** do quadro atual (PNG/JPG).
+- **Screenshot** do quadro atual (PNG/JPG) — o arquivo entra no **bin** para usar na timeline.
 - **Salvar / abrir projeto** (`.ovp`), **desfazer/refazer**.
 
 ---

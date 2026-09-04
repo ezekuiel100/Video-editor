@@ -431,6 +431,8 @@ export_wipe_mask :: proc(fb: ^strings.Builder, start2, d: f32, invert: bool, tag
 		M = fmt.tprintf("min(1\\,max(0\\,((Y/H)-(1-(%s)))/0.04))", P)
 	case TRANS_IRIS:
 		M = fmt.tprintf("min(1\\,max(0\\,((%s)*hypot(0.5*(W/H)\\,0.5)-hypot((X/W-0.5)*(W/H)\\,Y/H-0.5))/0.04))", P)
+	case TRANS_CLOCK:
+		M = fmt.tprintf("min(1\\,max(0\\,((%s)-mod(atan2(Y/H-0.5\\,X/W-0.5)/PI/2+0.75\\,1))/0.02))", P)
 	case:
 		M = fmt.tprintf("min(1\\,max(0\\,((%s)-(X/W))/0.04))", P)
 	}
@@ -462,6 +464,48 @@ export_overlay_xy :: proc(px, py, in_dx, in_dy, in_t0, in_d, out_dx, out_dy, out
 		y = fmt.tprintf("%s+if(between(t\\,%.3f\\,%.3f)\\,(%.4f)*((t-%.3f)/%.3f)*main_h\\,0)", y, out_t0, out_t0+out_d, out_dy, out_t0, out_d)
 	}
 	return
+}
+
+export_shake_xy :: proc(x, y: string, t0, d: f32) -> (string, string) {
+	if d <= 0.01 do return x, y
+	nx := fmt.tprintf("%s+if(between(t\\,%.3f\\,%.3f)\\,0.045*sin(PI*(t-%.3f)/%.3f)*sin(t*62)*main_w\\,0)", x, t0, t0+d, t0, d)
+	ny := fmt.tprintf("%s+if(between(t\\,%.3f\\,%.3f)\\,0.045*sin(PI*(t-%.3f)/%.3f)*cos(t*49)*main_h\\,0)", y, t0, t0+d, t0, d)
+	return nx, ny
+}
+
+export_emit_spin :: proc(fb: ^strings.Builder, t0, d, sign: f32) {
+	if d <= 0.01 do return
+	fmt.sbprintf(fb, ",rotate=a='if(between(t\\,%.3f\\,%.3f)\\,%.4f*2*PI*(t-%.3f)/%.3f\\,0)':c=none:ow='rotw(a)':oh='roth(a)'",
+		t0, t0+d, sign, t0, d)
+}
+
+export_emit_flip :: proc(fb: ^strings.Builder, t0, d: f32, outgoing: bool) {
+	if d <= 0.01 do return
+	// A: 1ª metade, largura = |cos(pi*p)|; B: 2ª metade, |cos(pi*(1-p))|
+	if outgoing {
+		fmt.sbprintf(fb, ",scale=w='max(2\\,trunc(iw*max(0.02\\,abs(if(lt(t\\,%.3f+%.3f/2)\\,cos(PI*(t-%.3f)/%.3f)\\,0)))/2)*2)':h=ih:eval=frame",
+			t0, d, t0, d)
+	} else {
+		fmt.sbprintf(fb, ",scale=w='max(2\\,trunc(iw*max(0.02\\,abs(if(gte(t\\,%.3f+%.3f/2)\\,cos(PI*(1-(t-%.3f)/%.3f))\\,0)))/2)*2)':h=ih:eval=frame",
+			t0, d, t0, d)
+	}
+}
+
+export_emit_glitch :: proc(fb: ^strings.Builder, t0, d: f32) {
+	if d <= 0.01 do return
+	fmt.sbprintf(fb, ",rgbashift=rh='if(between(t\\,%.3f\\,%.3f)\\,18*sin((t-%.3f)*90)\\,0)':bv='if(between(t\\,%.3f\\,%.3f)\\,-14*cos((t-%.3f)*70)\\,0)'",
+		t0, t0+d, t0, t0, t0+d, t0)
+}
+
+export_emit_zoom_out :: proc(fb: ^strings.Builder, t0, d: f32, grow: bool) {
+	if d <= 0.01 do return
+	if grow {
+		fmt.sbprintf(fb, ",scale=w='max(2\\,trunc(iw*(1+0.85*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':h='max(2\\,trunc(ih*(1+0.85*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':eval=frame",
+			t0, d, t0, d)
+	} else {
+		fmt.sbprintf(fb, ",scale=w='max(2\\,trunc(iw*(1.85-0.85*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':h='max(2\\,trunc(ih*(1.85-0.85*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':eval=frame",
+			t0, d, t0, d)
+	}
 }
 
 // TREMO do Pan & Zoom: o zoompan amostra nearest-neighbor em coords inteiras. O preview
@@ -924,8 +968,16 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	slide_in_dx, slide_in_dy, slide_in_t0, slide_in_d: [MAX_SEGS]f32
 	slide_out_dx, slide_out_dy, slide_out_t0, slide_out_d: [MAX_SEGS]f32
 	zoom_t0, zoom_d: [MAX_SEGS]f32
+	zoom_out_t0, zoom_out_d: [MAX_SEGS]f32
+	zoom_out_grow: [MAX_SEGS]bool // true = A cresce; false = B encolhe de 1.85
 	flash_t0, flash_d: [MAX_SEGS]f32
 	flash_in, flash_out: [MAX_SEGS]bool
+	spin_t0, spin_d, spin_sign: [MAX_SEGS]f32 // sign +1 sai, -1 entra
+	flip_t0, flip_d: [MAX_SEGS]f32
+	flip_out: [MAX_SEGS]bool // true = A (1ª metade)
+	glitch_t0, glitch_d: [MAX_SEGS]f32
+	shake_t0, shake_d: [MAX_SEGS]f32
+	shake_in, shake_out: [MAX_SEGS]bool
 	for i in 0 ..< nsegs {
 		d := seg_trans(i)
 		if d > 0 {
@@ -954,9 +1006,25 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				}
 			case mode == TRANS_ZOOM:
 				zoom_t0[i] = t0; zoom_d[i] = d
+			case mode == TRANS_ZOOM_OUT:
+				zoom_out_t0[i] = t0; zoom_out_d[i] = d; zoom_out_grow[i] = false
+				if a >= 0 { zoom_out_t0[a] = t0; zoom_out_d[a] = d; zoom_out_grow[a] = true }
 			case mode == TRANS_FLASH:
 				flash_t0[i] = t0; flash_d[i] = d; flash_in[i] = true
 				if a >= 0 { flash_t0[a] = t0; flash_d[a] = d; flash_out[a] = true }
+			case mode == TRANS_SPIN:
+				spin_t0[i] = t0; spin_d[i] = d; spin_sign[i] = -1
+				if a >= 0 { spin_t0[a] = t0; spin_d[a] = d; spin_sign[a] = 1 }
+			case mode == TRANS_FLIP:
+				flip_t0[i] = t0; flip_d[i] = d; flip_out[i] = false
+				if a >= 0 { flip_t0[a] = t0; flip_d[a] = d; flip_out[a] = true }
+			case mode == TRANS_GLITCH:
+				glitch_t0[i] = t0; glitch_d[i] = d
+				tfin[i] = max(tfin[i], d)
+				if a >= 0 { glitch_t0[a] = t0; glitch_d[a] = d; tfout[a] = max(tfout[a], d) }
+			case mode == TRANS_SHAKE:
+				shake_t0[i] = t0; shake_d[i] = d; shake_in[i] = true
+				if a >= 0 { shake_t0[a] = t0; shake_d[a] = d; shake_out[a] = true }
 			}
 		}
 	}
@@ -1166,6 +1234,8 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
 				if flash_out[i] do fmt.sbprintf(&fb, ",fade=t=out:st=%.3f:d=%.3f:c=white", flash_t0[i], flash_d[i]/2)
 				if flash_in[i]  do fmt.sbprintf(&fb, ",fade=t=in:st=%.3f:d=%.3f:c=white", flash_t0[i]+flash_d[i]/2, flash_d[i]/2)
+				if shake_out[i] do fmt.sbprintf(&fb, ",fade=t=out:st=%.3f:d=%.3f:alpha=1", shake_t0[i]+shake_d[i]*0.5, max(shake_d[i]*0.08, 0.02))
+				if shake_in[i]  do fmt.sbprintf(&fb, ",fade=t=in:st=%.3f:d=%.3f:alpha=1", shake_t0[i]+shake_d[i]*0.5, max(shake_d[i]*0.08, 0.02))
 				gmask := 0
 				if trans_is_mask(sg.trans_mode) {
 					if td := seg_trans(i); td > 0.01 do export_emit_cut_mask(&fb, start2, td, false, false, vc*2+gmask, W, H, sg.trans_mode)
@@ -1177,9 +1247,14 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 					fmt.sbprintf(&fb, ",scale=w='max(2\\,trunc(iw*(0.22+0.78*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':h='max(2\\,trunc(ih*(0.22+0.78*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':eval=frame",
 						zoom_t0[i], zoom_d[i], zoom_t0[i], zoom_d[i])
 				}
+				export_emit_zoom_out(&fb, zoom_out_t0[i], zoom_out_d[i], zoom_out_grow[i])
+				export_emit_spin(&fb, spin_t0[i], spin_d[i], spin_sign[i])
+				export_emit_flip(&fb, flip_t0[i], flip_d[i], flip_out[i])
+				export_emit_glitch(&fb, glitch_t0[i], glitch_d[i])
 				fmt.sbprintf(&fb, "[v%d];", vc)
 				nb := fmt.tprintf("c%d", vc)
 				ox, oy := export_overlay_xy(0, 0, slide_in_dx[i], slide_in_dy[i], slide_in_t0[i], slide_in_d[i], slide_out_dx[i], slide_out_dy[i], slide_out_t0[i], slide_out_d[i])
+				ox, oy = export_shake_xy(ox, oy, shake_t0[i], shake_d[i])
 				fmt.sbprintf(&fb, "[%s][v%d]overlay=x='%s':y='%s':enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
 					vlabel, vc, ox, oy, start2, tend, nb)
 				vlabel = nb; vc += 1
@@ -1194,7 +1269,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			// rgba só quando o overlay PRECISA de alpha (opacidade, giro, fade, dissolver).
 			// No recorte simples o yuv420p evita 4 bytes/pixel + conversão no overlay — o
 			// caminho mais comum (cortar e exportar) saía ~1.5–2× mais lento à toa.
-			need_a := op < 0.999 || abs(sg.rot) > 0.5 || fin > 0.01 || fout > 0.01 || sg.vfin > 0.01 || sg.vfout > 0.01 || trans_is_mask(sg.trans_mode) || ghost_out_d[i] > 0.01
+			need_a := op < 0.999 || abs(sg.rot) > 0.5 || fin > 0.01 || fout > 0.01 || sg.vfin > 0.01 || sg.vfout > 0.01 || trans_is_mask(sg.trans_mode) || ghost_out_d[i] > 0.01 || spin_d[i] > 0.01 || flip_d[i] > 0.01 || glitch_d[i] > 0.01
 			pix := need_a ? "rgba" : "yuv420p"
 			// vídeo consome (in_off-hd)..(in_off+dur*sp+tl) — hd=pré-roll, tl=pós-roll do
 			// dissolver; imagem usa o input em loop. setpts posiciona em start2.
@@ -1264,6 +1339,8 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			export_trans_fades(&fb, start2, tend, fin, fout, sg.start, sg.start+sg.dur, sg.vfin, sg.vfout)
 			if flash_out[i] do fmt.sbprintf(&fb, ",fade=t=out:st=%.3f:d=%.3f:c=white", flash_t0[i], flash_d[i]/2)
 			if flash_in[i]  do fmt.sbprintf(&fb, ",fade=t=in:st=%.3f:d=%.3f:c=white", flash_t0[i]+flash_d[i]/2, flash_d[i]/2)
+			if shake_out[i] do fmt.sbprintf(&fb, ",fade=t=out:st=%.3f:d=%.3f:alpha=1", shake_t0[i]+shake_d[i]*0.5, max(shake_d[i]*0.08, 0.02))
+			if shake_in[i]  do fmt.sbprintf(&fb, ",fade=t=in:st=%.3f:d=%.3f:alpha=1", shake_t0[i]+shake_d[i]*0.5, max(shake_d[i]*0.08, 0.02))
 			gmask := 0
 			if trans_is_mask(sg.trans_mode) {
 				if td := seg_trans(i); td > 0.01 do export_emit_cut_mask(&fb, start2, td, false, false, vc*2+gmask, segW, segH, sg.trans_mode)
@@ -1275,9 +1352,14 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				fmt.sbprintf(&fb, ",scale=w='max(2\\,trunc(iw*(0.22+0.78*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':h='max(2\\,trunc(ih*(0.22+0.78*min(1\\,max(0\\,(t-%.3f)/%.3f))))/2)*2':eval=frame",
 					zoom_t0[i], zoom_d[i], zoom_t0[i], zoom_d[i])
 			}
+			export_emit_zoom_out(&fb, zoom_out_t0[i], zoom_out_d[i], zoom_out_grow[i])
+			export_emit_spin(&fb, spin_t0[i], spin_d[i], spin_sign[i])
+			export_emit_flip(&fb, flip_t0[i], flip_d[i], flip_out[i])
+			export_emit_glitch(&fb, glitch_t0[i], glitch_d[i])
 			fmt.sbprintf(&fb, "[v%d];", vc)
 			nb := fmt.tprintf("c%d", vc)
 			ox, oy := export_overlay_xy(sg.px, sg.py, slide_in_dx[i], slide_in_dy[i], slide_in_t0[i], slide_in_d[i], slide_out_dx[i], slide_out_dy[i], slide_out_t0[i], slide_out_d[i])
+			ox, oy = export_shake_xy(ox, oy, shake_t0[i], shake_d[i])
 			fmt.sbprintf(&fb, "[%s][v%d]overlay=x='%s':y='%s':enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
 				vlabel, vc, ox, oy, start2, tend, nb)
 			vlabel = nb; vc += 1

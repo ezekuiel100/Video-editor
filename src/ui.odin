@@ -1357,6 +1357,38 @@ draw_trans_icon :: proc(box: rl.Rectangle, kind: int) {
 		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
 		rl.DrawRectangleLinesEx({ ix + iw*0.22, iy + ih*0.18, iw*0.56, ih*0.64 }, 1.5, rl.WHITE)
 		rl.DrawRectangleRec({ ix + iw*0.32, iy + ih*0.30, iw*0.36, ih*0.40 }, b_col)
+	case 15: // giro
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		rl.DrawCircleLines(i32(ix + iw/2), i32(iy + ih/2), min(iw, ih)*0.28, rl.WHITE)
+		rl.DrawTriangle({ ix + iw*0.72, iy + ih*0.22 }, { ix + iw*0.86, iy + ih*0.18 }, { ix + iw*0.80, iy + ih*0.36 }, rl.WHITE)
+	case 16: // whip
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		rl.DrawRectangleRec({ ix + iw*0.35, iy, iw*0.65, ih }, rl.Color{ 150, 90, 120, 180 })
+		rl.DrawLineEx({ ix + 8, iy + ih/2 }, { ix + iw - 8, iy + ih/2 }, 2.2, rl.WHITE)
+		rl.DrawTriangle({ ix + iw - 8, iy + ih/2 }, { ix + iw - 18, iy + ih*0.28 }, { ix + iw - 18, iy + ih*0.72 }, rl.WHITE)
+	case 17: // glitch
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		rl.DrawRectangleRec({ ix + 4, iy + 6, iw*0.7, ih*0.35 }, rl.Color{ 255, 70, 90, 200 })
+		rl.DrawRectangleRec({ ix + iw*0.28, iy + ih*0.42, iw*0.7, ih*0.4 }, rl.Color{ 70, 220, 255, 200 })
+	case 18: // flip
+		rl.DrawRectangleRec({ ix, iy, iw*0.42, ih }, a_col)
+		rl.DrawRectangleRec({ ix + iw*0.58, iy, iw*0.42, ih }, b_col)
+		rl.DrawLineEx({ ix + iw/2, iy + 4 }, { ix + iw/2, iy + ih - 4 }, 1.6, rl.WHITE)
+	case 19: // zoom out
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, b_col)
+		rl.DrawRectangleLinesEx({ ix + iw*0.08, iy + ih*0.08, iw*0.84, ih*0.84 }, 1.5, rl.WHITE)
+		rl.DrawRectangleRec({ ix + iw*0.28, iy + ih*0.26, iw*0.44, ih*0.48 }, a_col)
+	case 20: // relógio
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		cx := ix + iw/2; cy := iy + ih/2; r := min(iw, ih)*0.32
+		rl.DrawCircleV({ cx, cy }, r, b_col)
+		rl.DrawCircleLines(i32(cx), i32(cy), r, rl.WHITE)
+		rl.DrawLineEx({ cx, cy }, { cx, cy - r + 2 }, 2, rl.WHITE)
+		rl.DrawLineEx({ cx, cy }, { cx + r*0.55, cy + r*0.2 }, 2, rl.WHITE)
+	case 21: // tremor
+		rl.DrawRectangleRec({ ix - 2, iy + 4, iw, ih }, a_col)
+		rl.DrawRectangleRec({ ix + 4, iy - 2, iw, ih }, b_col)
+		rl.DrawRectangleLinesEx({ ix, iy, iw, ih }, 1.4, rl.WHITE)
 	}
 }
 
@@ -1654,6 +1686,8 @@ draw_transitions_panel :: proc(r: rl.Rectangle) {
 		{"Wipe esquerda", 4}, {"Wipe direita", 5}, {"Wipe cima", 6}, {"Wipe baixo", 7},
 		{"Deslizar esquerda", 8}, {"Deslizar direita", 9}, {"Deslizar cima", 10}, {"Deslizar baixo", 11},
 		{"Íris", 12}, {"Flash", 13}, {"Zoom", 14},
+		{"Giro", 15}, {"Whip", 16}, {"Glitch", 17}, {"Flip", 18},
+		{"Zoom out", 19}, {"Relógio", 20}, {"Tremor", 21},
 	}
 	tw: f32 = 118; th: f32 = 64; gap: f32 = 10; lblh: f32 = 22
 	cols := max(1, int((r.width - gap) / (tw + gap)))

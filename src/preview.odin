@@ -40,7 +40,7 @@ uniform vec2  rgb;      // EFEITO: separação RGB (deslocamento em coords de te
 uniform float wipeEdge;    // progresso 0..1 da máscara (orgânico / wipe / íris)
 uniform float wipeFeather; // 0 = desligado; maciez da fumaça/tinta (orgânico)
 uniform float wipeInv;     // 1 = clipe que SAI (máscara invertida)
-uniform float wipeKind;    // 0=off/orgânico | 2..5 wipe L/R/U/D | 10 íris
+uniform float wipeKind;    // 0=off/orgânico | 2..5 wipe L/R/U/D | 10 íris | 18 relógio
 uniform float fxKind;      // efeito de faixa: 0 off/distort/rgb | 2 pixel | 3 blur | 4 grain | 5 mirror | 6 sharp | 7 spot | 8 shake | 9 poster
 uniform float fxAmt;       // intensidade 0..1 do efeito de faixa
 uniform float fxTime;      // tempo (s) p/ granulação/tremor
@@ -165,11 +165,15 @@ void main() {
             m = 1.0 - smoothstep(e - f, e + f, local.y);
         } else if (wipeKind < 5.5) {       // wipe baixo
             m = smoothstep((1.0 - e) - f, (1.0 - e) + f, local.y);
-        } else {                           // íris: círculo que cresce do centro
+        } else if (wipeKind < 10.5) {      // íris: círculo que cresce do centro
             vec2 dd = local - vec2(0.5);
             float rr = length(vec2(dd.x * aspect, dd.y));
             float rad = e * length(vec2(0.5 * aspect, 0.5));
             m = 1.0 - smoothstep(rad - 0.03, rad + 0.03, rr);
+        } else {                           // relógio: varre em torno do centro
+            float ang = atan(local.y - 0.5, local.x - 0.5);
+            float u = fract(ang / 6.2831853 + 0.25);
+            m = 1.0 - smoothstep(e - 0.02, e + 0.02, u);
         }
         if (wipeInv > 0.5) m = 1.0 - m;
         a *= m;
@@ -304,8 +308,8 @@ take_screenshot :: proc(out: string) {
 		if p, e := os.process_start(os.Process_Desc{ command = cmd }); e == nil {
 			state, _ := os.process_wait(p) // 1 frame: rápido
 			if state.exited && state.exit_code == 0 {
-				set_toast(rl.TextFormat("Screenshot salvo: %s", cs(out)))
 				shot_n += 1
+				import_screenshot_to_bin(out)
 			} else {
 				set_toast("Falha ao salvar screenshot")
 			}
@@ -329,10 +333,20 @@ take_screenshot :: proc(out: string) {
 	rl.UnloadImage(img)
 	rl.UnloadRenderTexture(rt)
 	if ok {
-		set_toast(rl.TextFormat("Screenshot salvo: %s", cs(out)))
 		shot_n += 1
+		import_screenshot_to_bin(out)
 	} else {
 		set_toast(any ? "Falha ao salvar screenshot" : "Nada no player para capturar")
+	}
+}
+
+// screenshot salvo no disco entra no bin como imagem (sem colocar na timeline)
+import_screenshot_to_bin :: proc(out: string) {
+	slot, _ := import_or_select(out, false)
+	if slot >= 0 {
+		set_toast(rl.TextFormat("Screenshot no bin: %s", cs(out)))
+	} else {
+		set_toast(rl.TextFormat("Screenshot salvo: %s", cs(out)))
 	}
 }
 
@@ -785,7 +799,7 @@ scrub_player_uses_thumb :: proc(c: ^Clip, lt: f32) -> bool {
 // (usado pelo blend da transição: clipe que sai × (1-p), clipe que entra × p).
 // `vt` é o tempo de EXIBIÇÃO (view_t), não o playhead cru — ver view_t.
 // wipe_feather>0 = dissolve orgânico (fumaça + opacidade). wipe_inv>0 = clipe que SAI.
-draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: bool, wipe_edge: f32 = 0, wipe_feather: f32 = 0, wipe_inv: f32 = 0, wipe_kind: f32 = 0, off_x: f32 = 0, off_y: f32 = 0, scl_mul: f32 = 1) {
+draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: bool, wipe_edge: f32 = 0, wipe_feather: f32 = 0, wipe_inv: f32 = 0, wipe_kind: f32 = 0, off_x: f32 = 0, off_y: f32 = 0, scl_mul: f32 = 1, rot_add: f32 = 0, sx_mul: f32 = 1, glitch: f32 = 0) {
 	c := seg_src(i)
 	sg := segs[i]
 	// fade preto (rampa de opacidade) — só na região NORMAL do clipe (não no lead-in de dissolver)
@@ -803,6 +817,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		sg2 := sg; sg2.opacity = op
 		sg2.px += off_x; sg2.py += off_y
 		if scl_mul > 0.01 do sg2.scale = (sg2.scale <= 0 ? f32(1) : sg2.scale) * scl_mul
+		sg2.rot += rot_add
 		src_t := seg_local(i, vt)
 		draw_text_into(c, sg2, fx, fy, fw, fh, src_t)
 		if sel_box && i == selected {
@@ -840,6 +855,11 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		}
 	}
 	s := (sg.scale <= 0 ? f32(1) : sg.scale) * (scl_mul <= 0.01 ? f32(1) : scl_mul)
+	ox := off_x; oy := off_y
+	if glitch > 0.01 {
+		ox += 0.014 * math.sin(vt * 83)
+		oy += 0.010 * math.cos(vt * 67)
+	}
 	// RECORTE: fonte = sub-região; ajusta a REGIÃO recortada ao canvas preservando o aspecto dela.
 	// seg_crop_at anima a região no tempo quando zoom_anim (Pan & Zoom); senão = recorte estático.
 	crx, cry, crw, crh := seg_crop_at(i, vt)
@@ -853,8 +873,9 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	src := rl.Rectangle{ cr.x + crx*cr.width, cr.y + cry*cr.height, crw*cr.width, crh*cr.height }
 	cwpx := crw*cr.width; chpx := crh*cr.height
 	tf := min(fw/cwpx, fh/chpx) // ajusta a região recortada ao canvas preservando aspecto
-	dw := cwpx*tf*s; dh := chpx*tf*s
-	ccx := fx + fw/2 + (sg.px + off_x)*fw; ccy := fy + fh/2 + (sg.py + off_y)*fh
+	sx := sx_mul <= 0.01 ? f32(1) : abs(sx_mul)
+	dw := cwpx*tf*s*sx; dh := chpx*tf*s
+	ccx := fx + fw/2 + (sg.px + ox)*fw; ccy := fy + fh/2 + (sg.py + oy)*fh
 	tint := rl.Color{ 255, 255, 255, u8(clamp(op, 0, 1) * 255) }
 	// COR: só o que o clipe tem (aba "Cor"); os clipes de EFEITO não são de cor.
 	efb := sg.fx_bright; efc := sg.fx_contrast; efs := sg.fx_satur
@@ -887,7 +908,11 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 			}
 		}
 	}
-	use_fx := bulge_ok && (fx_any(sg) || af >= 0 || wipe_feather > 0.01 || wipe_kind > 1.5)
+	if glitch > 0.01 {
+		rgb_off.x += glitch * 0.022
+		rgb_off.y -= glitch * 0.016
+	}
+	use_fx := bulge_ok && (fx_any(sg) || af >= 0 || wipe_feather > 0.01 || wipe_kind > 1.5 || glitch > 0.01)
 	if use_fx {
 		br := b_r
 		uv0 := [2]f32{ src.x/tw_, src.y/th_ } // src no espaço da textura EM USO (c.tex ou miniatura)
@@ -922,7 +947,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		rl.SetShaderValue(bulge_shader, fx_loc_ang, &fxa_ang, .FLOAT)
 		rl.BeginShaderMode(bulge_shader)
 	}
-	rl.DrawTexturePro(tex, src, { ccx, ccy, dw, dh }, { dw/2, dh/2 }, sg.rot, tint)
+	rl.DrawTexturePro(tex, src, { ccx, ccy, dw, dh }, { dw/2, dh/2 }, sg.rot + rot_add, tint)
 	if use_fx do rl.EndShaderMode()
 	if sel_box && i == selected {
 		rad := sg.rot * math.PI/180; cs_ := math.cos(rad); sn := math.sin(rad)
@@ -987,6 +1012,33 @@ composite_video :: proc(fx, fy, fw, fh: f32, sel_box: bool) -> bool {
 			} else if mode == TRANS_ZOOM {
 				if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box) }
 				any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, 0.22 + 0.78*p)
+			} else if mode == TRANS_ZOOM_OUT {
+				if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, 1 + 0.85*p) }
+				any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, 1.85 - 0.85*p)
+			} else if mode == TRANS_SPIN {
+				if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, 1, 360*p) }
+				any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, 1, -360*(1-p))
+			} else if mode == TRANS_FLIP {
+				if p < 0.5 {
+					sx := math.cos(p * math.PI) // 1 → 0
+					if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, 1, 0, max(sx, 0.02)) }
+				} else {
+					sx := math.cos((1-p) * math.PI) // 0 → 1
+					any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, 1, 0, max(sx, 0.02))
+				}
+			} else if mode == TRANS_GLITCH {
+				g := 0.35 + 0.65*math.sin(p*math.PI) // pico no meio do corte
+				if a >= 0 { any = true; draw_seg_composited(a, vt, 1-p, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, 1, 0, 1, g) }
+				any = true; draw_seg_composited(tb, vt, p, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, 1, 0, 1, g)
+			} else if mode == TRANS_SHAKE {
+				amp := math.sin(p * math.PI) * 0.045
+				ox := amp * math.sin(vt * 62)
+				oy := amp * math.cos(vt * 49)
+				if p < 0.5 {
+					if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, ox, oy) }
+				} else {
+					any = true; draw_seg_composited(tb, vt, 1, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, ox, oy)
+				}
 			} else if mode == TRANS_FLASH {
 				if p < 0.5 {
 					if a >= 0 { any = true; draw_seg_composited(a, vt, 1, fx, fy, fw, fh, sel_box) }
