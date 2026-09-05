@@ -295,7 +295,7 @@ bin_add_to_timeline :: proc(i: int) {
 	if !media_ready(i) do return
 	tr := free_track_from(track_for_media(i, 0))
 	if tr < 0 { set_toast("Trilha bloqueada"); return }
-	start := free_start(tr, -1, st.playhead, c.dur)
+	start := magnetic ? magnetic_pack(tr, -1, -1, st.playhead, c.dur) : free_start(tr, -1, st.playhead, c.dur)
 	si := add_seg(i, start, 0, c.dur, tr)
 	if si < 0 do return // add_seg já avisa (timeline cheia)
 	selected = si; bin_sel = -1; insp_tab = 0
@@ -1211,6 +1211,121 @@ close_all_gaps :: proc(tr: int) -> int {
 	if n == 1 do set_toast("Vão fechado")
 	else if n > 1 do set_toast(rl.TextFormat("%d vãos fechados", i32(n)))
 	return n
+}
+
+// ---------- timeline magnética ----------
+// Clipes (e efeitos) da mesma trilha ficam empilhados da esquerda, sem vãos.
+// Arrastar REORDENA pela posição do mouse (ponto médio de cada ocupante);
+// soltar do bin / "+" INSERE no ponto e empurra o resto.
+
+MagOcc :: struct { start, dur: f32, si, fi: int }
+
+magnetic_collect :: proc(tr, skip_si, skip_fi: int) -> (occ: [MAX_SEGS + MAX_FX]MagOcc, n: int) {
+	n = 0
+	for i in 0 ..< nsegs {
+		if i == skip_si || !seg_blocks(i) || segs[i].track != tr do continue
+		occ[n] = MagOcc{ segs[i].start, segs[i].dur, i, -1 }
+		n += 1
+	}
+	for k in 0 ..< nfx {
+		if k == skip_fi || fxsegs[k].track != tr do continue
+		occ[n] = MagOcc{ fxsegs[k].start, fxsegs[k].dur, -1, k }
+		n += 1
+	}
+	// insertion sort por start (n ≤ 64+fx)
+	for i in 1 ..< n {
+		key := occ[i]
+		j := i - 1
+		for j >= 0 && occ[j].start > key.start {
+			occ[j + 1] = occ[j]
+			j -= 1
+		}
+		occ[j + 1] = key
+	}
+	return
+}
+
+magnetic_insert_index :: proc(occ: []MagOcc, n: int, t: f32) -> int {
+	for i in 0 ..< n {
+		if t < occ[i].start + occ[i].dur * 0.5 do return i
+	}
+	return n
+}
+
+magnetic_write_occ :: proc(o: MagOcc, start: f32) {
+	if o.si >= 0 do segs[o.si].start = start
+	if o.fi >= 0 do fxsegs[o.fi].start = start
+}
+
+// empacota a trilha. Se insert_dur > 0, reserva um vão de `insert_dur` na ordem
+// definida por `t` (ponto médio) e devolve o start desse vão. insert_dur==0 só cola.
+magnetic_pack :: proc(tr, skip_si, skip_fi: int, t, insert_dur: f32) -> f32 {
+	occ, n := magnetic_collect(tr, skip_si, skip_fi)
+	ins := insert_dur > 0.001 ? magnetic_insert_index(occ[:n], n, t) : n
+	cursor: f32 = 0
+	result: f32 = 0
+	placed := insert_dur <= 0.001
+	for i in 0 ..< n {
+		if !placed && i == ins {
+			result = cursor
+			cursor += insert_dur
+			placed = true
+		}
+		magnetic_write_occ(occ[i], cursor)
+		cursor += occ[i].dur
+	}
+	if !placed do result = cursor
+	return result
+}
+
+magnetic_move_seg :: proc(si, ntr: int, t: f32) {
+	if si < 0 || si >= nsegs do return
+	if ntr < 0 || ntr >= MAXTRACKS || track_locked[ntr] do return
+	old := segs[si].track
+	dur := segs[si].dur
+	start := magnetic_pack(ntr, si, -1, t, dur)
+	segs[si].start = start
+	segs[si].track = ntr
+	if old != ntr && !track_locked[old] do magnetic_pack(old, si, -1, 0, 0)
+	snap_line = start
+}
+
+magnetic_move_fx :: proc(fi, ntr: int, t: f32) {
+	if fi < 0 || fi >= nfx do return
+	if ntr < 0 || ntr >= g_nv || track_locked[ntr] do return
+	old := fxsegs[fi].track
+	dur := fxsegs[fi].dur
+	start := magnetic_pack(ntr, -1, fi, t, dur)
+	fxsegs[fi].start = start
+	fxsegs[fi].track = ntr
+	if old != ntr && old >= 0 && !track_locked[old] do magnetic_pack(old, -1, fi, 0, 0)
+	snap_line = start
+}
+
+// start (só leitura) onde um clipe novo de `dur` cairia na trilha, no tempo `t`.
+magnetic_insert_start :: proc(tr, skip_si: int, t, dur: f32) -> f32 {
+	occ, n := magnetic_collect(tr, skip_si, -1)
+	ins := magnetic_insert_index(occ[:n], n, t)
+	cursor: f32 = 0
+	for i in 0 ..< n {
+		if i == ins do return cursor
+		cursor += occ[i].dur
+	}
+	return cursor
+}
+
+set_magnetic :: proc(on: bool) {
+	magnetic = on
+	if on {
+		for tr in 0 ..< g_nv { if !track_locked[tr] do magnetic_pack(tr, -1, -1, 0, 0) }
+		for k in 0 ..< g_na {
+			tr := MAXV + k
+			if !track_locked[tr] do magnetic_pack(tr, -1, -1, 0, 0)
+		}
+		set_toast("Timeline magnética")
+	} else {
+		set_toast("Timeline livre")
+	}
 }
 
 // tira UM segmento da timeline (a mídia continua no bin). Compacta o array, então

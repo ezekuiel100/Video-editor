@@ -37,6 +37,7 @@ t_reset :: proc() {
 	player_seek_drag = false
 	aud_prev = -1
 	snap_line = -1
+	magnetic = false
 	seg_clipbrd_n = 0
 	fx_clipbrd = {}
 	clipbrd_kind = .None
@@ -947,6 +948,45 @@ fecha_vao_trilha_travada :: proc(t: ^testing.T) {
 	track_locked[0] = true
 	testing.expect(t, !close_gap(0, 5, 12), "cadeado recusa")
 	testing.expect(t, t_feq(segs[1].start, 12), "nada moveu")
+}
+
+@(test)
+magnetica_reordena_e_cola :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 0, 0, 5)
+	b := add_seg(0, 5, 0, 5)
+	c := add_seg(0, 10, 0, 5)
+	magnetic_move_seg(c, 0, 1) // mouse no 1º clipe: c vai p/ o início
+	testing.expect(t, t_feq(segs[c].start, 0), "inserido no começo")
+	testing.expect(t, t_feq(segs[a].start, 5) && t_feq(segs[b].start, 10), "os outros escorregaram")
+	magnetic_move_seg(a, 1, 0) // outra trilha: origem cola
+	testing.expect(t, segs[a].track == 1 && t_feq(segs[a].start, 0), "foi p/ V2")
+	testing.expect(t, t_feq(segs[c].start, 0) && t_feq(segs[b].start, 5), "V1 sem vão")
+}
+
+@(test)
+magnetica_liga_fecha_vaos :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 4, 0, 4)
+	add_seg(0, 20, 0, 2)
+	set_magnetic(true)
+	testing.expect(t, magnetic)
+	testing.expect(t, t_feq(segs[0].start, 0) && t_feq(segs[1].start, 4), "vãos sumiram")
+	set_magnetic(false)
+	testing.expect(t, !magnetic)
+}
+
+@(test)
+magnetica_insert_start_no_meio :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 0, 0, 10)
+	add_seg(0, 10, 0, 10)
+	s := magnetic_insert_start(0, -1, 12, 5) // ponto médio do 2º = 15; t=12 → antes do 2º
+	testing.expect(t, t_feq(s, 10), "insere entre os dois")
+	s = magnetic_insert_start(0, -1, 2, 5)
+	testing.expect(t, t_feq(s, 0), "insere no começo")
+	s = magnetic_insert_start(0, -1, 18, 5)
+	testing.expect(t, t_feq(s, 20), "insere no fim")
 }
 
 @(test)

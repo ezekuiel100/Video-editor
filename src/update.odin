@@ -269,7 +269,7 @@ update :: proc() {
 			for k := nsegs - 1; k >= 0; k -= 1 {
 				if !seg_marked[k] do continue
 				if track_locked[segs[k].track] do continue // cadeado: não apaga
-				remove_seg(k, false); n += 1
+				remove_seg(k, magnetic); n += 1
 			}
 			seg_clear_marks(); selected = -1
 			if n == 0 do set_toast("Trilha bloqueada")
@@ -278,7 +278,7 @@ update :: proc() {
 			close_sel_gap()
 		} else if selected >= 0 {
 			if track_locked[segs[selected].track] { set_toast("Trilha bloqueada") }
-			else do remove_seg(selected, !alt_down())
+			else do remove_seg(selected, magnetic || !alt_down())
 		}
 	}
 
@@ -305,6 +305,7 @@ update :: proc() {
 	if modal == .None && src_preview < 0 && !ctrl && !txt_edit && !search_focus { // atalhos de edição da timeline (não digitando; Ctrl reservado)
 		if rl.IsKeyPressed(.S) do split_at_playhead()
 		if rl.IsKeyPressed(.B) do blade_mode = !blade_mode
+		if rl.IsKeyPressed(.M) do set_magnetic(!magnetic)
 		if rl.IsKeyPressed(.F) do tl_fit(g_view_w) // ajusta o zoom p/ o conteúdo caber na janela
 		vs := view_seg() // passo de 1 frame segue o fps do clipe sob o playhead (60fps -> 1/60)
 		step := (rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)) ? f32(1) : (vs >= 0 ? 1.0 / cfps_of(seg_src(vs)) : 1.0 / DEC_FPS)
@@ -380,9 +381,13 @@ update :: proc() {
 		} else if drag_trim == 0 { // mover ÚNICO: pode trocar de trilha (Y do mouse) e de posição
 			ntr := track_for_seg(drag_clip, track_at_y(m.y)) // respeita vídeo/áudio (e só-áudio)
 			if track_locked[ntr] do ntr = sg.track // trilha travada não recebe: fica na atual
-			cand := snap_start(ntr, drag_clip, max(0, mt - grab_dt), sg.dur)
-			if !overlaps_any(ntr, drag_clip, cand, sg.dur) { sg.start = cand; sg.track = ntr }
-			else do snap_line = -1 // rejeitado: não mostra guia num lugar onde não foi
+			if magnetic {
+				magnetic_move_seg(drag_clip, ntr, mt)
+			} else {
+				cand := snap_start(ntr, drag_clip, max(0, mt - grab_dt), sg.dur)
+				if !overlaps_any(ntr, drag_clip, cand, sg.dur) { sg.start = cand; sg.track = ntr }
+				else do snap_line = -1 // rejeitado: não mostra guia num lugar onde não foi
+			}
 		} else if drag_trim < 0 { // aparar a borda esquerda (mantém o fim fixo)
 			old_end := sg.start + sg.dur
 			spd := seg_speed(drag_clip)
@@ -503,7 +508,8 @@ update :: proc() {
 			tr := track_for_media(bin_drag, track_at_y(m.y))
 			s := snap_start(tr, -1, max(0, tl_t(m.x - DROP_LEAD)), clips[bin_drag].dur) // guia (adiantado)
 			// footprint real do drop (empurra p/ espaço livre, igual ao drop) — mostra onde vai ficar
-			bin_drop_tr = tr; bin_drop_start = free_start(tr, -1, s, clips[bin_drag].dur)
+			bin_drop_tr = tr
+			bin_drop_start = magnetic ? magnetic_insert_start(tr, -1, s, clips[bin_drag].dur) : free_start(tr, -1, s, clips[bin_drag].dur)
 			bin_drop_dur = clips[bin_drag].dur; bin_drop_show = true
 		}
 	} else if st.drag == .FxClip && fx_sel >= 0 && fx_sel < nfx && !track_locked[fxsegs[fx_sel].track] {
@@ -531,8 +537,12 @@ update :: proc() {
 			ty := track_at_y(m.y)                                        // trilha de vídeo sob o cursor
 			tr := is_audio_track(ty) ? f.track : clamp(ty, 0, g_nv - 1)  // efeito só em trilha de vídeo
 			if track_locked[tr] do tr = f.track
-			cand := max(0, tl_t(m.x) - fx_grab_dt)
-			if !fx_busy(tr, fx_sel, cand, f.dur) { f.start = cand; f.track = tr } // EXCLUSIVO: rejeita se invadir seg/efeito
+			if magnetic {
+				magnetic_move_fx(fx_sel, tr, tl_t(m.x))
+			} else {
+				cand := max(0, tl_t(m.x) - fx_grab_dt)
+				if !fx_busy(tr, fx_sel, cand, f.dur) { f.start = cand; f.track = tr } // EXCLUSIVO: rejeita se invadir seg/efeito
+			}
 		}
 	} else if st.drag == .FxTrim && fx_sel >= 0 && fx_sel < nfx {
 		f := &fxsegs[fx_sel]
@@ -546,13 +556,24 @@ update :: proc() {
 			if g_nv < MAXV && rl.CheckCollisionPointRec(m, g_newv_zone) do tr = add_video_track() // banda "+ trilha": cria uma nova
 			else if rl.CheckCollisionPointRec(m, g_vlane) && !is_audio_track(ty) do tr = clamp(ty, 0, g_nv - 1)
 			if tr >= 0 {
-				start := fx_free_start(tr, -1, max(0, tl_t(m.x - DROP_LEAD)), 3) // empurra p/ um vão livre (não cai sobre seg/efeito)
+				want := max(0, tl_t(m.x - DROP_LEAD))
+				start := magnetic ? magnetic_pack(tr, -1, -1, want, 3) : fx_free_start(tr, -1, want, 3)
 				add_fxseg(fxlib_drag, start, tr)
 			} else do set_toast("Solte o efeito sobre uma trilha de vídeo")
 			fxlib_drag = -1
 		}
 		if was_ph do seek_global(st.playhead)
 		if was_clip {
+			if magnetic && drag_clip >= 0 && drag_clip < nsegs && drag_trim == 0 && seg_marks_count() > 1 && seg_marked[drag_clip] {
+				seen: [MAXTRACKS]bool
+				for k in 0 ..< nsegs {
+					if !seg_marked[k] do continue
+					tr := segs[k].track
+					if seen[tr] || track_locked[tr] do continue
+					seen[tr] = true
+					magnetic_pack(tr, -1, -1, 0, 0)
+				}
+			}
 			// soltar um clipe ÚNICO (não em grupo, não aparando) numa banda "criar trilha":
 			// cria a trilha do tipo certo e move o clipe pra ela.
 			if drag_clip >= 0 && drag_clip < nsegs && drag_trim == 0 && !(seg_marks_count() > 1 && seg_marked[drag_clip]) {
@@ -561,8 +582,12 @@ update :: proc() {
 				if      !aud && g_nv < MAXV && rl.CheckCollisionPointRec(m, g_newv_zone) do nt = add_video_track()
 				else if  aud && g_na < MAXA && rl.CheckCollisionPointRec(m, g_newa_zone) do nt = add_audio_track()
 				if nt >= 0 {
-					segs[drag_clip].track = nt
-					segs[drag_clip].start = free_start(nt, drag_clip, segs[drag_clip].start, segs[drag_clip].dur)
+					if magnetic {
+						magnetic_move_seg(drag_clip, nt, segs[drag_clip].start)
+					} else {
+						segs[drag_clip].track = nt
+						segs[drag_clip].start = free_start(nt, drag_clip, segs[drag_clip].start, segs[drag_clip].dur)
+					}
 				}
 			}
 			seek_global(st.playhead); drag_clip = -1; drag_trim = 0
@@ -583,8 +608,13 @@ update :: proc() {
 					c := &clips[k]
 					tr := track_for_media(k, tgt) // áudio->trilha de áudio, vídeo/imagem->vídeo
 					if track_locked[tr] { set_toast("Trilha bloqueada"); continue } // não solta em trilha travada
-					start := snap_start(tr, -1, cursor, c.dur)
-					start = free_start(tr, -1, start, c.dur) // espaço livre (sem invadir)
+					start: f32
+					if magnetic {
+						start = magnetic_pack(tr, -1, -1, cursor, c.dur)
+					} else {
+						start = snap_start(tr, -1, cursor, c.dur)
+						start = free_start(tr, -1, start, c.dur) // espaço livre (sem invadir)
+					}
 					if add_seg(k, start, 0, c.dur, tr) >= 0 {
 						placed += 1; cursor = start + c.dur; last_name = cs(c.name) // enfileira o próximo
 					}

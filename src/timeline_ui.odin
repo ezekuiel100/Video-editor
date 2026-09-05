@@ -138,7 +138,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			case 2:
 				if sel_gap_ok() do close_sel_gap()
 				else if track_locked[segs[selected].track] { set_toast("Trilha bloqueada") }
-				else do remove_seg(selected, !alt_down())
+				else do remove_seg(selected, magnetic || !alt_down())
 			}
 		}
 		icon(ix, tb.y + tb.height/2, k)
@@ -224,6 +224,21 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		rl.DrawLineEx({ icx-2, icy }, { icx-0.5, icy+3 }, 1.5, icol)
 		rl.DrawLineEx({ icx+2, icy }, { icx+0.5, icy-3 }, 1.5, icol)
 		rl.DrawLineEx({ icx+2, icy }, { icx+0.5, icy+3 }, 1.5, icol)
+	}
+	ix += 30
+
+	// timeline magnética: clipes da trilha colam (atalho M)
+	mz := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
+	if clicked(mz) do set_magnetic(!magnetic)
+	rl.DrawRectangleRounded(mz, 0.3, 4, magnetic ? ACCENT_D : (hovered(mz) ? HOVER : PANEL2))
+	{
+		icx := mz.x + 13; icy := tb.y + tb.height/2; icol := magnetic ? rl.WHITE : TEXT
+		rl.DrawRectangleRec({ icx-8, icy-4, 6, 8 }, icol)
+		rl.DrawRectangleRec({ icx+2, icy-4, 6, 8 }, icol)
+		rl.DrawLineEx({ icx-1, icy }, { icx+1, icy }, 1.6, icol)
+		rl.DrawCircleV({ icx, icy - 7 }, 1.6, icol)
+		rl.DrawLineEx({ icx - 2.5, icy - 5.5 }, { icx, icy - 7 }, 1.3, icol)
+		rl.DrawLineEx({ icx + 2.5, icy - 5.5 }, { icx, icy - 7 }, 1.3, icol)
 	}
 	ix += 30
 
@@ -1095,6 +1110,14 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		tip: cstring = "Fechar vão"
 		tw := txt_w(tip, 12) + 16
 		tr := rl.Rectangle{ gz.x, gz.y + gz.height + 6, tw, 22 }
+		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
+		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
+		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
+	}
+	if hovered(mz) {
+		tip: cstring = magnetic ? "Timeline magnética (ligada)" : "Timeline magnética"
+		tw := txt_w(tip, 12) + 16
+		tr := rl.Rectangle{ mz.x, mz.y + mz.height + 6, tw, 22 }
 		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
 		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
 		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)

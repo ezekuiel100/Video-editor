@@ -898,7 +898,7 @@ add_text :: proc() {
 	if slot < 0 do return
 	tr := free_track_from(g_nv - 1) // trilha de vídeo mais alta = vence no compositing (fica por cima)
 	if tr < 0 { set_toast("Trilha bloqueada"); return }
-	start := free_start(tr, -1, st.playhead, clips[slot].dur)
+	start := magnetic ? magnetic_pack(tr, -1, -1, st.playhead, clips[slot].dur) : free_start(tr, -1, st.playhead, clips[slot].dur)
 	si := add_seg(slot, start, 0, clips[slot].dur, tr)
 	if si < 0 { set_toast("Timeline cheia"); return }
 	selected = si; bin_sel = -1; insp_tab = 0

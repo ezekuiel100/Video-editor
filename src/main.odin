@@ -299,6 +299,7 @@ MD_FRAC_DEF :: f32(0.47)      // fração padrão da largura da janela ocupada p
 md_frac: f32 = MD_FRAC_DEF
 md_split_drag: bool
 blade_mode: bool    // ferramenta lâmina: clicar num segmento corta ali (estilo NLE)
+magnetic:   bool    // timeline magnética: clipes da trilha colam uns nos outros (sem vãos)
 tl_scroll: f32      // deslocamento horizontal da timeline (px); 0 = início
 tl_hbar_drag: bool  // arrastando a barra de rolagem horizontal
 tl_vscroll: f32     // deslocamento VERTICAL das trilhas (px); 0 = topo. >0 quando não cabem

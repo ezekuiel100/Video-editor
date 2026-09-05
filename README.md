@@ -11,6 +11,7 @@ Editor de vídeo não-linear, escrito em **[Odin](https://odin-lang.org/)** com 
 - **Timeline multi-trilha** — até 12 trilhas de vídeo e 12 de áudio; um só bloco por clipe (vídeo + forma de onda juntos).
 - **Corte não-destrutivo** — segmentos são *colocações* que recortam um trecho da fonte; vários segmentos podem apontar pra mesma mídia sem duplicar nada.
   - Dividir no playhead (`S`), ferramenta lâmina (`B`), aparar bordas (arrastar), *ripple* / anti-sobreposição.
+  - **Timeline magnética** (`M`) — clipes da mesma trilha colam uns nos outros; arrastar reordena e empurra o resto; apagar sempre fecha o vão.
 - **Bin de mídia** — importação assíncrona (probe + decode + áudio numa thread por mídia), miniaturas, arrastar pra timeline.
 - **Filmstrip de miniaturas** e **forma de onda real** ao longo de cada clipe.
 - **Transições e fades** — dissolver, dissolve orgânico, wipes (4 direções), deslizar (4 direções), íris, flash, zoom, giro, whip, glitch, flip, zoom out, relógio, tremor; fade de vídeo (preto) de entrada/saída; fades de áudio.

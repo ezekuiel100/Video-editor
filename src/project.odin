@@ -26,6 +26,7 @@ clear_project :: proc() {
 	undo_top = 0; redo_top = 0; committed_ok = false
 	st.playhead = 0
 	st.active_tab = 0 // Novo/Abrir volta pra aba Mídia (o clique em Arquivo→Abrir não pode deixar Efeitos)
+	magnetic = false
 	set_proj_ar(16.0/9.0); ar_auto = true // formato volta ao padrão (1920x1080) e reativa a autodetecção
 	dirty = false
 	clear_proj_path() // Novo projeto não tem arquivo — o próximo Ctrl+S pergunta o nome de novo
@@ -101,6 +102,7 @@ save_project_text :: proc() -> string {
 	// load ignora chaves desconhecidas, então o formato segue compatível nos dois sentidos).
 	fmt.sbprintf(&b, "layout %.4f %.4f\n", tl_frac, md_frac)
 	fmt.sbprintf(&b, "prevq %d\n", stream_hi ? 1 : 0) // qualidade da prévia de clipes streaming
+	fmt.sbprintf(&b, "magnet %d\n", magnetic ? 1 : 0)
 	fmt.sbprintf(&b, "trackh")
 	for i in 0 ..< MAXTRACKS do fmt.sbprintf(&b, " %.1f", track_h[i]) // 0 = altura padrão
 	fmt.sbprintf(&b, "\n")
@@ -280,6 +282,7 @@ load_project :: proc(path: string) {
 	lnv := -1; lna := -1 // contagem de trilhas do arquivo (-1 = não especificada; deriva do uso)
 	ltl := f32(-1); lmd := f32(-1) // divisórias salvas (-1 = ausente: mantém o padrão)
 	lpq := stream_hi               // qualidade da prévia salva (ausente = mantém a atual)
+	lmag := false                 // timeline magnética (ausente = desligada)
 	lth: [MAXTRACKS]f32            // alturas de trilha salvas (0 = padrão)
 	lm, ll, lv: [MAXTRACKS]bool    // mute / lock / hide (ausente = tudo false)
 	mpaths := make([dynamic]string, context.temp_allocator)
@@ -308,6 +311,8 @@ load_project :: proc(path: string) {
 			}
 		case "prevq": // qualidade da prévia de streaming (0 = Baixa/360p, 1 = Alta/720p)
 			if len(toks) >= 2 do lpq = (strconv.parse_int(toks[1]) or_else 1) != 0
+		case "magnet":
+			if len(toks) >= 2 do lmag = (strconv.parse_int(toks[1]) or_else 0) != 0
 		case "trackh": // altura de cada trilha (0 = padrão)
 			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS {
 				if v, o := strconv.parse_f64(toks[k]); o do lth[k - 1] = f32(v)
@@ -452,6 +457,7 @@ load_project :: proc(path: string) {
 	if ltl > 0.05 && ltl < 0.95 do tl_frac = ltl
 	if lmd > 0.05 && lmd < 0.95 do md_frac = lmd
 	stream_hi = lpq // qualidade da prévia (set_stream_quality não serve aqui: nada foi importado ainda)
+	magnetic = lmag
 	for i in 0 ..< MAXTRACKS {
 		track_h[i] = (lth[i] >= TRACK_H_MIN && lth[i] <= TRACK_H_MAX) ? lth[i] : 0 // 0 = padrão
 		track_muted[i] = lm[i]; track_locked[i] = ll[i]; track_hidden[i] = lv[i]
