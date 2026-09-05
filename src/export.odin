@@ -679,9 +679,58 @@ export_emit_track_fx :: proc(fb: ^strings.Builder, e: FxSeg, k, W, H: int) {
 		fmt.sbprintf(fb, "scale=%d:%d:flags=neighbor,scale=%d:%d:flags=neighbor,eq=brightness=%.2f", W, hh, W, H, -amt*0.08)
 	case FX_EDGE:
 		fmt.sbprintf(fb, "edgedetect=low=%.2f:high=%.2f:mode=colormix", 0.05+amt*0.15, 0.18+amt*0.40)
+	case FX_CHROMA:
+		// aplicado no segmento (antes do overlay) — ver export_chroma_for_seg. Aqui é no-op.
+		fmt.sbprintf(fb, "copy")
 	case:
 		fmt.sbprintf(fb, "copy")
 	}
+}
+
+// trilha de vídeo MAIS ALTA (maior índice) coberta pelo efeito em `t`. O chroma key
+// só keya ESSA trilha — o fundo nas de baixo fica intacto. Efeitos e clipes são
+// exclusivos na mesma trilha, então o chroma vive numa trilha ACIMA do green screen.
+chroma_target_track :: proc(e: FxSeg, t: f32) -> int {
+	best := -1
+	for i in 0 ..< nsegs {
+		sg := segs[i]
+		if is_audio_track(sg.track) || sg.track > e.track do continue
+		if t < sg.start || t >= sg.start + sg.dur do continue
+		if !seg_ready(i) do continue
+		c := seg_src(i)
+		if c.is_text || c.is_audio do continue
+		if sg.track > best do best = sg.track
+	}
+	return best
+}
+
+// chroma que rege o segmento i (overlap temporal; trilha do efeito >= trilha do clipe;
+// e este clipe é o alvo = topmost sob o efeito).
+export_chroma_for_seg :: proc(si: int) -> (FxSeg, bool) {
+	sg := segs[si]
+	if is_audio_track(sg.track) do return {}, false
+	best := -1
+	for k in 0 ..< nfx {
+		e := fxsegs[k]
+		if e.kind != FX_CHROMA || e.track < sg.track do continue
+		t0 := max(e.start, sg.start)
+		t1 := min(e.start + e.dur, sg.start + sg.dur)
+		if t1 - t0 <= 0.001 do continue
+		mid := (t0 + t1) * 0.5
+		if chroma_target_track(e, mid) != sg.track do continue
+		best = k
+	}
+	if best < 0 do return {}, false
+	return fxsegs[best], true
+}
+
+// mapeia amount/radius do FxSeg p/ similarity/blend do chromakey (yuv=1 casa melhor
+// com chroma real de câmera do que distância RGB pura).
+export_emit_chroma :: proc(fb: ^strings.Builder, e: FxSeg) {
+	sim := 0.04 + clamp(e.amount, 0, 1) * 0.46
+	bl  := clamp(e.radius <= 0 ? f32(0.20) : e.radius, 0, 1) * 0.28
+	col := e.angle < 0.5 ? "0x00FF00" : "0x0000FF"
+	fmt.sbprintf(fb, ",chromakey=%s:%.4f:%.4f:1", col, sim, bl) // yuv=1
 }
 
 // dimensões (pares) do segmento após escala no export — MESMA fórmula usada ao montar o
@@ -1306,10 +1355,11 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			segW, segH := seg_export_dims(i, W, H)
 			op := sg.opacity <= 0 ? 1 : sg.opacity
 			sp := sg.speed <= 0 ? 1 : sg.speed
-			// rgba só quando o overlay PRECISA de alpha (opacidade, giro, fade, dissolver).
-			// No recorte simples o yuv420p evita 4 bytes/pixel + conversão no overlay — o
-			// caminho mais comum (cortar e exportar) saía ~1.5–2× mais lento à toa.
-			need_a := op < 0.999 || abs(sg.rot) > 0.5 || fin > 0.01 || fout > 0.01 || sg.vfin > 0.01 || sg.vfout > 0.01 || trans_is_mask(sg.trans_mode) || ghost_out_d[i] > 0.01 || spin_d[i] > 0.01 || flip_d[i] > 0.01 || glitch_d[i] > 0.01
+			// rgba só quando o overlay PRECISA de alpha (opacidade, giro, fade, dissolver,
+			// chroma key). No recorte simples o yuv420p evita 4 bytes/pixel + conversão no
+			// overlay — o caminho mais comum (cortar e exportar) saía ~1.5–2× mais lento à toa.
+			_, has_ck := export_chroma_for_seg(i)
+			need_a := op < 0.999 || abs(sg.rot) > 0.5 || fin > 0.01 || fout > 0.01 || sg.vfin > 0.01 || sg.vfout > 0.01 || trans_is_mask(sg.trans_mode) || ghost_out_d[i] > 0.01 || spin_d[i] > 0.01 || flip_d[i] > 0.01 || glitch_d[i] > 0.01 || has_ck
 			pix := need_a ? "rgba" : "yuv420p"
 			// vídeo consome (in_off-hd)..(in_off+dur*sp+tl) — hd=pré-roll, tl=pós-roll do
 			// dissolver; imagem usa o input em loop. setpts posiciona em start2.
@@ -1371,6 +1421,12 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			// depois do rotate=c=none perderia a transparência dos cantos rodados. Aqui o
 			// vídeo ainda é opaco, então a conversão não custa nada; o rotate recria o alpha.
 			export_color_filters(&fb, sg) // eq/hue/negate/vignette
+			// CHROMA KEY no segmento (antes do rotate/overlay): o fundo da trilha de baixo
+			// aparece pelos pixels transparentes. Não pode ir no composto da faixa.
+			if ck, ok := export_chroma_for_seg(i); ok {
+				fmt.sbprintf(&fb, ",format=rgba")
+				export_emit_chroma(&fb, ck)
+			}
 			if abs(sg.rot) > 0.5 {
 				rad := sg.rot * math.PI/180
 				fmt.sbprintf(&fb, ",rotate=%.5f:c=none:ow=rotw(%.5f):oh=roth(%.5f)", rad, rad, rad)
@@ -1411,6 +1467,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		for k in 0 ..< nfx {
 			e := fxsegs[k]
 			if e.track != t do continue // só os efeitos desta trilha (as de cima aplicam depois)
+			if e.kind == FX_CHROMA do continue // chroma vai no segmento (precisa keyar só o clipe, não o fundo)
 			es := e.start; ee := e.start + e.dur
 			ob := fmt.tprintf("fxb%d", k); op := fmt.tprintf("fxp%d", k); ox := fmt.tprintf("fxx%d", k); oo := fmt.tprintf("fxo%d", k)
 			fmt.sbprintf(&fb, "[%s]split[%s][%s];", vlabel, ob, op)

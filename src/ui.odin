@@ -1424,6 +1424,7 @@ fx_lib := [?]FxLibItem{
 	{ "Caleidoscópio", FX_KALEIDO },
 	{ "Varredura", FX_SCAN },
 	{ "Contorno", FX_EDGE },
+	{ "Chroma key", FX_CHROMA },
 }
 
 fxlib_name :: proc(kind: int) -> cstring {
@@ -1446,6 +1447,7 @@ fxlib_name :: proc(kind: int) -> cstring {
 	case FX_KALEIDO: return "Caleidoscópio"
 	case FX_SCAN:    return "Varredura"
 	case FX_EDGE:    return "Contorno"
+	case FX_CHROMA:  return "Chroma key"
 	}
 	return "Efeito"
 }
@@ -1470,6 +1472,7 @@ fx_defaults :: proc(f: ^FxSeg) {
 	case FX_KALEIDO: f.amount = 0.40
 	case FX_SCAN:    f.amount = 0.45
 	case FX_EDGE:    f.amount = 0.55
+	case FX_CHROMA:  f.amount = 0.55; f.radius = 0.25; f.angle = 0 // verde; amount=similaridade, radius=suavidade
 	}
 }
 add_fxseg :: proc(kind: int, start: f32, track := 0) -> int {
@@ -1601,6 +1604,11 @@ draw_fx_icon :: proc(box: rl.Rectangle, kind: int) {
 		cx := box.x + box.width/2; cy := box.y + box.height/2
 		rl.DrawRectangleLinesEx({ cx - 16, cy - 12, 32, 24 }, 2, rl.Color{ 240, 240, 250, 230 })
 		rl.DrawCircleLines(i32(cx), i32(cy), 6, rl.Color{ 240, 240, 250, 230 })
+	case FX_CHROMA: // silhueta sobre fundo verde (sugere o key)
+		rl.DrawRectangleRec({ box.x + 14, box.y + 10, box.width - 28, box.height - 20 }, rl.Color{ 20, 180, 70, 255 })
+		cx := box.x + box.width/2; cy := box.y + box.height/2 + 4
+		rl.DrawCircleV({ cx, cy - 10 }, 7, rl.Color{ 40, 44, 56, 255 })
+		rl.DrawRectangleRec({ cx - 9, cy - 2, 18, 16 }, rl.Color{ 40, 44, 56, 255 })
 	}
 }
 
@@ -1728,6 +1736,19 @@ draw_fx_settings :: proc(r: rl.Rectangle) {
 	case FX_INVERT, FX_GLOW, FX_KALEIDO, FX_SCAN, FX_EDGE:
 		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
+	case FX_CHROMA:
+		if f.radius <= 0 do f.radius = 0.25
+		txt("Cor-chave", x, y, 13, MUTED); y += 22
+		green := f.angle < 0.5
+		if ui_btn({ x, y, (cw-8)/2, 26 }, "Verde", green) do f.angle = 0
+		if ui_btn({ x + (cw-8)/2 + 8, y, (cw-8)/2, 26 }, "Azul", !green) do f.angle = 0.5
+		y += 36
+		txt("Similaridade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0.05, 1); y += 28
+		txt("Suavidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, 13, ACCENT); y += 20
+		ui_slider(41, { x, y, cw, 16 }, &f.radius, 0, 1); y += 28
+		txt("V1 = fundo · V2 = green screen · solte o Chroma key numa", x, y, 11, MUTED); y += 16
+		txt("trilha ACIMA do green screen (não pode cobrir o clipe).", x, y, 11, MUTED); y += 22
 	}
 	y += 8
 	// rodapé estilo NLE: REDEFINIR (contorno) à esquerda, OK (preenchido) à direita.

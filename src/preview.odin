@@ -41,10 +41,10 @@ uniform float wipeEdge;    // progresso 0..1 da máscara (orgânico / wipe / ír
 uniform float wipeFeather; // 0 = desligado; maciez da fumaça/tinta (orgânico)
 uniform float wipeInv;     // 1 = clipe que SAI (máscara invertida)
 uniform float wipeKind;    // 0=off/orgânico | 2..5 wipe L/R/U/D | 10 íris | 18 relógio
-uniform float fxKind;      // 2 pixel | 3 blur | 4 grain | 5 mirror | 6 sharp | 7 spot | 8 shake | 9 poster | 10 invert | 11 wave | 12 hue | 13 glow | 14 kaleido | 15 scan | 16 edge | 17 blur-part
-uniform float fxAmt;       // intensidade 0..1 do efeito de faixa
+uniform float fxKind;      // 2 pixel | 3 blur | 4 grain | 5 mirror | 6 sharp | 7 spot | 8 shake | 9 poster | 10 invert | 11 wave | 12 hue | 13 glow | 14 kaleido | 15 scan | 16 edge | 17 blur-part | 18 chroma
+uniform float fxAmt;       // intensidade 0..1 do efeito de faixa (chroma: similaridade)
 uniform float fxTime;      // tempo (s) p/ granulação/tremor
-uniform float fxAng;       // Espelhar: <0.5 horizontal, senão vertical
+uniform float fxAng;       // Espelhar: <0.5 horizontal, senão vertical | Chroma: <0.5 verde, senão azul
 float vn(vec2 p, vec2 seed) {
     vec2 i = floor(p); vec2 f = fract(p);
     f = f*f*(3.0-2.0*f);
@@ -210,8 +210,25 @@ void main() {
         float eg = length(n1 - n2) + length(n3 - n4);
         c = mix(c, vec3(eg * 1.8), clamp(fxAmt, 0.0, 1.0));
     }
+    // CHROMA KEY: remove verde/azul. Usa domínio da cor-chave (G−max(R,B) ou B−max(R,G))
+    // + distância RGB — chroma real de câmera quase nunca é #00FF00 puro.
+    // fxAmt = similaridade (mais = remove mais); radius = suavidade da borda.
+    float chromaA = 1.0;
+    if (fxKind > 17.5 && fxKind < 18.5) {
+        float dom = fxAng < 0.5 ? (c.g - max(c.r, c.b)) : (c.b - max(c.r, c.g));
+        vec3 keyCol = fxAng < 0.5 ? vec3(0.05, 0.72, 0.08) : vec3(0.05, 0.12, 0.72);
+        float d = distance(c, keyCol);
+        float sim = mix(0.10, 0.55, clamp(fxAmt, 0.0, 1.0));
+        float bl  = mix(0.02, 0.28, clamp(radius, 0.0, 1.0));
+        // dom alto = pixel bem verde/azul; combina com distância
+        float keyed = max(smoothstep(sim + bl, sim, d), smoothstep(0.02, mix(0.12, 0.45, clamp(fxAmt, 0.0, 1.0)), dom));
+        chromaA = 1.0 - clamp(keyed, 0.0, 1.0);
+        float spill = keyed;
+        if (fxAng < 0.5) c.g = mix(c.g, min(c.g, (c.r + c.b) * 0.5), spill * 0.85);
+        else             c.b = mix(c.b, min(c.b, (c.r + c.g) * 0.5), spill * 0.85);
+    }
     c = clamp(c, 0.0, 1.0);
-    float a = src.a;
+    float a = src.a * chromaA;
     if (wipeKind > 1.5) {
         float e = clamp(wipeEdge, 0.0, 1.0);
         float f = 0.022;
@@ -946,16 +963,30 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	b_r := sg.bulge_r <= 0 ? BULGE_R_DEF : sg.bulge_r
 	rgb_off := [2]f32{ 0, 0 } // separação RGB do efeito de faixa (0 = desligado)
 	fxk := f32(0); fxa := f32(0); fxt := f32(0); fxa_ang := f32(0)
+	has_chroma := false
+	// CHROMA: efeito numa trilha ACIMA do green screen (não pode sobrepor o clipe na
+	// mesma trilha). Só keya a trilha de vídeo mais alta sob o efeito — o fundo embaixo fica.
+	if !is_audio_track(sg.track) {
+		for k in 0 ..< nfx {
+			e := fxsegs[k]
+			if e.kind != FX_CHROMA do continue
+			if vt < e.start || vt >= e.start + e.dur do continue
+			if chroma_target_track(e, vt) != sg.track do continue
+			fxk = f32(FX_CHROMA); fxa = e.amount; fxa_ang = e.angle
+			b_r = e.radius <= 0 ? f32(0.20) : e.radius
+			has_chroma = true
+		}
+	}
 	// efeito de FAIXA que rege ESTA trilha (na trilha do seg ou numa acima — "afeta o que está embaixo")
 	af := is_audio_track(sg.track) ? -1 : fx_for_track(sg.track)
-	if af >= 0 {
+	if af >= 0 && !has_chroma {
 		fs := fxsegs[af]
 		if fs.kind == FX_DISTORT && !bulge_active(sg) {
 			b_str = fx_bulge_strength(fs, vt - fs.start)
 			b_cx = clamp(0.5+fs.cx, 0, 1); b_cy = clamp(0.5+fs.cy, 0, 1); b_r = fs.radius <= 0 ? BULGE_R_DEF : fs.radius
 		} else if fs.kind == FX_RGB {
 			rgb_off = fx_rgb_offset(fs)
-		} else if fs.kind >= FX_PIXEL {
+		} else if fs.kind >= FX_PIXEL && fs.kind != FX_CHROMA {
 			fxk = f32(fs.kind); fxa = fs.amount; fxt = vt; fxa_ang = fs.angle
 			if fs.kind == FX_SPOT || fs.kind == FX_BLUR_PART {
 				b_cx = clamp(0.5+fs.cx, 0, 1); b_cy = clamp(0.5+fs.cy, 0, 1)
@@ -971,11 +1002,13 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 			}
 		}
 	}
+	// se o af é só chroma (sem has_chroma porque este seg não é o alvo), use_fx ainda
+	// liga o shader — ok, fxk fica 0 e o quadro sai intacto.
 	if glitch > 0.01 {
 		rgb_off.x += glitch * 0.022
 		rgb_off.y -= glitch * 0.016
 	}
-	use_fx := bulge_ok && (fx_any(sg) || af >= 0 || wipe_feather > 0.01 || wipe_kind > 1.5 || glitch > 0.01)
+	use_fx := bulge_ok && (fx_any(sg) || af >= 0 || has_chroma || wipe_feather > 0.01 || wipe_kind > 1.5 || glitch > 0.01)
 	if use_fx {
 		br := b_r
 		uv0 := [2]f32{ src.x/tw_, src.y/th_ } // src no espaço da textura EM USO (c.tex ou miniatura)

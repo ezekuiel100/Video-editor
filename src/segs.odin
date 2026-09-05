@@ -210,7 +210,7 @@ nsegs: int
 // kind: 0 Distorção | 1 RGB | 2 Pixelizar | 3 Desfoque | 4 Granulação | 5 Espelhar
 //       | 6 Nitidez | 7 Holofote | 8 Tremor | 9 Posterizar | 10 Inverter | 11 Onda
 //       | 12 Matiz | 13 Brilho | 14 Caleidoscópio | 15 Varredura | 16 Contorno
-//       | 17 Desfoque local (só uma região)
+//       | 17 Desfoque local (só uma região) | 18 Chroma key (fundo verde/azul)
 FX_DISTORT   :: 0
 FX_RGB       :: 1
 FX_PIXEL     :: 2
@@ -229,16 +229,17 @@ FX_KALEIDO   :: 14
 FX_SCAN      :: 15
 FX_EDGE      :: 16
 FX_BLUR_PART :: 17
+FX_CHROMA    :: 18
 FxSeg :: struct {
 	kind:   int,
 	track:  int, // trilha de VÍDEO onde o efeito está (afeta essa trilha e as ABAIXO dela: índice <= track)
 	start, dur: f32,
-	amount: f32, // Distorção: intensidade | RGB: intensidade da separação
-	radius: f32, // Distorção: raio
+	amount: f32, // Distorção: intensidade | RGB: intensidade da separação | Chroma: similaridade
+	radius: f32, // Distorção: raio | Chroma: suavidade da borda (blend)
 	cx, cy: f32, // Distorção: centro (offset do meio)
 	wobble: f32, // Distorção: tremor
 	speed:  f32, // Distorção: velocidade do tremor
-	angle:  f32, // RGB: direção (0=horizontal, 0.25=vertical "cima-baixo")
+	angle:  f32, // RGB: direção | Chroma: <0.5 verde, senão azul | Espelhar/Desfoque local: forma
 }
 MAX_FX :: 32
 fxsegs:      [MAX_FX]FxSeg

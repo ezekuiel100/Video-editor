@@ -1122,7 +1122,8 @@ fx_biblioteca_tem_os_tipos_novos :: proc(t: ^testing.T) {
 	testing.expect(t, string(fxlib_name(FX_KALEIDO)) == "Caleidoscópio")
 	testing.expect(t, string(fxlib_name(FX_SCAN)) == "Varredura")
 	testing.expect(t, string(fxlib_name(FX_EDGE)) == "Contorno")
-	testing.expect(t, len(fx_lib) >= 18, "biblioteca tem os tipos novos")
+	testing.expect(t, string(fxlib_name(FX_CHROMA)) == "Chroma key")
+	testing.expect(t, len(fx_lib) >= 19, "biblioteca tem os tipos novos")
 	f := FxSeg{ kind = FX_SPOT }
 	fx_defaults(&f)
 	testing.expect(t, f.amount > 0.5 && f.radius > 0.2, "holofote nasce visível")
@@ -1130,4 +1131,8 @@ fx_biblioteca_tem_os_tipos_novos :: proc(t: ^testing.T) {
 	fx_defaults(&p)
 	testing.expect(t, p.radius > 0.1 && p.amount > 0.3, "desfoque local nasce visível")
 	testing.expect(t, p.angle < 0.5, "nasce quadrado")
+	ck := FxSeg{ kind = FX_CHROMA }
+	fx_defaults(&ck)
+	testing.expect(t, ck.amount > 0.4 && ck.radius > 0.1, "chroma nasce utilizável")
+	testing.expect(t, ck.angle < 0.5, "nasce verde")
 }

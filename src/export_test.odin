@@ -1335,3 +1335,46 @@ export_fx_espelhar_vertical_usa_vstack :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(g, "vflip"), "metade de baixo é a de cima invertida")
 	testing.expect(t, !strings.contains(g, "hstack"), "não mistura com o horizontal")
 }
+
+// chroma key: efeito numa trilha ACIMA do green screen; keya só o topmost (não o fundo).
+@(test)
+export_fx_chroma_key_no_segmento :: proc(t: ^testing.T) {
+	t_export_reset()
+	g_nv = 3
+	add_seg(0, 0, 0, 6, 0) // fundo V1
+	add_seg(1, 0, 0, 6, 1) // green screen V2
+	nfx = 1
+	// chroma na V3 (acima) — não pode sobrepor o clipe na mesma trilha
+	fxsegs[0] = FxSeg{ kind = FX_CHROMA, track = 2, start = 0, dur = 6, amount = 0.4, radius = 0.2, angle = 0 }
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "chromakey=0x00FF00"), "key verde no grafo")
+	testing.expect(t, strings.contains(g, ":1"), "yuv=1 no chromakey")
+	testing.expect(t, !strings.contains(g, "chromakey=0x0000FF"), "não é azul")
+	testing.expect(t, !strings.contains(g, "fxb0"), "chroma não vai no composto da faixa")
+}
+
+@(test)
+export_fx_chroma_keya_so_o_topmost :: proc(t: ^testing.T) {
+	t_export_reset()
+	g_nv = 3
+	add_seg(0, 0, 0, 6, 0) // fundo — NÃO deve receber chromakey
+	add_seg(1, 0, 0, 6, 1) // green screen — deve receber
+	nfx = 1
+	fxsegs[0] = FxSeg{ kind = FX_CHROMA, track = 2, start = 0, dur = 6, amount = 0.5, radius = 0.25, angle = 0 }
+	ck0, ok0 := export_chroma_for_seg(0)
+	ck1, ok1 := export_chroma_for_seg(1)
+	_ = ck0
+	testing.expect(t, !ok0, "fundo (trilha mais baixa) não é keyado")
+	testing.expect(t, ok1 && ck1.kind == FX_CHROMA, "green screen (topmost sob o efeito) é keyado")
+}
+
+@(test)
+export_fx_chroma_azul :: proc(t: ^testing.T) {
+	t_export_reset()
+	g_nv = 2
+	add_seg(0, 0, 0, 6, 0) // blue screen na V1
+	nfx = 1
+	fxsegs[0] = FxSeg{ kind = FX_CHROMA, track = 1, start = 0, dur = 6, amount = 0.5, radius = 0.25, angle = 0.5 }
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "chromakey=0x0000FF"), "key azul")
+}
