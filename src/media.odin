@@ -5,6 +5,7 @@ import "base:intrinsics"
 import "core:fmt"
 import "core:math"
 import "core:os"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -235,6 +236,11 @@ Clip :: struct {
 	                    // religar/oscilar). CRÍTICO: uma falha de scrub NÃO chama hw_reject (que
 	                    // marcaria no_hw e derrubaria o DECODER AO VIVO p/ software = playback travado);
 	                    // só desliga o HW do scrub. O decoder ao vivo tem seu próprio caminho hw/sw.
+	kf:     []f32,  // (streaming) tempos dos KEYFRAMES do vídeo, crescentes, relativos ao início do
+	                // arquivo (mesma base do -ss). Chave do cache de scrub: com -noaccurate_seek todo
+	                // alvo entre dois keyframes dá o MESMO frame. Escrito 1x pelo import_worker.
+	kf_ok:  bool,   // atômico: kf pronto p/ leitura (worker de scrub)
+	lav_bad: bool,  // (worker de scrub) o decoder libav falhou neste clipe: scrub por processo ffmpeg
 	aid:    int,    // id único p/ nomear o áudio temporário
 	dur:    f32,    // duração da fonte na timeline (s) — costuma ser a do container/áudio
 	v_dur:  f32,    // fim do STREAM de vídeo (s); 0 = desconhecido (= usar dur). Em lives o
@@ -1248,6 +1254,7 @@ import_worker :: proc(c: ^Clip) {
 
 	compute_waveform(c) // forma de onda: PCM por pipe, preenche progressivo e rápido
 	decode_thumbs(c)    // miniaturas (cache: instantâneo do RAM; streaming: -ss por frame)
+	if c.streaming do build_kf_index(c) // índice de keyframes p/ o cache do scrub (só demux, sem decode)
 }
 
 // transmite o PCM do áudio (mono, WAVE_RATE Hz, s16le) por PIPE e preenche c.wave
@@ -1506,15 +1513,23 @@ scrub_decode_frame :: proc(c: ^Clip, t: f32, buf: []u8, fast := false) -> bool {
 		acc := fast ? "-noaccurate_seek" : "-accurate_seek" // opção de INPUT (antes do -i)
 		vfb: [128]u8; vf := dec_vf_of(c, vfb[:]) // mesma resolução do caminho ao vivo (c.tex)
 		sf := cframe(c)
+		// probe curto (-probesize/-analyzeduration): o probe completo de cada spawn pesava
+		// tanto quanto o próprio decode de 1 keyframe. -an/-sn/-dn: nem abre os outros streams.
+		// fast: -skip_frame nokey (o decoder só entrega keyframe, mesmo num seek que caia no
+		// meio do GOP) + fast_bilinear (o "quase lá" do arrasto não precisa do bicúbico).
+		skip := fast ? "nokey" : "default"
+		sws := fast ? "fast_bilinear" : "bicubic"
 		sw_cmd := []string{
 			"ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "1",
-			acc, "-ss", ss, "-i", c.path,
-			"-frames:v", "1", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+			"-probesize", "65536", "-analyzeduration", "0", "-skip_frame", skip,
+			acc, "-ss", ss, "-i", c.path, "-an", "-sn", "-dn",
+			"-frames:v", "1", "-sws_flags", sws, "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
 		}
 		hw_cmd := []string{ // sem -resize (esticaria): letterbox pela CPU preserva o aspecto
 			"ffmpeg", "-hide_banner", "-loglevel", "error",
-			acc, "-ss", ss, "-c:v", hw, "-i", c.path,
-			"-frames:v", "1", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+			"-probesize", "65536", "-analyzeduration", "0",
+			acc, "-ss", ss, "-c:v", hw, "-i", c.path, "-an", "-sn", "-dn",
+			"-frames:v", "1", "-sws_flags", sws, "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
 		}
 		p, pe := os.process_start(os.Process_Desc{ command = hw != "" ? hw_cmd : sw_cmd, stdout = w })
 		os.close(w)
@@ -1564,8 +1579,33 @@ scrub_worker :: proc() {
 			if ci := intrinsics.atomic_load(&scrub_req_c); ci >= 0 && ci < nclips {
 				sf0 := cframe(&clips[ci]) // dims no INÍCIO do decode (compara na adoção)
 				st0 := scrub_req_t        // alvo capturado 1x (o global muda durante o arrasto)
+				c := &clips[ci]
+				// chave do frame: o keyframe que o -noaccurate_seek entregaria p/ st0. Sem índice
+				// (ainda gerando), a chave é o próprio tempo — só evita redecodificar o MESMO alvo.
+				k := kf_lookup(c, st0)
+				dt := k >= 0 ? c.kf[k] + 0.001 : st0 // +1ms: arredondamento não cai no keyframe anterior
+				key := ScrubKey{ ci, c.aid, k, k >= 0 ? 0 : st0, sf0 }
+				if scrub_shown_ok && scrub_shown == key { time.sleep(4 * time.Millisecond); continue } // já está na tela
+				if scrub_cache_get(key, scrub_buf[:sf0]) {
+					dbg("SCRUB", "clip=%d t=%.1fs CACHE (kf=%d)", ci, st0, k)
+					scrub_shown = key; scrub_shown_ok = true
+					scrub_done_c = ci; scrub_done_t = st0; scrub_done_sf = sf0
+					intrinsics.atomic_store(&scrub_ready, true)
+					continue
+				}
 				wt0 := time.tick_now()
-				if scrub_decode_frame(&clips[ci], st0, scrub_buf, true) { // fast: keyframe basta no arrasto
+				// 1º o decoder PERSISTENTE (libav: sem spawn/probe por frame); codec pesado já
+				// migrado p/ NVDEC (scrub_hw) e clipe onde a libav falhou seguem por processo
+				ok := false
+				if !c.scrub_hw && !c.lav_bad {
+					ok = lav_decode_frame(c, ci, dt, scrub_buf)
+					if !ok && lav_state > 0 && !intrinsics.atomic_load(&c.stop) {
+						c.lav_bad = true
+						dbg("LAV", "clip='%s' decoder libav falhou -> scrub por processo ffmpeg", c.name)
+					}
+				}
+				if ok || scrub_decode_frame(c, dt, scrub_buf, true) { // fast: keyframe basta no arrasto
+					scrub_cache_put(key, scrub_buf[:sf0]) // guarda mesmo se descartado: o cursor pode voltar
 					scrub_last_ms = time.duration_milliseconds(time.tick_diff(wt0, time.tick_now()))
 					// codec pesado: um decode SW lento migra este clipe p/ NVDEC no scrub (só
 					// sobe — nunca volta a SW sozinho, p/ não oscilar). scrub_hw_bad trava a
@@ -1581,6 +1621,7 @@ scrub_worker :: proc() {
 						continue
 					}
 					dbg("SCRUB", "clip=%d t=%.1fs %s %.0fms", ci, st0, clips[ci].scrub_hw ? "HW" : "SW", scrub_last_ms)
+					scrub_shown = key; scrub_shown_ok = true
 					scrub_done_c = ci
 					scrub_done_t = st0
 					scrub_done_sf = sf0
@@ -1591,6 +1632,10 @@ scrub_worker :: proc() {
 				}
 				continue
 			}
+			// sem arrasto: o que estiver na tela pode ser trocado pelo decoder ao vivo, então o
+			// próximo arrasto precisa publicar de novo mesmo caindo no mesmo keyframe
+			scrub_shown_ok = false
+			lav_idle() // solta arquivos parados há >5s (o Windows trava apagar/mover arquivo aberto)
 		}
 		// canal 2: vista duplicada (mesma fonte em 2 trilhas, streaming): spawna o
 		// decoder ao vivo da vista + lê o 1º frame. Protocolo: main publica dup_req_c
@@ -1611,6 +1656,88 @@ scrub_worker :: proc() {
 		}
 		time.sleep(4 * time.Millisecond)
 	}
+}
+
+// ---- cache de frames do scrub (só o worker de scrub mexe; sem lock) ----
+// Com -noaccurate_seek todo alvo entre dois keyframes devolve o MESMO frame: guardando os
+// últimos keyframes decodificados, ir-e-voltar no arrasto e parar dentro do mesmo GOP não
+// sobem ffmpeg nenhum. aid na chave: o slot de um clipe removido nunca casa com outro.
+SCRUB_CACHE_N :: 24 // × até 2.76MB (720p) = ~66MB no pior caso; alocado sob demanda
+
+ScrubKey :: struct { c, aid, k: int, t: f32, sf: int }
+ScrubEntry :: struct { key: ScrubKey, use: u64, buf: []u8 }
+
+scrub_cache:    [SCRUB_CACHE_N]ScrubEntry
+scrub_cache_ck: u64
+scrub_shown:    ScrubKey // último frame publicado p/ a main (worker)
+scrub_shown_ok: bool
+
+scrub_cache_get :: proc(key: ScrubKey, dst: []u8) -> bool {
+	for &e in scrub_cache {
+		if e.buf == nil || e.key != key do continue
+		copy(dst, e.buf[:key.sf])
+		scrub_cache_ck += 1; e.use = scrub_cache_ck
+		return true
+	}
+	return false
+}
+
+scrub_cache_put :: proc(key: ScrubKey, src: []u8) {
+	v := &scrub_cache[0] // LRU: vazio primeiro, senão o menos usado
+	for &e in scrub_cache {
+		if e.buf == nil { v = &e; break }
+		if e.use < v.use do v = &e
+	}
+	if v.buf == nil do v.buf = make([]u8, STREAM_FBYTES_MAX)
+	if v.buf == nil do return // sem RAM: só não cacheia
+	copy(v.buf, src)
+	scrub_cache_ck += 1
+	v.key = key; v.use = scrub_cache_ck
+}
+
+// índice do último keyframe <= t (busca binária); -1 sem índice ou antes do 1º
+kf_lookup :: proc(c: ^Clip, t: f32) -> int {
+	if !intrinsics.atomic_load(&c.kf_ok) do return -1
+	lo, hi := 0, len(c.kf) - 1
+	if hi < 0 || t < c.kf[0] do return -1
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if c.kf[mid] <= t do lo = mid
+		else do hi = mid - 1
+	}
+	return lo
+}
+
+// (import worker) lista os keyframes do vídeo pelos FLAGS dos pacotes: só demux, sem
+// decodificar — segundos mesmo num arquivo de horas. Tempos ficam relativos ao
+// format.start_time, que é a base do -ss.
+build_kf_index :: proc(c: ^Clip) {
+	if intrinsics.atomic_load(&c.stop) do return
+	_, out, _, e := os.process_exec(os.Process_Desc{
+		command = []string{ "ffprobe", "-v", "error", "-select_streams", "v:0",
+			"-show_entries", "packet=pts_time,flags:format=start_time", "-of", "csv=p=0", c.path },
+	}, context.allocator)
+	defer delete(out)
+	if e != nil do return
+	kf := make([dynamic]f32)
+	start: f32 = 0
+	txt := string(out)
+	for ln in strings.split_lines_iterator(&txt) {
+		comma := strings.index_byte(ln, ',')
+		if comma < 0 { // linha do format: start_time
+			if v, ok := strconv.parse_f32(strings.trim_space(ln)); ok do start = v
+			continue
+		}
+		if strings.index_byte(ln[comma + 1:], 'K') < 0 do continue
+		if v, ok := strconv.parse_f32(ln[:comma]); ok do append(&kf, v)
+	}
+	if len(kf) == 0 { delete(kf); return }
+	for &v in kf do v -= start
+	// pts de pacote vem em ordem de DECODE; keyframes costumam sair crescentes, mas garante
+	for i in 1 ..< len(kf) do if kf[i] < kf[i - 1] { slice.sort(kf[:]); break }
+	c.kf = kf[:]
+	intrinsics.atomic_store(&c.kf_ok, true)
+	dbg("KFIDX", "clip='%s' %d keyframes (start=%.3f)", c.name, len(kf), start)
 }
 
 // main: se o cursor pulou longe do decode em voo, mata o ffmpeg. O worker está
@@ -2297,6 +2424,8 @@ clip_close :: proc(c: ^Clip) {
 	if c.rsp_thr != nil { thread.join(c.rsp_thr); thread.destroy(c.rsp_thr); c.rsp_thr = nil }          // respawn é curto (~300ms)
 	if c.streaming { stream_stop(c); delete(c.fbuf) }
 	else do delete(c.cache)
+	intrinsics.atomic_store(&c.kf_ok, false)
+	delete(c.kf); c.kf = nil
 	delete(c.wave)
 	delete(c.wave_rms)
 	for i in 0 ..< c.thumbs_up do rl.UnloadTexture(c.thumbs[i]) // só as que subiram

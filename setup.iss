@@ -50,6 +50,7 @@ Source: "editor.exe";               DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\ffmpeg.exe";          DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\ffprobe.exe";         DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\LICENSE-ffmpeg.txt";  DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\*.dll";               DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; Whisper: motor + ggml-small. skipifsourcedoesntexist se o fetch-stt ainda nao rodou.
 Source: "stt\*"; DestDir: "{app}\stt"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 

@@ -28,6 +28,14 @@ foreach ($f in @("dist\ffmpeg.exe", "dist\ffprobe.exe")) {
     if (-not (Test-Path $f)) { throw "Faltando $f - copie um build GPL win64 do ffmpeg para dist\." }
 }
 
+# DLLs da libav (decoder persistente do scrub). Opcional: sem elas o editor cai no ffmpeg por processo.
+$lavDlls = @("avutil-61.dll", "swscale-10.dll", "swresample-7.dll", "avcodec-63.dll", "avformat-63.dll")
+foreach ($d in $lavDlls) {
+    $src = "third_party\ffmpeg\bin\$d"
+    if (Test-Path $src) { Copy-Item $src "dist\$d" -Force }
+    else { Write-Host "Aviso: $src ausente - scrub sem decoder persistente." -ForegroundColor Yellow }
+}
+
 # Whisper (small / Maximo): se faltar, baixa agora para a 1a transcricao ja sair pronta
 $sttOk = (Test-Path "stt\whisper-cli.exe") -and (Test-Path "stt\ggml-small.bin")
 if (-not $sttOk) {

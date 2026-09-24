@@ -4,7 +4,11 @@
 # Whisper empacotado (small ~466 MB; gerar com fetch-stt.ps1)
 /stt/
 
+# ---- FFmpeg shared (DLLs + headers da libav, ~140MB; baixar o win64-gpl-shared do BtbN) ----
+/third_party/
+
 # ---- Build artifacts ----
+*.dll
 *.exe
 *.res
 *.pdb
