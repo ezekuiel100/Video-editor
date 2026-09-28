@@ -43,6 +43,18 @@ export_gpu_fallback: bool // true = a corrida atual JÁ é o retry por CPU (não
 export_pending: bool
 export_pending_path: string // heap, dono; caminho de saída enfileirado
 export_pending_gpu: bool
+// Exportação em lote: cada item recorta o composto final no intervalo de um clipe-base.
+export_individual: bool
+export_range_on: bool
+export_range_start, export_range_end: f32
+ExportItem :: struct {
+	path: string,
+	start, end: f32,
+}
+export_queue: [dynamic]ExportItem
+export_queue_pos: int
+export_queue_gpu: bool
+export_queue_active: bool
 // QUALIDADE da exportação: define o CQ (NVENC) / CRF (x264) — nº maior = arquivo menor.
 // Auto = qualidade alta com TETO de bitrate ≈ o da fonte (mantém o arquivo ~ tamanho do
 // original em vez de inchar). Padrão: Média (equilíbrio tamanho×qualidade).
@@ -1094,8 +1106,12 @@ cmdline_len :: proc(args: [dynamic]string) -> int {
 // num arquivo, passado por -filter_complex_script (ver lá embaixo). Sem isso os testes não
 // teriam como inspecionar o filtergraph.
 export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynamic]string, graph: string, ok: bool) {
-	total := timeline_dur()
-	if total <= 0 { set_toast("Nada na timeline para exportar"); return nil, "", false }
+	full_total := timeline_dur()
+	if full_total <= 0 { set_toast("Nada na timeline para exportar"); return nil, "", false }
+	range_start := export_range_on ? clamp(export_range_start, f32(0), full_total) : f32(0)
+	range_end := export_range_on ? clamp(export_range_end, range_start, full_total) : full_total
+	total := range_end - range_start
+	if total <= 0.001 { set_toast("Intervalo vazio para exportar"); return nil, "", false }
 	// MÍDIA AINDA IMPORTANDO: recusa em vez de exportar um buraco preto. A guarda mora aqui
 	// (e não só no botão) porque este é o ponto por onde TODA exportação passa — e é o que os
 	// testes exercitam. Rota real: abrir um .ovp e apertar Exportar antes do bin terminar.
@@ -1601,6 +1617,11 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		}
 	}
 	} // else: caminho compose (canvas+overlay)
+	// Clipes separados recortam o composto final, preservando overlays, textos e efeitos.
+	if export_range_on {
+		fmt.sbprintf(&fb, "[%s]trim=%.3f:%.3f,setpts=PTS-STARTPTS[vrange];", vlabel, range_start, range_end)
+		vlabel = "vrange"
+	}
 	// prévia SEMPRE: 2º ramo rgb24 pelo stdout. fps=8 ANTES do scale (menos pixels).
 	// Este ffmpeg NÃO tem o filtro `fifo` (N-123074: "No such filter: 'fifo'") — usá-lo
 	// derrubava TODA exportação. O desacoplo fica no pipe de 1 MB + thread que drena
@@ -1653,7 +1674,9 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		// backward in time" e o muxer MP4 morre com -22 (Invalid argument) — o
 		// toast só mostrava a última linha ("Terminating thread... -22").
 		// first_pts=0 ancora o mix no zero da timeline.
-		fmt.sbprintf(&fb, "amix=inputs=%d:normalize=0:dropout_transition=0,aresample=async=1:first_pts=0[aout]", ac)
+		fmt.sbprintf(&fb, "amix=inputs=%d:normalize=0:dropout_transition=0,aresample=async=1:first_pts=0", ac)
+		if export_range_on do fmt.sbprintf(&fb, ",atrim=%.3f:%.3f,asetpts=PTS-STARTPTS", range_start, range_end)
+		fmt.sbprintf(&fb, "[aout]")
 	}
 
 	if !want_video && ac == 0 { set_toast("Nada de áudio para exportar"); return nil, "", false } // MP3 sem áudio
@@ -1799,6 +1822,52 @@ export_unique_path :: proc(path: string) -> string {
 	}
 }
 
+individual_clip_count :: proc() -> int {
+	base := MAXV
+	for i in 0 ..< nsegs {
+		if !seg_ready(i) || is_audio_track(segs[i].track) || clips[segs[i].src].is_text || clips[segs[i].src].is_audio do continue
+		base = min(base, segs[i].track)
+	}
+	if base == MAXV do return 0
+	n := 0
+	for i in 0 ..< nsegs do if seg_ready(i) && segs[i].track == base && !clips[segs[i].src].is_text && !clips[segs[i].src].is_audio do n += 1
+	return n
+}
+
+queue_individual_exports :: proc(dir, base: string, gpu: bool) {
+	for item in export_queue do delete(item.path)
+	clear(&export_queue)
+	export_queue_pos = 0
+	track := MAXV
+	for i in 0 ..< nsegs {
+		if !seg_ready(i) || is_audio_track(segs[i].track) || clips[segs[i].src].is_text || clips[segs[i].src].is_audio do continue
+		track = min(track, segs[i].track)
+	}
+	if track == MAXV { set_toast("Nenhum clipe de vídeo para exportar"); return }
+	idx: [MAX_SEGS]int
+	n := 0
+	for i in 0 ..< nsegs do if seg_ready(i) && segs[i].track == track && !clips[segs[i].src].is_text && !clips[segs[i].src].is_audio { idx[n] = i; n += 1 }
+	for a in 1 ..< n {
+		v := idx[a]
+		j := a
+		for j > 0 && segs[idx[j-1]].start > segs[v].start { idx[j] = idx[j-1]; j -= 1 }
+		idx[j] = v
+	}
+	for k in 0 ..< n {
+		sg := segs[idx[k]]
+		path := export_unique_path(fmt.tprintf("%s/%s_%03d%s", dir, base, k+1, export_fmt_ext(export_fmt)))
+		append(&export_queue, ExportItem{path, sg.start, sg.start + sg.dur})
+	}
+	export_queue_gpu = gpu
+	export_queue_active = len(export_queue) > 0
+	if export_queue_active {
+		export_range_on = true
+		export_range_start = export_queue[0].start
+		export_range_end = export_queue[0].end
+		queue_export(export_queue[0].path, gpu)
+	}
+}
+
 // enfileira o export p/ o próximo update (o botão do modal só marca o pedido).
 queue_export :: proc(out: string, gpu: bool) {
 	if intrinsics.atomic_load(&export_run) { set_toast("Exportação já em andamento"); return }
@@ -1826,7 +1895,7 @@ start_export :: proc(out: string, gpu: bool) {
 	// pasta" da conclusão) ficaria apontando p/ um arquivo que nunca foi criado
 	if export_out != "" do delete(export_out)
 	export_out = strings.clone(out)
-	total := timeline_dur()
+	total := export_range_on ? export_range_end - export_range_start : timeline_dur()
 	W, H := export_dims()
 	want_video := export_fmt != .MP3
 

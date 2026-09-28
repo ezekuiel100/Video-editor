@@ -501,7 +501,12 @@ draw_modal :: proc(sw, sh: f32) {
 			if ui_btn({ qx, py - 2, 66, 26 }, QLABELS[q], export_qual == q) do export_qual = q
 			qx += 72
 		}
-		py += 40
+		py += 36
+		// modo de renderização
+		txt("Renderizar:", px, py + 3, 14, TEXT)
+		if ui_btn({ px + 84, py - 2, 106, 26 }, "Vídeo único", !export_individual) do export_individual = false
+		if ui_btn({ px + 196, py - 2, 132, 26 }, "Separados", export_individual) do export_individual = true
+		py += 36
 		// infos
 		W, H := export_dims()
 		total := timeline_dur()
@@ -512,7 +517,11 @@ draw_modal :: proc(sw, sh: f32) {
 			mrow(px, py, "Resolução:", rl.TextFormat("%dx%d", i32(W), i32(H))); py += 26
 			mrow(px, py, "Taxa de Frames:", "30 fps"); py += 26
 		}
-		mrow(px, py, "Duração:", rl.TextFormat("%02d:%02d:%02d", i32(ts/3600), i32((ts%3600)/60), i32(ts%60))); py += 26
+		if export_individual {
+			mrow(px, py, "Saída:", rl.TextFormat("%d vídeos separados", i32(individual_clip_count()))); py += 26
+		} else {
+			mrow(px, py, "Duração:", rl.TextFormat("%02d:%02d:%02d", i32(ts/3600), i32((ts%3600)/60), i32(ts%60))); py += 26
+		}
 		est := export_est_size_mb(int(W), int(H), total)
 		szs: cstring = est >= 1024 ? rl.TextFormat("~ %.2f GB", est/1024) : rl.TextFormat("~ %.0f MB", est)
 		mrow(px, py, "Tamanho estimado:", szs); py += 32
@@ -539,7 +548,12 @@ draw_modal :: proc(sw, sh: f32) {
 			if tf_name.len == 0 do set_toast("Digite um nome")
 			else {
 				// enfileira: o start real roda no update (fora do BeginDrawing)
-				queue_export(fmt.tprintf("%s/%s%s", save_dir, name_str(), export_fmt_ext(export_fmt)), export_gpu)
+				if export_individual do queue_individual_exports(save_dir, name_str(), export_gpu)
+				else {
+					export_range_on = false
+					export_queue_active = false
+					queue_export(fmt.tprintf("%s/%s%s", save_dir, name_str(), export_fmt_ext(export_fmt)), export_gpu)
+				}
 				modal = .None
 			}
 		}

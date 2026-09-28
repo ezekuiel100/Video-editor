@@ -927,11 +927,22 @@ update :: proc() {
 			if export_out != "" do os.remove(export_out)
 			set_toast("Exportação cancelada")
 			export_gpu_fallback = false
-		} else if export_ok { // abre o modal de conclusão (com prévia) em vez de só um toast
-			if done_path != "" do delete(done_path)
-			done_path = strings.clone(export_out)
-			modal = .Done
-			if g_done_snd_ok do rl.PlaySound(g_done_snd) // aviso sonoro: exportação concluída
+		} else if export_ok { // no lote, dispara o próximo clipe; no fim abre a conclusão
+			if export_queue_active && export_queue_pos + 1 < len(export_queue) {
+				export_queue_pos += 1
+				item := export_queue[export_queue_pos]
+				export_range_start = item.start
+				export_range_end = item.end
+				queue_export(item.path, export_queue_gpu)
+				set_toast(rl.TextFormat("Exportando vídeo %d de %d…", i32(export_queue_pos+1), i32(len(export_queue))))
+			} else {
+				if done_path != "" do delete(done_path)
+				done_path = strings.clone(export_out)
+				modal = .Done
+				if g_done_snd_ok do rl.PlaySound(g_done_snd)
+				export_queue_active = false
+				export_range_on = false
+			}
 			export_gpu_fallback = false
 		} else {
 			// NVENC falhou de verdade (driver/nvcuda): tenta UMA vez por CPU.
