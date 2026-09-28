@@ -222,6 +222,131 @@ export_tmp_files: [dynamic]string // PNGs de texto gerados p/ o export (removido
 // quando o corte cai depois do fim do stream de vídeo (áudio da live continua).
 exp_still: [MAX_SEGS]bool
 exp_ainp:  [MAX_SEGS]int // input de áudio; -1 = usar o mesmo de seg_inp (vídeo)
+
+// FONTES POR movie= (não por -i): trechos de vídeo/áudio de arquivo entram no grafo pelo
+// filtro `movie`, que decodifica SOB DEMANDA (o grafo puxa o frame quando o concat/amix
+// pede). Com um `-ss X -copyts -i` por segmento o agendador do ffmpeg lê todos os inputs
+// em paralelo e, a partir de ~4 trechos da mesma live, o concat trava na troca de
+// segmento (0% CPU, arquivo parado — reproduzido fora do editor com o grafo salvo).
+// Índices >= MOVIE_BASE em seg_inp/exp_ainp apontam p/ exp_movies[n - MOVIE_BASE].
+// O movie mantém os timestamps ABSOLUTOS da fonte (como o -copyts), então os trim/atrim
+// do grafo não mudam. PNG/texto/mapas continuam como -i (1 frame, sem seek).
+// O que o -i fazia de graça e o movie NÃO faz (ver exp_movie_head): auto-rotação de
+// celular e reconfigurar o grafo quando a live muda de resolução no meio do arquivo.
+MOVIE_BASE :: 1 << 16
+ExpMovie :: struct {
+	path: string,
+	seek: f32,
+	w, h: i32, // dimensões de EXIBIÇÃO do probe (já com a rotação); 0 = não normaliza
+	rot:  int, // rotação de exibição em graus horários (0/90/180/270)
+	v, a: bool,
+}
+exp_movies: [dynamic]ExpMovie
+
+exp_add_movie :: proc(c: ^Clip, seek: f32) -> int {
+	m := ExpMovie{ path = c.path, seek = seek, w = c.vw, h = c.vh }
+	if !c.is_audio && !c.is_img {
+		probed := false
+		for o in exp_movies do if o.path == c.path { m.rot = o.rot; probed = true; break }
+		if !probed && os.exists(c.path) do m.rot = exp_probe_rot(c.path) // testes: path falso, sem rotação
+	}
+	append(&exp_movies, m)
+	return MOVIE_BASE + len(exp_movies) - 1
+}
+
+// rotação que o ffmpeg aplicaria no -i (autorotate). ffprobe dá a side data `rotation`
+// em graus ANTI-horários (-90 = celular deitado) e a tag antiga `rotate` em horários.
+exp_probe_rot :: proc(path: string) -> int {
+	_, out, _, e := os.process_exec(os.Process_Desc{
+		command = []string{
+			"ffprobe", "-v", "error", "-select_streams", "v:0",
+			"-show_entries", "stream_side_data=rotation:stream_tags=rotate", "-of", "default=nw=1", path,
+		},
+	}, context.temp_allocator)
+	if e != nil do return 0
+	theta := 0
+	for ln in strings.split_lines(string(out), context.temp_allocator) {
+		l := strings.trim_space(ln)
+		eq := strings.index_byte(l, '=')
+		if eq <= 0 do continue
+		v, ok := strconv.parse_f64(strings.trim_space(l[eq+1:]))
+		if !ok do continue
+		key := l[:eq]
+		if key == "rotation" do theta = -int(math.round(v))
+		else if strings.has_suffix(key, "rotate") do theta = int(math.round(v))
+	}
+	return ((theta % 360) + 360 + 45) % 360 / 90 * 90
+}
+
+// rótulo do stream de vídeo/áudio da entrada `n` ("[3:v]" ou "[mv0]") e marca o uso:
+// o movie só declara as saídas usadas (saída sem consumidor derruba o grafo).
+exp_vin :: proc(n: int) -> string {
+	if n >= MOVIE_BASE { exp_movies[n - MOVIE_BASE].v = true; return fmt.tprintf("[mv%d]", n - MOVIE_BASE) }
+	return fmt.tprintf("[%d:v]", n)
+}
+exp_ain :: proc(n: int) -> string {
+	if n >= MOVIE_BASE { exp_movies[n - MOVIE_BASE].a = true; return fmt.tprintf("[ma%d]", n - MOVIE_BASE) }
+	return fmt.tprintf("[%d:a]", n)
+}
+
+// caminho como valor de opção do movie dentro do grafo: 2 níveis de escape. Nível da
+// opção: \ ' : levam barra; nível do grafo: tudo entre aspas simples (' vira '\'').
+// Barras invertidas do Windows viram / (o ffmpeg aceita e some um nível de escape).
+exp_movie_path :: proc(p: string) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '\'')
+	for r in p {
+		c := r == '\\' ? '/' : r
+		switch c {
+		case ':':  strings.write_string(&b, "\\:")
+		case '\'': strings.write_string(&b, "\\'\\''") // \' (opção) com a aspa fechando/reabrindo o grafo
+		case:      strings.write_rune(&b, c)
+		}
+	}
+	strings.write_byte(&b, '\'')
+	return strings.to_string(b)
+}
+
+// cabeça do grafo: um `movie=` por fonte usada, com as saídas [mvK]/[maK].
+// O vídeo sai NORMALIZADO p/ o que o resto do grafo supõe (w×h do probe, já girado):
+//   - rotação: o -i auto-rotaciona o celular; o movie não. transpose/flip aqui.
+//   - resolução: live muda de tamanho no meio do arquivo (medido: 640x1280 → 320x640 →
+//     720x1280 na mesma live). O -i reconstruía o grafo inteiro a cada troca; o movie não,
+//     e os filtros seguintes ficavam com o tamanho velho (imagem deslocada + faixa verde).
+//     scale+pad com eval=frame reajusta a cada quadro e mantém a saída sempre w×h.
+exp_movie_head :: proc() -> string {
+	b := strings.builder_make(context.temp_allocator)
+	for m, k in exp_movies {
+		if !m.v && !m.a do continue
+		strings.write_string(&b, "movie=")
+		strings.write_string(&b, exp_movie_path(m.path))
+		if m.seek > 0.001 do fmt.sbprintf(&b, ":seek_point=%.3f", m.seek)
+		switch {
+		case m.v && m.a: fmt.sbprintf(&b, ":s=dv+da")
+		case m.v:        fmt.sbprintf(&b, ":s=dv")
+		case:            fmt.sbprintf(&b, ":s=da[ma%d];", k); continue
+		}
+		vl := fmt.tprintf("mv%d", k)
+		if m.a {
+			// 2 saídas: a de vídeo ganha nome p/ passar pela normalização
+			fmt.sbprintf(&b, "[mvr%d][ma%d];[mvr%d]", k, k, k)
+		} else {
+			fmt.sbprintf(&b, ",")
+		}
+		switch m.rot {
+		case 90:  strings.write_string(&b, "transpose=clock,")
+		case 180: strings.write_string(&b, "hflip,vflip,")
+		case 270: strings.write_string(&b, "transpose=cclock,")
+		}
+		if m.w > 0 && m.h > 0 {
+			fmt.sbprintf(&b, "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:eval=frame", m.w, m.h, m.w, m.h)
+		} else {
+			strings.write_string(&b, "null")
+		}
+		fmt.sbprintf(&b, "[%s];", vl)
+	}
+	return strings.to_string(b)
+}
 g_exp_pause_btn:  rl.Rectangle // rects dos botões do overlay (draw preenche, update lê)
 g_exp_cancel_btn: rl.Rectangle
 
@@ -955,7 +1080,7 @@ export_emit_direct_clip :: proc(fb: ^strings.Builder, i, W, H, piece: int, seg_i
 		// a duração; o still_loop no fim segura sg.dur @ 30fps.
 		// O 1º filtro NÃO pode vir com vírgula à frente: se scale for no-op
 		// (fonte == canvas) `[0:v],fps=30` vira filtro vazio e o ffmpeg aborta.
-		fmt.sbprintf(fb, "[%d:v]", seg_inp[i])
+		strings.write_string(fb, exp_vin(seg_inp[i]))
 		if sg.zoom_anim {
 			// 2× UMA vez, depois clona, depois anima — sem reescalar 14 MP/frame
 			fmt.sbprintf(fb, "%s", export_still_supersample(int(cc.vw), int(cc.vh)))
@@ -977,7 +1102,7 @@ export_emit_direct_clip :: proc(fb: ^strings.Builder, i, W, H, piece: int, seg_i
 		fmt.sbprintf(fb, "[p%d];", piece)
 		return
 	}
-	fmt.sbprintf(fb, "[%d:v]trim=%.3f:%.3f,setpts=(PTS-STARTPTS)/%.5f", seg_inp[i], t0, t1, sp)
+	fmt.sbprintf(fb, "%strim=%.3f:%.3f,setpts=(PTS-STARTPTS)/%.5f", exp_vin(seg_inp[i]), t0, t1, sp)
 	if sg.zoom_anim {
 		export_emit_kenburns(fb, i, segW, segH, 0, 0, "yuv420p")
 		export_concat_fit(fb, W, H, W, H)
@@ -1122,6 +1247,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	W, H := export_dims()
 	want_video := export_fmt != .MP3 // MP3 = só áudio: pula todo o ramo de vídeo do filtro
 	for i in 0 ..< MAX_SEGS { exp_still[i] = false; exp_ainp[i] = -1 }
+	exp_movies = make([dynamic]ExpMovie, context.temp_allocator)
 
 	args = make([dynamic]string, context.temp_allocator)
 	// -nostdin: app GUI não tem stdin útil; sem isto o ffmpeg às vezes fica à espera
@@ -1252,6 +1378,14 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		if !seg_ready(i) do continue
 		c := &clips[segs[i].src]
 		if !want_video && !c.src_audio do continue // MP3: só fontes com áudio viram input
+		// CLIPE SEPARADO / INTERVALO: segmento que não toca o trecho (com os esticões da
+		// transição) nem entra no comando. Sem input ele sai do vídeo e do mix sozinho
+		// (seg_inp = -1); o buraco vira preto/silêncio fora do trecho recortado.
+		if export_range_on {
+			s0 := segs[i].start - thead[i]
+			s1 := segs[i].start + segs[i].dur + ttail[i]
+			if s1 <= range_start + 0.001 || s0 >= range_end - 0.001 do continue
+		}
 		if c.is_text && c.is_caps && len(c.caps) > 0 {
 			// uma entrada por fala visível neste segmento (PNG WYSIWYG + enable)
 			sgc := segs[i]
@@ -1314,34 +1448,24 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				seg_inp[i] = inp; inp += 1
 				exp_still[i] = true
 				if c.src_audio {
-					if ss := segs[i].in_off - SEEK_PAD; ss > 0.001 do append(&args, "-ss", fmt.tprintf("%.3f", ss), "-copyts")
-					append(&args, "-i", c.path)
-					exp_ainp[i] = inp; inp += 1
+					exp_ainp[i] = exp_add_movie(c, segs[i].in_off - SEEK_PAD)
 				}
 			} else {
-				// SEEK NA ENTRADA (-ss ANTES do -i): o ffmpeg pula pro keyframe e decodifica só até
-				// o ponto pedido. Antes o corte era SÓ no filtro (trim), o que obriga a DECODIFICAR
-				// O ARQUIVO DESDE O ZERO até o in-point — num trecho aos 60min de uma live de 4h a
-				// exportação levava minutos só p/ COMEÇAR (medido: >120s, contra 0.7s com -ss).
-				// `-copyts` PRESERVA os timestamps originais: sem ele o seek rebaseia p/ zero e todo
-				// `trim`/`atrim` do grafo (que usa tempo ABSOLUTO da fonte) teria de ser deslocado à
-				// mão — é onde um erro dessincronizaria áudio/vídeo em silêncio. Com -copyts o grafo
-				// fica INTACTO. Verificado: vídeo bit-idêntico (inclusive com múltiplos inputs); o
-				// áudio muda só ~-93 dBFS (arredondamento do decoder AAC ao iniciar noutro ponto).
-				// Cada segmento tem seu PRÓPRIO input, então o -ss é por segmento, sem interferência.
-				// Recua um keyframe (SEEK_PAD) do trecho pedido: garante que o trim tenha material
-				// antes do in-point mesmo se o keyframe cair depois dele.
-				if ss := t0 - SEEK_PAD; ss > 0.001 do append(&args, "-ss", fmt.tprintf("%.3f", ss), "-copyts")
-				append(&args, "-i", c.path)
-				seg_inp[i] = inp; inp += 1
+				// SEEK NA FONTE (movie=…:seek_point): pula pro keyframe e decodifica só até o
+				// ponto pedido. Só com o trim, o ffmpeg DECODIFICA O ARQUIVO DESDE O ZERO até o
+				// in-point — num trecho aos 60min de uma live de 4h a exportação levava minutos só
+				// p/ COMEÇAR (medido: >120s, contra 0.7s com seek). O movie preserva os timestamps
+				// originais, então todo `trim`/`atrim` do grafo (tempo ABSOLUTO da fonte) fica
+				// intacto. Recua um keyframe (SEEK_PAD) do trecho pedido: garante que o trim tenha
+				// material antes do in-point mesmo se o keyframe cair depois dele.
+				// Por que movie e não `-ss -copyts -i`: ver MOVIE_BASE.
+				seg_inp[i] = exp_add_movie(c, t0 - SEEK_PAD)
 			}
 		} else {
 			// áudio puro / MP3 / aonly: só o arquivo-fonte
 			SEEK_PAD :: f32(2)
 			t0, _, _, _ := seg_src_span(i, thead[i], ttail[i])
-			if ss := t0 - SEEK_PAD; ss > 0.001 do append(&args, "-ss", fmt.tprintf("%.3f", ss), "-copyts")
-			append(&args, "-i", c.path)
-			seg_inp[i] = inp; inp += 1
+			seg_inp[i] = exp_add_movie(c, t0 - SEEK_PAD)
 		}
 		// EFEITO Distorção: mapas xmap/ymap viram inputs p/ o remap (tamanho segW×segH).
 		// Estático = 1 par (remap repete o frame). Wobble = 1 PERÍODO de mapas em sequência,
@@ -1401,7 +1525,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			if !dry { append(&export_tmp_files, strings.clone(xp)); append(&export_tmp_files, strings.clone(yp)) }
 		}
 	}
-	if inp == 0 { set_toast("Nada para exportar"); return nil, "", false }
+	if inp == 0 && len(exp_movies) == 0 { set_toast("Nada para exportar"); return nil, "", false }
 
 	fb := strings.builder_make(context.temp_allocator)
 	if want_video {
@@ -1410,9 +1534,9 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	vlabel: string
 	vc := 0
 	if dir_ok {
-		vlabel = export_emit_direct_video(&fb, dir_idxs[:ndir], W, H, total, seg_inp[:])
+		vlabel = export_emit_direct_video(&fb, dir_idxs[:ndir], W, H, full_total, seg_inp[:])
 	} else {
-	fmt.sbprintf(&fb, "color=c=black:s=%dx%d:r=30:d=%.3f[b0];", W, H, total)
+	fmt.sbprintf(&fb, "color=c=black:s=%dx%d:r=30:d=%.3f[b0];", W, H, full_total)
 	vlabel = "b0"
 	for t in 0 ..< g_nv {
 		if track_hidden[t] do continue // trilha oculta (olho): fora do vídeo exportado (áudio segue mixado)
@@ -1504,13 +1628,13 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			// preserva os timestamps, então esta conta independe do seek (ver montagem dos inputs)
 			if still {
 				if sg.zoom_anim {
-					fmt.sbprintf(&fb, "[%d:v]%s,loop=-1:size=1:start=0,trim=%.3f:%.3f,setpts=PTS-STARTPTS",
-						seg_inp[i], export_still_supersample(int(cc.vw), int(cc.vh)), t0, t1)
+					fmt.sbprintf(&fb, "%s%s,loop=-1:size=1:start=0,trim=%.3f:%.3f,setpts=PTS-STARTPTS",
+						exp_vin(seg_inp[i]), export_still_supersample(int(cc.vw), int(cc.vh)), t0, t1)
 				} else {
-					fmt.sbprintf(&fb, "[%d:v]loop=-1:size=1:start=0,trim=%.3f:%.3f,setpts=PTS-STARTPTS", seg_inp[i], t0, t1)
+					fmt.sbprintf(&fb, "%sloop=-1:size=1:start=0,trim=%.3f:%.3f,setpts=PTS-STARTPTS", exp_vin(seg_inp[i]), t0, t1)
 				}
 			} else {
-				fmt.sbprintf(&fb, "[%d:v]trim=%.3f:%.3f", seg_inp[i], t0, t1)
+				fmt.sbprintf(&fb, "%strim=%.3f:%.3f", exp_vin(seg_inp[i]), t0, t1)
 				if freeze_hd > 0.001 do fmt.sbprintf(&fb, ",tpad=start_mode=clone:start_duration=%.3f", freeze_hd)
 				if freeze_tl > 0.001 do fmt.sbprintf(&fb, ",tpad=stop_mode=clone:stop_duration=%.3f", freeze_tl)
 			}
@@ -1646,12 +1770,12 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		vv := sg.vol <= 0 ? 1 : sg.vol
 		sp := sg.speed <= 0 ? 1 : sg.speed
 		sep := strings.builder_len(fb) > 0 ? ";" : "" // MP3: sem grafo de vídeo, a 1ª cadeia não leva ";"
-		// atrim em tempo ABSOLUTO da fonte (o -copyts do input preserva os timestamps, então o
-		// seek de entrada não desloca nada aqui — nada a compensar).
-		// exp_ainp: quando o vídeo é um PNG de freeze, o áudio vem noutro -i do arquivo.
+		// atrim em tempo ABSOLUTO da fonte (o movie preserva os timestamps, então o seek
+		// não desloca nada aqui — nada a compensar).
+		// exp_ainp: quando o vídeo é um PNG de freeze, o áudio vem noutro movie do arquivo.
 		ainp := exp_ainp[i] >= 0 ? exp_ainp[i] : seg_inp[i]
-		fmt.sbprintf(&fb, "%s[%d:a]atrim=%.3f:%.3f,asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,volume=%.3f",
-			sep, ainp, sg.in_off, sg.in_off+sg.dur*sp, vv)
+		fmt.sbprintf(&fb, "%s%satrim=%.3f:%.3f,asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,volume=%.3f",
+			sep, exp_ain(ainp), sg.in_off, sg.in_off+sg.dur*sp, vv)
 		// velocidade: atempo aceita 0.5..2 por estágio; encadeia p/ cobrir 0.25..4.
 		// Vem ANTES dos fades p/ que o stream já tenha duração `dur` (tempo de timeline).
 		if abs(sp-1) > 0.001 {
@@ -1692,7 +1816,8 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	// assim: -/opt (ler o valor de um arquivo) só existe do ffmpeg 7 p/ cima, e o binário é
 	// resolvido pelo PATH, então trocar quebraria em qualquer instalação mais antiga. O aviso
 	// de deprecação sai em nível warning e o -loglevel error acima já o silencia.
-	graph = strings.to_string(fb)
+	// as fontes movie= vão na FRENTE (só agora se sabe quais streams cada uma usa)
+	graph = strings.concatenate({exp_movie_head(), strings.to_string(fb)}, context.temp_allocator)
 	fg_path := fmt.tprintf("%s_%d_fgraph.txt", AUDIO_BASE, u32(win.GetCurrentProcessId()))
 	if !dry {
 		if os.write_entire_file(fg_path, transmute([]u8)graph) != nil {
