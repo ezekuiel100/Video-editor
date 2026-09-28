@@ -121,6 +121,13 @@ TRANS_FLIP     :: 16 // flip horizontal (vira a página)
 TRANS_ZOOM_OUT :: 17 // zoom inverso (afasta)
 TRANS_CLOCK    :: 18 // wipe de relógio
 TRANS_SHAKE    :: 19 // tremor no corte
+// transições de EDIT (TikTok/CapCut): a intensidade `k` sobe até o corte e desce depois
+TRANS_ZOOM_BLUR :: 20 // zoom punch com desfoque, corte seco
+TRANS_STRETCH   :: 21 // estica na horizontal, corte seco
+TRANS_PIXEL     :: 22 // pixeliza até o corte e volta
+TRANS_NEGATIVE  :: 23 // flash negativo + soco de zoom
+TRANS_STROBE    :: 24 // pisca A/B
+TRANS_BLUR      :: 25 // desfoque cruzado (dissolver borrado)
 
 // tile do painel: 0 dissolver | 1 fade in | 2 fade out | 3 orgânico | 4+ = TRANS_* + 2
 trans_panel_is_cut :: proc(kind: int) -> bool { return kind == 0 || kind == 3 || kind >= 4 }
@@ -139,6 +146,17 @@ trans_is_slide :: proc(m: int) -> bool { return (m >= TRANS_SLIDE_L && m <= TRAN
 trans_is_dissolve :: proc(m: int) -> bool { return m == TRANS_DISSOLVE }
 trans_tiktok_fast :: proc(m: int) -> bool {
 	return m == TRANS_WHIP || m == TRANS_GLITCH || m == TRANS_SHAKE || m == TRANS_SPIN || m == TRANS_FLIP
+}
+// duração ao aplicar: as de edit são rápidas (o impacto está no corte)
+trans_default_dur :: proc(m: int) -> f32 {
+	switch m {
+	case TRANS_GHOST:    return 1.2
+	case TRANS_NEGATIVE: return 0.3
+	case TRANS_ZOOM_BLUR, TRANS_STRETCH: return 0.4
+	case TRANS_PIXEL, TRANS_STROBE:      return 0.5
+	case TRANS_BLUR:     return 0.6
+	}
+	return trans_tiktok_fast(m) ? 0.4 : 1
 }
 trans_slide_dir :: proc(m: int) -> (dx, dy: f32) {
 	switch m {
@@ -172,8 +190,57 @@ trans_mode_name :: proc(m: int) -> cstring {
 	case TRANS_ZOOM_OUT: return "Zoom out"
 	case TRANS_CLOCK:    return "Relógio"
 	case TRANS_SHAKE:    return "Tremor"
+	case TRANS_ZOOM_BLUR: return "Zoom punch"
+	case TRANS_STRETCH:  return "Esticar"
+	case TRANS_PIXEL:    return "Pixelizar"
+	case TRANS_NEGATIVE: return "Negativo"
+	case TRANS_STROBE:   return "Estrobo"
+	case TRANS_BLUR:     return "Desfoque"
 	}
 	return "Transição"
+}
+
+// ---- transições de EDIT: a MESMA conta roda na prévia (shader) e no export (ffmpeg) ----
+EDIT_BLUR_MAX   :: f32(0.03) // raio máx. do desfoque, fração da LARGURA do clipe
+EDIT_BLUR_STEPS :: 5         // o export não anima o raio do boxblur: vai em degraus (enable)
+EDIT_PIX_MIN    :: f32(8)    // blocos na largura no pico do pixelizar
+EDIT_PIX_RATIO  :: f32(60)   // longe do corte: 8*60 = 480 blocos (quase nítido)
+EDIT_STROBE_HZ  :: f32(12)   // trocas A/B por segundo no estrobo
+
+trans_is_edit :: proc(m: int) -> bool { return m >= TRANS_ZOOM_BLUR && m <= TRANS_BLUR }
+// corte SECO no meio da janela: A só antes do corte, B só depois
+trans_hard_cut :: proc(m: int) -> bool {
+	return m == TRANS_ZOOM_BLUR || m == TRANS_STRETCH || m == TRANS_PIXEL || m == TRANS_NEGATIVE
+}
+// intensidade da transição de edit em p (0..1 da janela): 0 nas pontas, 1 no corte
+edit_k :: proc(p: f32) -> f32 { return 1 - abs(2*clamp(p, 0, 1) - 1) }
+
+// o que a transição de edit faz com UM clipe na intensidade k. pix = blocos na largura (0 = off).
+EditFx :: struct { scl, sx, blur, pix: f32, neg: bool }
+edit_fx :: proc(mode: int, k: f32) -> EditFx {
+	k2 := k*k
+	fx := EditFx{ scl = 1, sx = 1 }
+	switch mode {
+	case TRANS_ZOOM_BLUR: fx.scl = 1 + 0.7*k2; fx.blur = edit_blur_q(k2)
+	case TRANS_STRETCH:   fx.sx = 1 + 2.2*k2;  fx.blur = edit_blur_q(0.6*k2)
+	case TRANS_PIXEL:     if k > 0 do fx.pix = math.floor(EDIT_PIX_MIN*math.pow(EDIT_PIX_RATIO, 1-k) + 0.5)
+	case TRANS_NEGATIVE:  fx.scl = 1 + 0.15*k2; fx.neg = k > 0.35
+	case TRANS_BLUR:      fx.blur = edit_blur_q(k)
+	}
+	return fx
+}
+// desfoque 0..1 em degraus (EDIT_BLUR_STEPS): o export emite um boxblur por degrau
+edit_blur_q :: proc(b: f32) -> f32 {
+	return math.floor(clamp(b, 0, 1)*EDIT_BLUR_STEPS + 0.5) / EDIT_BLUR_STEPS
+}
+// trecho da janela (em p) em que o clipe aparece e recebe o efeito
+edit_role_span :: proc(mode: int, incoming: bool) -> (lo, hi: f32) {
+	if trans_hard_cut(mode) do return incoming ? 0.5 : 0, incoming ? 1 : 0.5
+	return 0, 1
+}
+// estrobo: A nas fases pares, B nas ímpares (fase = trocas desde o início da janela)
+edit_strobe_b :: proc(t, t0: f32) -> bool {
+	return int(math.floor((t - t0)*EDIT_STROBE_HZ)) %% 2 == 1
 }
 trans_panel_name :: proc(kind: int) -> cstring {
 	switch kind {

@@ -937,7 +937,7 @@ apply_cut_trans :: proc(si, mode: int) {
 	if seg_speed(si) != 1 { set_toast("Transição não combina com velocidade alterada"); return }
 	tm := trans_max(si)
 	if tm <= 0.01 { trans_deny_toast(si); return }
-	dur := mode == TRANS_GHOST ? f32(1.2) : trans_tiktok_fast(mode) ? f32(0.4) : f32(1)
+	dur := trans_default_dur(mode)
 	segs[si].trans = min(dur, tm)
 	segs[si].trans_mode = mode
 	set_toast(rl.TextFormat("%s aplicado", trans_mode_name(mode)))

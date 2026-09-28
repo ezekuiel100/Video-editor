@@ -465,6 +465,9 @@ main :: proc() {
 		fx_loc_amt         = rl.GetShaderLocation(bulge_shader, "fxAmt")
 		fx_loc_time        = rl.GetShaderLocation(bulge_shader, "fxTime")
 		fx_loc_ang         = rl.GetShaderLocation(bulge_shader, "fxAng")
+		fx_loc_tblur       = rl.GetShaderLocation(bulge_shader, "tBlur")
+		fx_loc_tpix        = rl.GetShaderLocation(bulge_shader, "tPix")
+		fx_loc_tneg        = rl.GetShaderLocation(bulge_shader, "tNeg")
 	}
 	// fontes dos clipes de texto: Segoe UI (=ui_font) + um conjunto do Windows carregado
 	// em THREAD (2 estágios, ver tf_cpu) — síncrono custava ~2.7s e dominava o startup.

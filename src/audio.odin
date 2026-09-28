@@ -234,7 +234,7 @@ chunk_request :: proc(c: ^Clip, local: f32) {
 // cada frame. ctxData nil = a carga falhou de vez, não há o que descarregar.
 music_load :: proc(path: string) -> (rl.Music, bool) {
 	m := rl.LoadMusicStream(strings.clone_to_cstring(path, context.temp_allocator))
-	if m.frameCount == 0 {
+	if m.frameCount == 0 || m.stream.sampleRate == 0 {
 		if m.ctxData != nil do rl.UnloadMusicStream(m)
 		return {}, false
 	}
@@ -314,7 +314,7 @@ audio_load_ready :: proc() {
 // chunk sob demanda, ou uma parte do completo. Fora da cobertura o playback cai
 // pro relógio de parede (mudo) e adota a parte pronta ou encomenda um chunk.
 audio_clock_ok :: proc(c: ^Clip, local: f32) -> bool {
-	if !c.has_audio do return false
+	if !c.has_audio || c.music.stream.sampleRate == 0 do return false
 	end := c.music_base + f32(c.music.frameCount) / f32(c.music.stream.sampleRate)
 	return local >= c.music_base && local < end - 0.25
 }
@@ -330,7 +330,7 @@ audio_clock_ok :: proc(c: ^Clip, local: f32) -> bool {
 // part_path(c,0) já checavam isso (try_part_open e as duas cargas do audio_load_ready).
 audio_full_window_ready :: proc(c: ^Clip) -> bool {
 	if intrinsics.atomic_load(&c.parts_done) < 1 do return false
-	if !c.has_audio || c.music_base != 0 do return false
+	if !c.has_audio || c.music_base != 0 || c.music.stream.sampleRate == 0 do return false
 	return f32(c.music.frameCount) / f32(c.music.stream.sampleRate) >= c.dur - 1.0
 }
 
@@ -592,6 +592,7 @@ spv_release :: proc(i: int) {
 		if e.ok { rl.UnloadMusicStream(e.music); e.ok = false }
 		spv_trash_take(e.path); e.path = ""
 		e.on = false; e.key = 0
+		e.bad_key = 0; e.bad_n = 0
 	}
 }
 
@@ -712,7 +713,12 @@ spv_poll :: proc() {
 		// porque a contagem de falhas mora no ramo `!ok` e o ffmpeg tinha dado certo. Cada
 		// ciclo vazava um stream, deixava um WAV no %TEMP% e subia outro ffmpeg.
 		m, mok := music_load(e.path)
-		if mok { e.music = m; e.ok = true; e.key = spv_render_key }
+		if mok {
+			e.music = m; e.ok = true; e.key = spv_render_key
+			// Uma renderizacao valida encerra a sequencia de falhas. Sem zerar aqui,
+			// tentativas antigas reduziam o orçamento de uma regeneracao futura.
+			e.bad_key = 0; e.bad_n = 0
+		}
 		else { // conta como falha p/ o SPV_TRIES desarmar o laço
 			e.music = {}
 			if e.bad_key == spv_render_key do e.bad_n += 1

@@ -15,6 +15,7 @@ Editor de vídeo não-linear, escrito em **[Odin](https://odin-lang.org/)** com 
 - **Bin de mídia** — importação assíncrona (probe + decode + áudio numa thread por mídia), miniaturas, arrastar pra timeline.
 - **Filmstrip de miniaturas** e **forma de onda real** ao longo de cada clipe.
 - **Transições e fades** — dissolver, dissolve orgânico, wipes (4 direções), deslizar (4 direções), íris, flash, zoom, giro, whip, glitch, flip, zoom out, relógio, tremor; fade de vídeo (preto) de entrada/saída; fades de áudio.
+  - **Transições de edit** (estilo TikTok/CapCut) — zoom punch, esticar, pixelizar, negativo, estrobo e desfoque. Corte seco no meio da janela com o efeito subindo até o corte (o desfoque cruza as opacidades). A prévia (shader) e o export (ffmpeg) usam a mesma conta (`edit_fx`); o desfoque vai em degraus no export (`boxblur` + `enable`).
 - **Desfoque local** — efeito de faixa que desfoca só uma região (quadrado ou círculo, posição e tamanho no preview); o **Desfoque** continua valendo para o quadro inteiro.
 - **Chroma key** — remove fundo verde ou azul. Coloque o fundo em V1, o green screen em V2 e solte o efeito numa trilha **acima** do green screen (efeitos não podem cobrir o clipe na mesma trilha). Similaridade e suavidade ajustáveis.
 - **Transform no preview** — mover, escalar, recorte (crop), distorção; tudo WYSIWYG com o export.

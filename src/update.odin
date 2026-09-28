@@ -73,9 +73,11 @@ update :: proc() {
 	// o id ficava preso e edit_in_progress() congelava o undo. Sem botão down, solta.
 	if ui_slider_active >= 0 && !rl.IsMouseButtonDown(.LEFT) && !rl.IsMouseButtonPressed(.LEFT) do ui_slider_active = -1
 	// gravar DEPOIS de um frame com "Salvando..." na tela (o write é síncrono e instantâneo)
-	if save_pending && proj_path != "" {
+	if save_pending && save_target != "" {
 		save_pending = false
-		save_project(proj_path)
+		save_project(save_target)
+		delete(save_target)
+		save_target = ""
 	}
 
 	audio_load_ready() // carrega áudios cuja extração terminou

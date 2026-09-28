@@ -497,6 +497,102 @@ export_emit_glitch :: proc(fb: ^strings.Builder, t0, d: f32) {
 		t0, t0+d, t0, t0, t0+d, t0)
 }
 
+// janela [start2,tend] do overlay + o que as transições de EDIT tiram dela: corte seco
+// (A some no corte, B só aparece nele) e estrobo (A nas fases pares, B nas ímpares).
+// Mesmas regras de visibilidade da prévia (composite_video).
+export_overlay_enable :: proc(start2, tend: f32, in_mode: int, in_t0, in_d: f32, out_mode: int, out_t0, out_d: f32) -> string {
+	en := fmt.tprintf("between(t\\,%.3f\\,%.3f)", start2, tend)
+	if in_d > 0.01 {
+		t1 := in_t0 + in_d
+		if trans_hard_cut(in_mode) {
+			en = fmt.tprintf("%s*gte(t\\,%.3f)", en, in_t0 + in_d/2)
+		} else if in_mode == TRANS_STROBE {
+			en = fmt.tprintf("%s*(gte(t\\,%.3f)+lt(t\\,%.3f)*eq(mod(floor((t-%.3f)*%.0f)\\,2)\\,1))", en, t1, t1, in_t0, EDIT_STROBE_HZ)
+		}
+	}
+	if out_d > 0.01 {
+		if trans_hard_cut(out_mode) {
+			en = fmt.tprintf("%s*lt(t\\,%.3f)", en, out_t0 + out_d/2)
+		} else if out_mode == TRANS_STROBE {
+			en = fmt.tprintf("%s*(lt(t\\,%.3f)+gte(t\\,%.3f)*eq(mod(floor((t-%.3f)*%.0f)\\,2)\\,0))", en, out_t0, out_t0, out_t0, EDIT_STROBE_HZ)
+		}
+	}
+	return en
+}
+
+// trecho (em tempo de timeline) em que o efeito vale p/ este papel. B no corte seco começa
+// UM QUADRO antes do corte: os quadros dele caem em start2 + n/30 e, se o corte não cai
+// nessa grade, o quadro que o overlay mostra NO corte tem carimbo um pouco antes dele —
+// fora da janela, B aparecia nítido justo no quadro do impacto. Nesse quadro extra o
+// tempo trava no corte (tk): B sai no PICO, não com o k de antes do corte.
+export_edit_span :: proc(mode: int, t0, d: f32, incoming: bool) -> (a, b, tk: f32) {
+	lo, hi := edit_role_span(mode, incoming)
+	a = t0 + lo*d; b = t0 + hi*d; tk = -1
+	if incoming && trans_hard_cut(mode) { tk = a; a -= 1.0/30 }
+	return
+}
+
+// intensidade k(t) da transição de edit (edit_k) como expressão do ffmpeg; tk >= 0 trava
+// o tempo em no mínimo tk (ver export_edit_span)
+export_edit_k :: proc(t0, d, tk: f32) -> string {
+	tt := tk >= 0 ? fmt.tprintf("max(t\\,%.3f)", tk) : "t"
+	return fmt.tprintf("(1-abs(2*(%s-%.3f)/%.3f-1))", tt, t0, d)
+}
+
+// efeitos de PIXEL da transição de edit num papel do clipe (A sai / B entra), no quadro
+// segW×segH ANTES da rotação — a prévia aplica no shader em coords locais da região:
+// desfoque em degraus (boxblur+enable), pixelizar (scale p/ blocos + volta em neighbor)
+// e negativo (negate+enable). Os instantes vêm de edit_fx, a mesma conta da prévia.
+export_emit_edit_px :: proc(fb: ^strings.Builder, mode: int, t0, d: f32, incoming: bool, segW, segH: int) {
+	if d <= 0.01 || !trans_is_edit(mode) do return
+	a, b, tk := export_edit_span(mode, t0, d, incoming)
+	// desfoque/negativo: varre a janela e emite um filtro por trecho de valor constante
+	STEP :: f32(0.001)
+	cur_blur := f32(0); cur_neg := false; seg0 := a
+	flush :: proc(fb: ^strings.Builder, blur: f32, neg: bool, x0, x1: f32, segW, segH: int) {
+		if x1 - x0 < 0.0005 do return
+		if blur > 0 {
+			r := int(math.round(blur * EDIT_BLUR_MAX * f32(segW)))
+			r = clamp(r, 1, max(1, min(segW, segH)/2 - 1))
+			// cr em px do plano de croma (metade no yuv420p, inteiro no RGB): mesmo raio na imagem
+			fmt.sbprintf(fb, ",boxblur=lr=%d:lp=1:cr=%d/hsub:enable='gte(t\\,%.3f)*lt(t\\,%.3f)'", r, r, x0, x1)
+		}
+		if neg do fmt.sbprintf(fb, ",negate=enable='gte(t\\,%.3f)*lt(t\\,%.3f)'", x0, x1)
+	}
+	n := int(math.ceil((b - a)/STEP))
+	for s in 0 ..= n {
+		last := s == n
+		tt := min(a + f32(s)*STEP, b)
+		e := edit_fx(mode, edit_k((max(tt, tk) - t0)/d))
+		if last || e.blur != cur_blur || e.neg != cur_neg {
+			// o último trecho fecha um pouco depois de `b` p/ o lt() incluir o quadro do fim
+			flush(fb, cur_blur, cur_neg, seg0, last ? b + 0.002 : tt, segW, segH)
+			cur_blur = e.blur; cur_neg = e.neg; seg0 = tt
+		}
+		if last do break
+	}
+	if mode == TRANS_PIXEL {
+		K := export_edit_k(t0, d, tk)
+		nx := fmt.tprintf("floor(%.0f*pow(%.0f\\,1-%s)+0.5)", EDIT_PIX_MIN, EDIT_PIX_RATIO, K)
+		ny := fmt.tprintf("max(1\\,floor(%s*%.5f+0.5))", nx, f32(segH)/f32(max(segW, 1)))
+		fmt.sbprintf(fb, ",scale=w='if(between(t\\,%.3f\\,%.3f)\\,%s\\,iw)':h='if(between(t\\,%.3f\\,%.3f)\\,%s\\,ih)':eval=frame,scale=%d:%d:flags=neighbor",
+			a, b, nx, a, b, ny, segW, segH)
+	}
+}
+
+// ESCALA da transição de edit (zoom punch / esticar / soco do negativo): 1 fora da janela
+export_emit_edit_scale :: proc(fb: ^strings.Builder, mode: int, t0, d: f32, incoming, allow_sx: bool) {
+	if d <= 0.01 || !trans_is_edit(mode) do return
+	e := edit_fx(mode, 1) // coeficientes: escala = 1 + (pico-1)*k²
+	cs := e.scl - 1; cx := allow_sx ? e.sx - 1 : 0
+	if cs < 0.001 && cx < 0.001 do return
+	a, b, tk := export_edit_span(mode, t0, d, incoming)
+	K := export_edit_k(t0, d, tk)
+	sw := fmt.tprintf("if(between(t\\,%.3f\\,%.3f)\\,(1+%.4f*pow(%s\\,2))*(1+%.4f*pow(%s\\,2))\\,1)", a, b, cs, K, cx, K)
+	sh := fmt.tprintf("if(between(t\\,%.3f\\,%.3f)\\,1+%.4f*pow(%s\\,2)\\,1)", a, b, cs, K)
+	fmt.sbprintf(fb, ",scale=w='max(2\\,trunc(iw*%s))':h='max(2\\,trunc(ih*%s))':eval=frame", sw, sh)
+}
+
 export_emit_zoom_out :: proc(fb: ^strings.Builder, t0, d: f32, grow: bool) {
 	if d <= 0.01 do return
 	if grow {
@@ -1067,6 +1163,9 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	glitch_t0, glitch_d: [MAX_SEGS]f32
 	shake_t0, shake_d: [MAX_SEGS]f32
 	shake_in, shake_out: [MAX_SEGS]bool
+	// transições de EDIT: papel de B (entra) e de A (sai) — um clipe pode ter os dois
+	edit_in_mode, edit_out_mode: [MAX_SEGS]int
+	edit_in_t0, edit_in_d, edit_out_t0, edit_out_d: [MAX_SEGS]f32
 	for i in 0 ..< nsegs {
 		d := seg_trans(i)
 		if d > 0 {
@@ -1114,6 +1213,13 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			case mode == TRANS_SHAKE:
 				shake_t0[i] = t0; shake_d[i] = d; shake_in[i] = true
 				if a >= 0 { shake_t0[a] = t0; shake_d[a] = d; shake_out[a] = true }
+			case trans_is_edit(mode):
+				edit_in_mode[i] = mode; edit_in_t0[i] = t0; edit_in_d[i] = d
+				if a >= 0 { edit_out_mode[a] = mode; edit_out_t0[a] = t0; edit_out_d[a] = d }
+				if mode == TRANS_BLUR { // desfoque cruza as opacidades como o dissolver
+					tfin[i] = max(tfin[i], d)
+					if a >= 0 do tfout[a] = max(tfout[a], d)
+				}
 			}
 		}
 	}
@@ -1340,12 +1446,16 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				export_emit_spin(&fb, spin_t0[i], spin_d[i], spin_sign[i])
 				export_emit_flip(&fb, flip_t0[i], flip_d[i], flip_out[i])
 				export_emit_glitch(&fb, glitch_t0[i], glitch_d[i])
+				// texto: a prévia só escala (sem shader nem esticão), então aqui também
+				export_emit_edit_scale(&fb, edit_in_mode[i], edit_in_t0[i], edit_in_d[i], true, false)
+				export_emit_edit_scale(&fb, edit_out_mode[i], edit_out_t0[i], edit_out_d[i], false, false)
 				fmt.sbprintf(&fb, "[v%d];", vc)
 				nb := fmt.tprintf("c%d", vc)
 				ox, oy := export_overlay_xy(0, 0, slide_in_dx[i], slide_in_dy[i], slide_in_t0[i], slide_in_d[i], slide_out_dx[i], slide_out_dy[i], slide_out_t0[i], slide_out_d[i])
 				ox, oy = export_shake_xy(ox, oy, shake_t0[i], shake_d[i])
-				fmt.sbprintf(&fb, "[%s][v%d]overlay=x='%s':y='%s':enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
-					vlabel, vc, ox, oy, start2, tend, nb)
+				en := export_overlay_enable(start2, tend, edit_in_mode[i], edit_in_t0[i], edit_in_d[i], edit_out_mode[i], edit_out_t0[i], edit_out_d[i])
+				fmt.sbprintf(&fb, "[%s][v%d]overlay=x='%s':y='%s':enable='%s':eof_action=pass[%s];",
+					vlabel, vc, ox, oy, en, nb)
 				vlabel = nb; vc += 1
 				continue
 			}
@@ -1427,6 +1537,10 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 				fmt.sbprintf(&fb, ",format=rgba")
 				export_emit_chroma(&fb, ck)
 			}
+			// transição de EDIT (desfoque/pixel/negativo): no quadro segW×segH, antes da
+			// rotação — a prévia faz o mesmo no shader, nas coords locais da região
+			export_emit_edit_px(&fb, edit_in_mode[i], edit_in_t0[i], edit_in_d[i], true, segW, segH)
+			export_emit_edit_px(&fb, edit_out_mode[i], edit_out_t0[i], edit_out_d[i], false, segW, segH)
 			if abs(sg.rot) > 0.5 {
 				rad := sg.rot * math.PI/180
 				fmt.sbprintf(&fb, ",rotate=%.5f:c=none:ow=rotw(%.5f):oh=roth(%.5f)", rad, rad, rad)
@@ -1452,12 +1566,15 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			export_emit_spin(&fb, spin_t0[i], spin_d[i], spin_sign[i])
 			export_emit_flip(&fb, flip_t0[i], flip_d[i], flip_out[i])
 			export_emit_glitch(&fb, glitch_t0[i], glitch_d[i])
+			export_emit_edit_scale(&fb, edit_in_mode[i], edit_in_t0[i], edit_in_d[i], true, true)
+			export_emit_edit_scale(&fb, edit_out_mode[i], edit_out_t0[i], edit_out_d[i], false, true)
 			fmt.sbprintf(&fb, "[v%d];", vc)
 			nb := fmt.tprintf("c%d", vc)
 			ox, oy := export_overlay_xy(sg.px, sg.py, slide_in_dx[i], slide_in_dy[i], slide_in_t0[i], slide_in_d[i], slide_out_dx[i], slide_out_dy[i], slide_out_t0[i], slide_out_d[i])
 			ox, oy = export_shake_xy(ox, oy, shake_t0[i], shake_d[i])
-			fmt.sbprintf(&fb, "[%s][v%d]overlay=x='%s':y='%s':enable='between(t\\,%.3f\\,%.3f)':eof_action=pass[%s];",
-				vlabel, vc, ox, oy, start2, tend, nb)
+			en := export_overlay_enable(start2, tend, edit_in_mode[i], edit_in_t0[i], edit_in_d[i], edit_out_mode[i], edit_out_t0[i], edit_out_d[i])
+			fmt.sbprintf(&fb, "[%s][v%d]overlay=x='%s':y='%s':enable='%s':eof_action=pass[%s];",
+				vlabel, vc, ox, oy, en, nb)
 			vlabel = nb; vc += 1
 		}
 		// EFEITOS DE FAIXA ancorados NESTA trilha t: aplicam ao COMPOSTO até aqui (trilhas 0..t =

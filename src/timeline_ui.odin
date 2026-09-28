@@ -20,6 +20,8 @@ trans_badge_col :: proc(mode: int) -> rl.Color {
 	case TRANS_FLIP:   return { 180, 180, 255, 255 }
 	case TRANS_CLOCK:  return { 230, 200, 120, 255 }
 	case TRANS_SHAKE:  return { 255, 140, 100, 255 }
+	case TRANS_ZOOM_BLUR, TRANS_STRETCH, TRANS_PIXEL, TRANS_NEGATIVE, TRANS_STROBE, TRANS_BLUR:
+		return { 255, 110, 190, 255 } // edits: rosa-choque
 	}
 	return { 248, 214, 122, 255 } // dissolver
 }
@@ -66,6 +68,11 @@ draw_trans_badge_mark :: proc(ix0, iy0, ix1, iy1: f32, mode: int, rc: rl.Color) 
 	case TRANS_SHAKE:
 		rl.DrawLineEx({ ix0, iy0 + 2 }, { ix1, iy1 - 2 }, 1.4, rc)
 		rl.DrawLineEx({ ix0, iy1 - 2 }, { ix1, iy0 + 2 }, 1.4, rc)
+	case TRANS_ZOOM_BLUR, TRANS_STRETCH, TRANS_PIXEL, TRANS_NEGATIVE, TRANS_STROBE, TRANS_BLUR:
+		// raio: o corte seco das transições de edit
+		mx := (ix0+ix1)/2
+		draw_tri2({ mx + 1, iy0 }, { ix0 + 1, (iy0+iy1)/2 + 1 }, { mx, (iy0+iy1)/2 + 1 }, rc)
+		draw_tri2({ mx, (iy0+iy1)/2 - 1 }, { ix1 - 1, (iy0+iy1)/2 - 1 }, { mx - 1, iy1 }, rc)
 	case:
 		rl.DrawTriangle({ ix0, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc)
 		rl.DrawTriangle({ ix1, iy0 }, { ix1, iy1 }, { ix0, iy1 }, rc)

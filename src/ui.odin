@@ -1286,6 +1286,9 @@ draw_subbar :: proc(y, media_w, h: f32) {
 // ---------- painel de mídia (bin) ----------
 // mostra todas as mídias importadas; arraste um item para a timeline (V1) para usá-lo.
 // mini-ícone da transição dentro de um tile
+// triângulo sem depender da ordem dos vértices (o raylib descarta a face de trás)
+draw_tri2 :: proc(a, b, c: rl.Vector2, col: rl.Color) { rl.DrawTriangle(a, b, c, col); rl.DrawTriangle(a, c, b, col) }
+
 draw_trans_icon :: proc(box: rl.Rectangle, kind: int) {
 	ix := box.x + 20; iy := box.y + 12; iw := box.width - 40; ih := box.height - 30
 	a_col := rl.Color{ 70, 110, 140, 255 }
@@ -1389,6 +1392,43 @@ draw_trans_icon :: proc(box: rl.Rectangle, kind: int) {
 		rl.DrawRectangleRec({ ix - 2, iy + 4, iw, ih }, a_col)
 		rl.DrawRectangleRec({ ix + 4, iy - 2, iw, ih }, b_col)
 		rl.DrawRectangleLinesEx({ ix, iy, iw, ih }, 1.4, rl.WHITE)
+	case 22: // zoom punch: quadros concêntricos + riscos de velocidade
+		rl.DrawRectangleRec({ ix, iy, iw, ih }, a_col)
+		cx := ix + iw/2; cy := iy + ih/2
+		for k in 0 ..< 3 {
+			f := 0.25 + f32(k)*0.25
+			rl.DrawRectangleLinesEx({ cx - iw*f/2, cy - ih*f/2, iw*f, ih*f }, 1.2, rl.Color{ 255, 255, 255, u8(230 - k*60) })
+		}
+		rl.DrawLineEx({ ix + 3, iy + 3 }, { ix + iw*0.22, iy + ih*0.22 }, 1.4, rl.WHITE)
+		rl.DrawLineEx({ ix + iw - 3, iy + ih - 3 }, { ix + iw*0.78, iy + ih*0.78 }, 1.4, rl.WHITE)
+	case 23: // esticar: bloco largo com setas p/ os lados
+		rl.DrawRectangleRec({ ix - 6, iy + ih*0.2, iw + 12, ih*0.6 }, b_col)
+		cy := iy + ih/2
+		draw_tri2({ ix - 4, cy }, { ix + 6, cy + 6 }, { ix + 6, cy - 6 }, rl.WHITE)
+		draw_tri2({ ix + iw + 4, cy }, { ix + iw - 6, cy - 6 }, { ix + iw - 6, cy + 6 }, rl.WHITE)
+		rl.DrawLineEx({ ix + 6, cy }, { ix + iw - 6, cy }, 1.6, rl.WHITE)
+	case 24: // pixelizar: grade de blocos em dois tons
+		n := 6; m := 4
+		for yy in 0 ..< m do for xx in 0 ..< n {
+			c := (xx + yy) % 2 == 0 ? a_col : b_col
+			if (xx*7 + yy*3) % 5 == 0 do c = rl.Color{ 200, 205, 215, 255 }
+			rl.DrawRectangleRec({ ix + f32(xx)*iw/f32(n), iy + f32(yy)*ih/f32(m), iw/f32(n) + 1, ih/f32(m) + 1 }, c)
+		}
+	case 25: // negativo: metade com as cores invertidas
+		rl.DrawRectangleRec({ ix, iy, iw/2, ih }, a_col)
+		rl.DrawRectangleRec({ ix + iw/2, iy, iw/2, ih }, rl.Color{ 255 - a_col.r, 255 - a_col.g, 255 - a_col.b, 255 })
+		rl.DrawCircleV({ ix + iw/2, iy + ih/2 }, min(iw, ih)*0.26, rl.WHITE)
+		rl.DrawCircleSector({ ix + iw/2, iy + ih/2 }, min(iw, ih)*0.26, 90, 270, 16, rl.Color{ 20, 20, 24, 255 })
+	case 26: // estrobo: faixas alternando A/B/branco
+		cols := [3]rl.Color{ a_col, rl.Color{ 245, 248, 255, 255 }, b_col }
+		for k in 0 ..< 6 do rl.DrawRectangleRec({ ix + f32(k)*iw/6, iy, iw/6 + 1, ih }, cols[k % 3])
+	case 27: // desfoque: dois blocos com bordas esfumadas
+		for k in 0 ..< 5 {
+			g := f32(k)*2
+			al := u8(70 + k*35)
+			rl.DrawRectangleRec({ ix + g, iy + g, iw*0.6 - 2*g, ih - 2*g }, rl.Color{ a_col.r, a_col.g, a_col.b, al })
+			rl.DrawRectangleRec({ ix + iw*0.4 + g, iy + g, iw*0.6 - 2*g, ih - 2*g }, rl.Color{ b_col.r, b_col.g, b_col.b, al })
+		}
 	}
 }
 
@@ -1816,6 +1856,8 @@ draw_transitions_panel :: proc(r: rl.Rectangle) {
 		{"Íris", 12}, {"Flash", 13}, {"Zoom", 14},
 		{"Giro", 15}, {"Whip", 16}, {"Glitch", 17}, {"Flip", 18},
 		{"Zoom out", 19}, {"Relógio", 20}, {"Tremor", 21},
+		{"Zoom punch", 22}, {"Esticar", 23}, {"Pixelizar", 24}, {"Negativo", 25},
+		{"Estrobo", 26}, {"Desfoque", 27},
 	}
 	tw: f32 = 118; th: f32 = 64; gap: f32 = 10; lblh: f32 = 22
 	cols := max(1, int((r.width - gap) / (tw + gap)))

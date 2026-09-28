@@ -46,7 +46,9 @@ do_pending :: proc() {
 // se há edições não salvas na timeline, pede confirmação (modal); senão executa já
 guard_unsaved :: proc(pa: Pending) {
 	pending_action = pa
-	if dirty && nsegs > 0 && modal == .None do modal = .Confirm
+	// `dirty` tambem cobre efeitos de faixa, layout e configuracoes do projeto.
+	// Nenhum deles exige que exista um Seg para precisar de confirmacao.
+	if dirty && modal == .None do modal = .Confirm
 	else do do_pending()
 }
 request_new   :: proc() { guard_unsaved(.New) }
@@ -215,6 +217,7 @@ seg_apply_ovp_fields :: proc(sg: ^Seg, f: [OVP_SEG_N]f32) {
 // caminho do .ovp aberto/salvo (heap). Vazio = ainda sem arquivo → Ctrl+S abre o diálogo.
 proj_path: string
 save_pending: bool  // gravar no PRÓXIMO frame: este ainda desenha "Salvando..."
+save_target: string // destino pendente; só vira proj_path depois que a escrita funcionar
 save_flash_t: f32   // segundos restantes do cartão na tela
 save_flash_ok: bool // false = Salvando… | true = Salvo
 
@@ -241,7 +244,8 @@ request_save_as :: proc() {
 }
 // marca p/ gravar no próximo frame (o atual ainda pinta "Salvando...")
 begin_save :: proc(path: string) {
-	set_proj_path(path)
+	if save_target != "" do delete(save_target)
+	save_target = strings.clone(path)
 	save_pending = true
 	save_flash_ok = false
 	save_flash_t = 1.6
@@ -249,7 +253,7 @@ begin_save :: proc(path: string) {
 // grava AGORA (sem esperar o próximo frame). Usado no "Salvar alterações?" antes de Novo/Abrir/Sair.
 save_now :: proc() -> bool {
 	if proj_path == "" {
-		if p, ok := save_dialog("Meu Projeto"); ok do set_proj_path(ensure_ext(p, ".ovp"))
+		if p, ok := save_dialog("Meu Projeto"); ok do return save_project(ensure_ext(p, ".ovp"))
 		else do return false
 	}
 	return save_project(proj_path)
@@ -291,6 +295,7 @@ load_project :: proc(path: string) {
 	fxd  := make([dynamic]FxSeg, context.temp_allocator)
 	CueLoad :: struct { mi: int, t0, t1: f32, text: string }
 	cueload := make([dynamic]CueLoad, context.temp_allocator)
+	malformed := false
 	li := 1
 	for li < len(lines) {
 		ln := strings.trim_space(lines[li]); li += 1
@@ -325,12 +330,18 @@ load_project :: proc(path: string) {
 			for k in 1 ..< len(toks) do if k - 1 < MAXTRACKS do lv[k - 1] = (strconv.parse_int(toks[k]) or_else 0) != 0
 		case "media":
 			n := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else 0) : 0
-			for _ in 0 ..< n { if li < len(lines) { append(&mpaths, strings.clone(strings.trim_space(lines[li]), context.temp_allocator)); li += 1 } }
+			if n < 0 || li + n > len(lines) { malformed = true; break }
+			for _ in 0 ..< n {
+				p := strings.trim_space(lines[li]); li += 1
+				if p == "" { malformed = true; break }
+				append(&mpaths, strings.clone(p, context.temp_allocator))
+			}
 		case "seg":
 			n := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else 0) : 0
+			if n < 0 || li + n > len(lines) { malformed = true; break }
 			for _ in 0 ..< n {
-				if li >= len(lines) do break
 				ft := strings.fields(strings.trim_space(lines[li]), context.temp_allocator); li += 1
+				if len(ft) < 5 { malformed = true; break }
 				s: Seg2
 				s.fields[14] = 1 // velocidade padrão p/ projetos antigos (14 campos)
 				for k in 0 ..< min(OVP_SEG_N, len(ft)) do s.fields[k] = f32(strconv.parse_f64(ft[k]) or_else 0)
@@ -339,14 +350,14 @@ load_project :: proc(path: string) {
 		case "cues": // falas de uma faixa de legendas (idx = ordem da seção media)
 			mi := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else -1) : -1
 			n := len(toks) >= 3 ? (strconv.parse_int(toks[2]) or_else 0) : 0
+			if n < 0 || li + n > len(lines) { malformed = true; break }
 			for _ in 0 ..< n {
-				if li >= len(lines) do break
 				lnc := strings.trim_space(lines[li]); li += 1
 				sp1 := strings.index_byte(lnc, ' ')
-				if sp1 < 0 do continue
+				if sp1 < 0 { malformed = true; break }
 				rest := lnc[sp1 + 1:]
 				sp2 := strings.index_byte(rest, ' ')
-				if sp2 < 0 do continue
+				if sp2 < 0 { malformed = true; break }
 				t0 := f32(strconv.parse_f64(lnc[:sp1]) or_else 0)
 				t1 := f32(strconv.parse_f64(rest[:sp2]) or_else 0)
 				body := strings.trim_space(rest[sp2 + 1:])
@@ -354,10 +365,10 @@ load_project :: proc(path: string) {
 			}
 		case "fx": // clipes de efeito da faixa
 			n := len(toks) >= 2 ? (strconv.parse_int(toks[1]) or_else 0) : 0
+			if n < 0 || li + n > len(lines) { malformed = true; break }
 			for _ in 0 ..< n {
-				if li >= len(lines) do break
 				ft := strings.fields(strings.trim_space(lines[li]), context.temp_allocator); li += 1
-				if len(ft) < 3 do continue
+				if len(ft) < 3 { malformed = true; break }
 				g :: proc(ft: []string, k: int) -> f32 { return k < len(ft) ? f32(strconv.parse_f64(ft[k]) or_else 0) : 0 }
 				e := FxSeg{ kind = int(g(ft,0)), start = g(ft,1), dur = g(ft,2) }
 				if len(ft) >= 10 { e.amount=g(ft,3); e.radius=g(ft,4); e.cx=g(ft,5); e.cy=g(ft,6); e.wobble=g(ft,7); e.speed=g(ft,8); e.angle=g(ft,9) }
@@ -372,7 +383,9 @@ load_project :: proc(path: string) {
 				append(&fxd, e)
 			}
 		}
+		if malformed do break
 	}
+	if malformed { set_toast("Arquivo de projeto truncado ou inválido"); return }
 	// aplica: limpa, reimporta (slots 0..N-1 na ordem), recria segmentos
 	clear_project()
 	for p in mpaths {

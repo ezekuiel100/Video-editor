@@ -15,6 +15,7 @@ fx_loc_bright, fx_loc_contrast, fx_loc_satur, fx_loc_look, fx_loc_vignette, fx_l
 fx_loc_rgb: i32 // uniform da separação RGB
 fx_loc_wipe_edge, fx_loc_wipe_feather, fx_loc_wipe_inv, fx_loc_wipe_kind: i32 // transições de máscara
 fx_loc_kind, fx_loc_amt, fx_loc_time, fx_loc_ang: i32 // clipes de efeito de faixa (além de distorção/RGB)
+fx_loc_tblur, fx_loc_tpix, fx_loc_tneg: i32 // transições de edit (desfoque / pixelizar / negativo)
 BULGE_R_DEF :: f32(0.5) // raio padrão do efeito (quando bulge_r==0)
 WOBBLE_HZ_DEF :: f32(2) // frequência padrão do wobble (Hz, quando wobble_speed==0)
 // desloca a coord de textura em direção ao (bulge>0) ou p/ longe do (bulge<0) centro,
@@ -45,6 +46,9 @@ uniform float fxKind;      // 2 pixel | 3 blur | 4 grain | 5 mirror | 6 sharp | 
 uniform float fxAmt;       // intensidade 0..1 do efeito de faixa (chroma: similaridade)
 uniform float fxTime;      // tempo (s) p/ granulação/tremor
 uniform float fxAng;       // Espelhar: <0.5 horizontal, senão vertical | Chroma: <0.5 verde, senão azul
+uniform vec2  tBlur;       // TRANSIÇÃO de edit: raio do desfoque em caixa (x, y locais; 0 = off)
+uniform vec2  tPix;        // TRANSIÇÃO de edit: blocos (largura, altura); 0 = off
+uniform float tNeg;        // TRANSIÇÃO de edit: 1 = negativo
 float vn(vec2 p, vec2 seed) {
     vec2 i = floor(p); vec2 f = fract(p);
     f = f*f*(3.0-2.0*f);
@@ -97,6 +101,7 @@ void main() {
         float nPix = mix(90.0, 8.0, clamp(fxAmt, 0.0, 1.0));
         uv = (floor(uv * nPix) + 0.5) / nPix;
     }
+    if (tPix.x > 0.5) uv = (floor(uv * tPix) + 0.5) / tPix; // PIXELIZAR da transição
     vec2 tex = uv0 + clamp(uv, 0.0, 1.0)*span;
     vec4 src;
     vec3 c;
@@ -122,6 +127,13 @@ void main() {
             c = acc / 9.0;
         }
         src = vec4(c, texture(texture0, tex).a);
+    } else if (tBlur.x > 0.0) {                    // DESFOQUE da transição: caixa 7×7 (boxblur do export)
+        vec4 acc = vec4(0.0);
+        for (int j = -3; j <= 3; j++)
+            for (int i = -3; i <= 3; i++)
+                acc += texture(texture0, uv0 + clamp(uv + vec2(float(i), float(j)) * tBlur / 3.0, 0.0, 1.0)*span);
+        src = acc / 49.0;
+        c = src.rgb;
     } else {
         src = texture(texture0, tex);
         c = src.rgb;
@@ -228,6 +240,7 @@ void main() {
         else             c.b = mix(c.b, min(c.b, (c.r + c.g) * 0.5), spill * 0.85);
     }
     c = clamp(c, 0.0, 1.0);
+    if (tNeg > 0.5) c = vec3(1.0) - c;            // NEGATIVO da transição (negate do export)
     float a = src.a * chromaA;
     if (wipeKind > 1.5) {
         float e = clamp(wipeEdge, 0.0, 1.0);
@@ -875,7 +888,7 @@ scrub_player_uses_thumb :: proc(c: ^Clip, lt: f32) -> bool {
 // (usado pelo blend da transição: clipe que sai × (1-p), clipe que entra × p).
 // `vt` é o tempo de EXIBIÇÃO (view_t), não o playhead cru — ver view_t.
 // wipe_feather>0 = dissolve orgânico (fumaça + opacidade). wipe_inv>0 = clipe que SAI.
-draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: bool, wipe_edge: f32 = 0, wipe_feather: f32 = 0, wipe_inv: f32 = 0, wipe_kind: f32 = 0, off_x: f32 = 0, off_y: f32 = 0, scl_mul: f32 = 1, rot_add: f32 = 0, sx_mul: f32 = 1, glitch: f32 = 0) {
+draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: bool, wipe_edge: f32 = 0, wipe_feather: f32 = 0, wipe_inv: f32 = 0, wipe_kind: f32 = 0, off_x: f32 = 0, off_y: f32 = 0, scl_mul: f32 = 1, rot_add: f32 = 0, sx_mul: f32 = 1, glitch: f32 = 0, tblur: f32 = 0, tpix: f32 = 0, tneg := false) {
 	c := seg_src(i)
 	sg := segs[i]
 	// fade preto (rampa de opacidade) — só na região NORMAL do clipe (não no lead-in de dissolver)
@@ -1008,7 +1021,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		rgb_off.x += glitch * 0.022
 		rgb_off.y -= glitch * 0.016
 	}
-	use_fx := bulge_ok && (fx_any(sg) || af >= 0 || has_chroma || wipe_feather > 0.01 || wipe_kind > 1.5 || glitch > 0.01)
+	use_fx := bulge_ok && (fx_any(sg) || af >= 0 || has_chroma || wipe_feather > 0.01 || wipe_kind > 1.5 || glitch > 0.01 || tblur > 0 || tpix > 0 || tneg)
 	if use_fx {
 		br := b_r
 		uv0 := [2]f32{ src.x/tw_, src.y/th_ } // src no espaço da textura EM USO (c.tex ou miniatura)
@@ -1041,6 +1054,15 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		rl.SetShaderValue(bulge_shader, fx_loc_amt, &fxa, .FLOAT)
 		rl.SetShaderValue(bulge_shader, fx_loc_time, &fxt, .FLOAT)
 		rl.SetShaderValue(bulge_shader, fx_loc_ang, &fxa_ang, .FLOAT)
+		// transição de edit: raio/blocos em frações LOCAIS da região; o eixo y segue o aspecto
+		// do recorte (sem o esticão), como o boxblur/scale do export no quadro segW×segH
+		rasp := chpx > 0 ? cwpx/chpx : 1
+		tb := [2]f32{ tblur, tblur*rasp }
+		tp := [2]f32{ tpix, tpix > 0 ? max(1, math.floor(tpix/rasp + 0.5)) : 0 }
+		tn := f32(tneg ? 1 : 0)
+		rl.SetShaderValue(bulge_shader, fx_loc_tblur, &tb, .VEC2)
+		rl.SetShaderValue(bulge_shader, fx_loc_tpix, &tp, .VEC2)
+		rl.SetShaderValue(bulge_shader, fx_loc_tneg, &tn, .FLOAT)
 		rl.BeginShaderMode(bulge_shader)
 	}
 	rl.DrawTexturePro(tex, src, { ccx, ccy, dw, dh }, { dw/2, dh/2 }, sg.rot + rot_add, tint)
@@ -1145,6 +1167,21 @@ composite_video :: proc(fx, fy, fw, fh: f32, sel_box: bool) -> bool {
 					wh := u8(clamp((1-p)*2, 0, 1) * 255)
 					rl.DrawRectangleRec({ fx, fy, fw, fh }, rl.Color{ 255, 255, 255, wh })
 				}
+			} else if trans_is_edit(mode) {
+				// edit: corte seco no meio (A antes, B depois) com o efeito subindo até o
+				// corte; estrobo alterna A/B; desfoque cruza as opacidades como o dissolver
+				e := edit_fx(mode, edit_k(p))
+				show_a, show_b := p < 0.5, p >= 0.5
+				op_a, op_b := f32(1), f32(1)
+				if mode == TRANS_STROBE {
+					show_b = edit_strobe_b(vt, cut - half); show_a = !show_b
+				} else if mode == TRANS_BLUR {
+					show_a, show_b = true, true
+					op_a, op_b = 1-p, p
+				}
+				tbl := e.blur*EDIT_BLUR_MAX
+				if show_a && a >= 0 { any = true; draw_seg_composited(a, vt, op_a, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, e.scl, 0, e.sx, 0, tbl, e.pix, e.neg) }
+				if show_b { any = true; draw_seg_composited(tb, vt, op_b, fx, fy, fw, fh, sel_box, 0, 0, 0, 0, 0, 0, e.scl, 0, e.sx, 0, tbl, e.pix, e.neg) }
 			} else {
 				if a >= 0 { any = true; draw_seg_composited(a, vt, 1-p, fx, fy, fw, fh, sel_box) } // SAI (cauda)
 				any = true; draw_seg_composited(tb, vt, p, fx, fy, fw, fh, sel_box)                // ENTRA (cabeça)

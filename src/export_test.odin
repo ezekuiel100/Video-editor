@@ -16,6 +16,7 @@ import "core:testing"
 import "core:strings"
 import "core:strconv"
 import "core:fmt"
+import "core:os"
 
 // ---------- seg_src_span: trecho da FONTE consumido por um segmento ----------
 // Alimenta o `-ss` do input E o `trim` do filtro. Se os dois divergissem, o vídeo
@@ -492,6 +493,47 @@ ovp_antigo_sem_flags_nem_bulge_abre_neutro :: proc(t: ^testing.T) {
 	testing.expect(t, !track_muted[0] && !track_locked[0] && !track_hidden[0], "flags ausentes = desligadas")
 }
 
+@(test)
+projeto_dirty_sem_segmentos_pede_confirmacao :: proc(t: ^testing.T) {
+	t_reset()
+	nsegs = 0
+	dirty = true
+	modal = .None
+	pending_action = .None
+	should_close = false
+	guard_unsaved(.Close)
+	testing.expect(t, modal == .Confirm, "efeitos/layout/configuracoes sem Seg tambem precisam de confirmacao")
+	testing.expect(t, !should_close, "nao pode fechar antes da resposta do usuario")
+	dirty = false; modal = .None; pending_action = .None
+}
+
+@(test)
+salvar_como_so_troca_caminho_depois_do_sucesso :: proc(t: ^testing.T) {
+	clear_proj_path()
+	set_proj_path("original.ovp")
+	begin_save("novo.ovp")
+	testing.expect(t, proj_path == "original.ovp", "destino pendente nao pode substituir o projeto aberto")
+	testing.expect(t, save_target == "novo.ovp" && save_pending, "novo destino fica separado ate a escrita")
+	save_pending = false
+	delete(save_target); save_target = ""
+	clear_proj_path()
+}
+
+@(test)
+ovp_truncado_nao_limpa_projeto_aberto :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 0, 0, 5)
+	path := "_ovp_truncado_test.ovp"
+	data := "OVP1\nmedia 1\n"
+	err := os.write_entire_file(path, transmute([]u8)data)
+	testing.expect(t, err == nil, "precondicao: criar arquivo truncado")
+	if err == nil {
+		load_project(path)
+		testing.expect(t, nsegs == 1, "arquivo truncado deve ser rejeitado antes de clear_project")
+		os.remove(path)
+	}
+}
+
 // O FILTERGRAPH NÃO PODE VIAJAR NA LINHA DE COMANDO. Ele é a maior coisa do comando e o
 // Windows corta em 32767 chars no CreateProcessW: com a timeline cheia o export morria com
 // um "Falha ao iniciar ffmpeg" que não dizia nada. Vai por -filter_complex_script.
@@ -950,6 +992,90 @@ export_zoom_out_cresce_o_clipe_que_sai :: proc(t: ^testing.T) {
 	_, g := t_build(t)
 	testing.expect(t, strings.contains(g, "1+0.85"), "A cresce")
 	testing.expect(t, strings.contains(g, "1.85-0.85"), "B encolhe")
+}
+
+// ---------- transições de EDIT (zoom punch / esticar / pixelizar / negativo / estrobo / desfoque) ----------
+// A: 0..4, B: 4..7, corte em 4.000 com janela de 0.4 s (3.800..4.200).
+t_edit_build :: proc(t: ^testing.T, mode: int) -> string {
+	t_export_reset()
+	_ = add_seg(0, 0, 0, 4)
+	b := add_seg(1, 4, 0, 3)
+	segs[b].trans = 0.4
+	segs[b].trans_mode = mode
+	_, g := t_build(t)
+	return g
+}
+
+@(test)
+export_zoom_punch_corta_seco_com_desfoque_e_escala :: proc(t: ^testing.T) {
+	g := t_edit_build(t, TRANS_ZOOM_BLUR)
+	testing.expect(t, strings.contains(g, "*lt(t\\,4.000)"), "A some no corte")
+	testing.expect(t, strings.contains(g, "*gte(t\\,4.000)"), "B só aparece no corte")
+	testing.expect(t, strings.contains(g, "boxblur=lr="), "desfoque em degraus")
+	testing.expect(t, strings.contains(g, "1+0.7000*pow("), "zoom sobe até 1.7× no corte")
+	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.800"), "zoom punch não dissolve")
+	// um boxblur por degrau e por papel: no máximo EDIT_BLUR_STEPS de cada lado
+	n := strings.count(g, "boxblur=")
+	testing.expectf(t, n >= 2 && n <= 2*EDIT_BLUR_STEPS, "degraus de desfoque: %d", n)
+}
+
+@(test)
+export_esticar_so_alarga :: proc(t: ^testing.T) {
+	g := t_edit_build(t, TRANS_STRETCH)
+	testing.expect(t, strings.contains(g, "(1+2.2000*pow("), "largura estica até 3.2×")
+	testing.expect(t, strings.contains(g, "if(between(t\\,3.800\\,4.000)\\,1+0.0000*pow("), "altura não muda")
+	// B começa UM quadro antes do corte: o quadro que o overlay mostra no corte pode ter
+	// carimbo até 1/30 s antes dele (grade start2 + n/30) e tem de sair já esticado
+	testing.expect(t, strings.contains(g, "if(between(t\\,3.967\\,4.200)"), "efeito de B cobre o quadro do corte")
+	testing.expect(t, strings.contains(g, "*gte(t\\,4.000)"), "corte seco")
+}
+
+@(test)
+export_pixelizar_volta_em_neighbor :: proc(t: ^testing.T) {
+	g := t_edit_build(t, TRANS_PIXEL)
+	testing.expect(t, strings.contains(g, "pow(60\\,1-"), "blocos: 8·60^(1-k)")
+	testing.expect(t, strings.count(g, "flags=neighbor") == 2, "A e B voltam ao tamanho em blocos")
+	testing.expect(t, strings.contains(g, "scale=1920:1080:flags=neighbor"), "volta ao quadro do clipe")
+	testing.expect(t, !strings.contains(g, "boxblur"), "pixelizar não desfoca")
+}
+
+@(test)
+export_negativo_inverte_perto_do_corte :: proc(t: ^testing.T) {
+	g := t_edit_build(t, TRANS_NEGATIVE)
+	testing.expect(t, strings.count(g, "negate=enable=") == 2, "A e B invertem perto do corte")
+	testing.expect(t, strings.contains(g, "1+0.1500*pow("), "soco de zoom")
+	testing.expect(t, strings.contains(g, "*gte(t\\,4.000)"), "corte seco")
+}
+
+@(test)
+export_estrobo_alterna_a_e_b :: proc(t: ^testing.T) {
+	g := t_edit_build(t, TRANS_STROBE)
+	testing.expect(t, strings.contains(g, "mod(floor((t-3.800)*12)\\,2)\\,0)"), "A nas fases pares")
+	testing.expect(t, strings.contains(g, "mod(floor((t-3.800)*12)\\,2)\\,1)"), "B nas fases ímpares")
+	testing.expect(t, strings.contains(g, "gte(t\\,4.200)+lt(t\\,4.200)*"), "B fica depois da janela")
+	testing.expect(t, !strings.contains(g, "fade=t=in:st=3.800"), "estrobo não dissolve")
+}
+
+@(test)
+export_desfoque_dissolve_e_desfoca :: proc(t: ^testing.T) {
+	g := t_edit_build(t, TRANS_BLUR)
+	testing.expect(t, strings.contains(g, "fade=t=in:st=3.800:d=0.400:alpha=1"), "B entra dissolvendo")
+	testing.expect(t, strings.contains(g, "fade=t=out:st=3.800:d=0.400:alpha=1"), "A sai dissolvendo")
+	testing.expect(t, strings.contains(g, "boxblur=lr="), "desfocado no meio")
+	testing.expect(t, !strings.contains(g, "*gte(t\\,4.000)"), "sem corte seco")
+}
+
+@(test)
+edit_fx_neutro_longe_do_corte :: proc(t: ^testing.T) {
+	for m in TRANS_ZOOM_BLUR ..= TRANS_BLUR {
+		e := edit_fx(m, 0)
+		testing.expectf(t, e.scl == 1 && e.sx == 1 && e.blur == 0 && e.pix == 0 && !e.neg, "modo %d mexe no quadro com k=0", m)
+		testing.expect(t, trans_is_edit(m), "família edit")
+	}
+	testing.expect(t, edit_k(0) == 0 && edit_k(1) == 0 && edit_k(0.5) == 1, "k: 0 nas pontas, 1 no corte")
+	testing.expect(t, edit_fx(TRANS_PIXEL, 1).pix == EDIT_PIX_MIN, "pico = blocos mínimos")
+	testing.expect(t, trans_mode_from_panel(22) == TRANS_ZOOM_BLUR && trans_mode_from_panel(27) == TRANS_BLUR, "tiles 22..27")
+	testing.expect(t, !edit_strobe_b(3.80, 3.8) && edit_strobe_b(3.80 + 1.5/EDIT_STROBE_HZ, 3.8), "estrobo: A, depois B")
 }
 
 // ---------- dissolve orgânico: CUSTO do geq (não só o visual) ----------

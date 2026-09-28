@@ -71,6 +71,16 @@ clock_sem_audio_nunca_vale :: proc(t: ^testing.T) {
 }
 
 @(test)
+clock_recusa_stream_com_sample_rate_zero :: proc(t: ^testing.T) {
+	t_reset()
+	c := t_aud(100, 0, 100)
+	c.music.stream.sampleRate = 0
+	testing.expect(t, !audio_clock_ok(c, 10), "stream sem taxa de amostragem nao pode ser relogio")
+	intrinsics.atomic_store(&c.parts_done, 1)
+	testing.expect(t, !audio_full_window_ready(c), "stream sem taxa nao pode ser janela completa")
+}
+
+@(test)
 clock_dentro_da_janela_base_zero :: proc(t: ^testing.T) {
 	t_reset()
 	c := t_aud(100, 0, 60) // head de 60s num vídeo de 100s
@@ -329,6 +339,16 @@ chunk_request_nao_repete_trecho_provado_vazio :: proc(t: ^testing.T) {
 	testing.expect(t, c.chunk_req == 599, "não pede áudio onde já se provou não haver")
 	testing.expect(t, !c.chunk_busy, "e não sobe worker nenhum")
 	testing.expect(t, c.chunk_thr == nil, "nenhuma thread criada")
+}
+
+@(test)
+spv_release_esquece_falhas_do_slot :: proc(t: ^testing.T) {
+	t_reset()
+	e := &spv[0][0]
+	e.bad_key = 12345
+	e.bad_n = SPV_TRIES
+	spv_release(0) // slot sem Music/path: nao toca no dispositivo de audio
+	testing.expect(t, e.bad_key == 0 && e.bad_n == 0, "slot liberado nao pode herdar falhas do segmento anterior")
 }
 
 // ------------------------------------------------------- audio_adopt_or_request
