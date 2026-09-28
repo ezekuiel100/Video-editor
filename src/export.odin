@@ -1784,11 +1784,26 @@ probe_nvenc :: proc() -> bool {
 	return e == nil && state.exited && state.exit_code == 0
 }
 
+// Evita sobrescrever uma exportação existente: acrescenta _1, _2, ... ao nome.
+export_unique_path :: proc(path: string) -> string {
+	if !os.exists(path) do return strings.clone(path)
+	base := path
+	ext := ""
+	if dot := strings.last_index_byte(base, '.'); dot > 0 {
+		ext = base[dot:]
+		base = base[:dot]
+	}
+	for i := 1; ; i += 1 {
+		candidate := fmt.tprintf("%s_%d%s", base, i, ext)
+		if !os.exists(candidate) do return strings.clone(candidate)
+	}
+}
+
 // enfileira o export p/ o próximo update (o botão do modal só marca o pedido).
 queue_export :: proc(out: string, gpu: bool) {
 	if intrinsics.atomic_load(&export_run) { set_toast("Exportação já em andamento"); return }
 	if export_pending_path != "" do delete(export_pending_path)
-	export_pending_path = strings.clone(out)
+	export_pending_path = export_unique_path(out)
 	export_pending_gpu = gpu
 	export_pending = true
 }
