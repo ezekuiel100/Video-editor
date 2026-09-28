@@ -1752,8 +1752,9 @@ scrub_at_playhead :: proc() {
 		}
 	}
 	if req_c >= 0 {
-		intrinsics.atomic_store(&scrub_req_c, req_c)
+		// publica os dados antes do identificador atômico que acorda o worker
 		scrub_req_t = req_t
+		intrinsics.atomic_store(&scrub_req_c, req_c)
 	}
 }
 

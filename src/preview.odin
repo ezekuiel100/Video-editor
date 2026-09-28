@@ -529,6 +529,7 @@ draw_fullscreen_video :: proc(sw, sh: f32) {
 	total := src_preview >= 0 ? (src_preview < nclips ? clips[src_preview].dur : 0) : timeline_dur()
 	pos   := src_preview >= 0 ? src_t : st.playhead
 	pbar := rl.Rectangle{ 28, bar_y + 26, sw - 56, 6 }
+	player_seek_bar = pbar
 	pbar_hit := rl.Rectangle{ pbar.x - 6, pbar.y - 9, pbar.width + 12, 24 }
 	frac := total > 0 ? clamp(pos / total, 0, 1) : 0
 	rl.DrawRectangleRounded(pbar, 1, 4, fa({ 70, 74, 86, 255 }, a))
@@ -543,20 +544,6 @@ draw_fullscreen_video :: proc(sw, sh: f32) {
 		if seek_was_playing { st.playing = true; seek_was_playing = false }
 		when DBG_SEEK do dbg_seek_n = 200
 		if src_preview >= 0 { src_acquire(); clip_frame(&clips[src_preview], src_t) } else do seek_global(st.playhead)
-	}
-	if player_seek_drag && total > 0 {
-		np := clamp((m.x - pbar.x) / pbar.width, 0, 1) * total
-		if src_preview >= 0 {
-			src_t = np
-			if !clips[src_preview].streaming do clip_show(&clips[src_preview], int(np * cfps_of(&clips[src_preview])))
-			else {
-				intrinsics.atomic_store(&scrub_req_c, src_preview)
-				scrub_req_t = src_t
-			}
-		} else {
-			st.playhead = np
-			scrub_at_playhead()
-		}
 	}
 
 	cy := bar_y + 62 // linha de botões abaixo da barra de progresso
@@ -869,11 +856,10 @@ render_text_png :: proc(c: ^Clip, sg: Seg, path: string) -> bool {
 // Empate: fica o frame (nitidez). Thumb mais longe que o frame: fica o frame.
 scrub_use_thumb :: proc(c: ^Clip, lt: f32) -> bool {
 	if c.nthumbs <= 0 || c.thumb_dt <= 0 do return false
-	err_tex := abs(lt - c.tex_t)
-	if err_tex <= SCRUB_SHARP_S do return false
-	ti := clamp(int(lt / c.thumb_dt), 0, c.nthumbs - 1)
-	thumb_t := (f32(ti) + 0.5) * c.thumb_dt
-	return abs(lt - thumb_t) < err_tex
+	// Durante o scrub, uma textura velha não pode vencer só por estar numericamente
+	// mais perto que o centro de uma thumb esparsa. Passado o limite, o filmstrip
+	// acompanha o bucket atual até o decoder entregar outro frame nítido.
+	return abs(lt - c.tex_t) > SCRUB_SHARP_S
 }
 
 // player e arrasto usam a MESMA regra: frame nítido se está perto; senão a miniatura

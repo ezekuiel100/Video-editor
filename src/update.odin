@@ -643,19 +643,25 @@ update :: proc() {
 		snap_line = -1
 	}
 
-	// barra do player (e tela cheia): o playhead já foi atualizado no draw do
-	// frame anterior; pede o mesmo preview do arrasto na régua. Sem isto a barra
-	// só atualizava cache — clipe longo ficava no frame velho até soltar.
-	if player_seek_drag && st.drag != .Playhead {
-		if src_preview >= 0 && src_preview < nclips {
-			c := &clips[src_preview]
-			if !c.streaming do clip_show(c, int(src_t * cfps_of(c)))
-			else {
-				intrinsics.atomic_store(&scrub_req_c, src_preview)
-				scrub_req_t = src_t
+	// Scrub da barra normal e fullscreen: posição e pedido são processados juntos,
+	// no update, antes do desenho. O draw só publica a geometria e controla o gesto.
+	if player_seek_drag && st.drag != .Playhead && player_seek_bar.width > 0 {
+		total := src_preview >= 0 ? (src_preview < nclips ? clips[src_preview].dur : 0) : timeline_dur()
+		if total > 0 {
+			np := clamp((rl.GetMousePosition().x - player_seek_bar.x) / player_seek_bar.width, 0, 1) * total
+			if src_preview >= 0 && src_preview < nclips {
+				src_t = np
+				c := &clips[src_preview]
+				if !c.streaming {
+					clip_show(c, int(src_t * cfps_of(c)))
+				} else {
+					scrub_req_t = src_t
+					intrinsics.atomic_store(&scrub_req_c, src_preview)
+				}
+			} else {
+				st.playhead = np
+				scrub_at_playhead()
 			}
-		} else {
-			scrub_at_playhead()
 		}
 	}
 

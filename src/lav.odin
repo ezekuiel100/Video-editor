@@ -3,7 +3,7 @@ package main
 // Decoder de scrub PERSISTENTE via libav (DLLs do FFmpeg carregadas em runtime).
 // O caminho antigo subia um processo ffmpeg por frame do arrasto: abrir arquivo +
 // probe + criar decoder custava mais que o decode do keyframe. Aqui o worker de
-// scrub mantém o arquivo e o decoder ABERTOS por clipe e só faz seek + decode.
+// scrub mantém arquivo, decoder e último quadro por clipe; avanços curtos não fazem seek.
 //
 // Tudo é opcional: sem as DLLs (ou se algo falhar num clipe) o scrub cai no
 // ffmpeg por processo de sempre. As DLLs são carregadas por nome (LoadLibrary
@@ -26,14 +26,18 @@ FMT_NB_STREAMS  :: 44  // AVFormatContext.nb_streams (u32)
 FMT_STREAMS     :: 48  // AVFormatContext.streams (AVStream**)
 FMT_START_TIME  :: 96  // AVFormatContext.start_time (i64, AV_TIME_BASE)
 ST_CODECPAR     :: 16  // AVStream.codecpar
+ST_TIME_BASE    :: 32  // AVStream.time_base (AVRational: dois i32)
 FR_LINESIZE     :: 64  // AVFrame.linesize[8] (i32); data[8] fica em 0
 FR_WIDTH        :: 104 // AVFrame.width, height (+4), format (+12)
+FR_PTS         :: 136 // AVFrame.pts (i64), avutil 61 / Windows x64
+FR_BEST_TS     :: 304 // AVFrame.best_effort_timestamp (i64), mesma ABI
 PKT_STREAM_IDX  :: 36  // AVPacket.stream_index (i32)
 
 AV_NOPTS        :: min(i64)
 AV_PIX_RGB24    :: i32(2)
 AVMEDIA_VIDEO   :: i32(0)
 AVERROR_EAGAIN  :: i32(-11)
+AVERROR_EOF     :: i32(-541478725)
 AVSEEK_BACKWARD :: i32(1)
 
 Lav :: struct {
@@ -56,6 +60,7 @@ Lav :: struct {
 	av_frame_alloc:               proc "c" () -> rawptr,
 	av_frame_free:                proc "c" (fr: ^rawptr),
 	av_frame_unref:               proc "c" (fr: rawptr),
+	av_frame_move_ref:            proc "c" (dst, src: rawptr),
 	av_opt_set:                   proc "c" (obj: rawptr, name, val: cstring, flags: i32) -> i32,
 	av_log_set_level:             proc "c" (level: i32),
 	sws_alloc_context:            proc "c" () -> rawptr,
@@ -74,6 +79,10 @@ LavDec :: struct {
 	vidx:     i32,
 	start:    i64,    // start_time do container (AV_TIME_BASE) — base do -ss
 	used:     time.Tick,
+	frame:    rawptr, // último quadro próprio: não compartilha lav_src entre clipes
+	time_base: f64,
+	frame_t, request_t: f64, // segundos relativos ao start_time do container
+	has_frame, draining, pending: bool,
 }
 
 LAV_MAXDEC :: 4 // arquivos abertos ao mesmo tempo (arrasto cruzando clipes diferentes)
@@ -119,6 +128,7 @@ lav_init :: proc() -> bool {
 @(private="file") wr :: proc(p: rawptr, off: int, v: $T) { (^T)(uintptr(p) + uintptr(off))^ = v }
 
 lav_close :: proc(d: ^LavDec) {
+	if d.frame != nil do lav.av_frame_free(&d.frame)
 	if d.dec != nil do lav.avcodec_free_context(&d.dec)
 	if d.fmt != nil do lav.avformat_close_input(&d.fmt)
 	d^ = {}
@@ -153,12 +163,14 @@ lav_open :: proc(c: ^Clip, ci: int) -> ^LavDec {
 	st := rd(fmtc, FMT_STREAMS, [^]rawptr)[idx]
 	v.dec = lav.avcodec_alloc_context3(codec)
 	if v.dec == nil || lav.avcodec_parameters_to_context(v.dec, rd(st, ST_CODECPAR, rawptr)) < 0 { lav_close(v); return nil }
-	// só keyframes (é o que o -noaccurate_seek do caminho antigo entregava) e threads por
-	// FATIA: frame-threading segura frames na fila e atrasa justamente o 1º, que é o único
-	lav.av_opt_set(v.dec, "skip_frame", "nokey", 0)
+	// Decodifica também P/B frames; slice threads evitam latência extra de frame-threading.
 	lav.av_opt_set(v.dec, "threads", "auto", 0)
 	lav.av_opt_set(v.dec, "thread_type", "slice", 0)
 	if lav.avcodec_open2(v.dec, codec, nil) < 0 { lav_close(v); return nil }
+	v.frame = lav.av_frame_alloc()
+	num, den := rd(st, ST_TIME_BASE, i32), rd(st, ST_TIME_BASE + 4, i32)
+	if v.frame == nil || num <= 0 || den <= 0 { lav_close(v); return nil }
+	v.time_base = f64(num) / f64(den)
 	v.ci = ci; v.aid = c.aid; v.vidx = idx
 	v.start = rd(fmtc, FMT_START_TIME, i64)
 	if v.start == AV_NOPTS do v.start = 0
@@ -167,38 +179,160 @@ lav_open :: proc(c: ^Clip, ci: int) -> ^LavDec {
 	return v
 }
 
-// decodifica o keyframe em/antes de `t` (s, base do -ss) direto p/ buf, em cdw×cdh rgb24
-// com letterbox (mesmo retângulo que dec_content_rect / o -vf do ffmpeg). false = use o
-// caminho por processo (o chamador marca o clipe se for falha do arquivo/codec).
-lav_decode_frame :: proc(c: ^Clip, ci: int, t: f32, buf: []u8) -> bool {
+// Avanço limitado em tempo de fonte; retorno/repetição fora do quadro retido e
+// saltos grandes precisam de seek. Um decode que cedeu o orçamento pode continuar.
+LAV_FORWARD_S :: f64(0.5)
+LAV_BUDGET_MS :: f64(150)
+
+// Tolerância entre o tempo do índice de keyframes (f32 do ffprobe) e o PTS decodificado.
+LAV_KF_EPS :: f64(0.002)
+
+// kf_t: keyframe ≤ alvo (índice do clipe; -1 = desconhecido). Se o quadro retido já está
+// depois dele e antes do alvo, seguir decodificando nunca é pior que o seek, que voltaria
+// para o mesmo keyframe — vale para GOP longo, onde o alvo fica a segundos do quadro.
+lav_needs_seek :: proc(d: ^LavDec, target: f64, kf_t := f64(-1)) -> bool {
+	if d.pending && target >= d.request_t && target - d.request_t <= LAV_FORWARD_S do return false
+	if d.has_frame && kf_t >= 0 && target >= d.frame_t && d.frame_t + LAV_KF_EPS >= kf_t do return false
+	return !d.has_frame || target < d.request_t || target - d.frame_t > LAV_FORWARD_S
+}
+
+// O pedido exato alcançaria o alvo sem seek? Não abre decoder (sem decoder = precisa seek).
+lav_would_seek :: proc(c: ^Clip, ci: int, t: f32, kf_t := f64(-1)) -> bool {
+	for &d in lav_decs do if d.fmt != nil && d.ci == ci && d.aid == c.aid do return lav_needs_seek(&d, f64(max(t, 0)), kf_t)
+	return true
+}
+
+// Primeiro quadro com timestamp >= alvo (ou último quadro no EOF). Usa timestamps
+// de apresentação, não contagem/fps: B-frames e VFR seguem a ordem do decoder.
+// retry distingue orçamento/cancelamento de falha: não envenena lav_bad nem faz spawn.
+//
+// keyframe: arrasto rápido — entrega o keyframe ≤ alvo (seek + 1 decode) em vez de
+// decodificar o GOP inteiro; um quadro retido entre o keyframe e o alvo é ainda melhor.
+// partial: ao estourar o orçamento, entrega o quadro retido (entre kf_t e o alvo) em vez
+// de nada; o estado segue pendente e o próximo pedido continua de onde parou.
+lav_decode_frame :: proc(c: ^Clip, ci: int, t: f32, buf: []u8, retry: ^bool = nil,
+	kf_t := f64(-1), keyframe := false, budget_ms := LAV_BUDGET_MS, partial: ^bool = nil) -> bool {
+	if retry != nil do retry^ = false
+	if partial != nil do partial^ = false
 	if !lav_init() do return false
 	d := lav_open(c, ci)
 	if d == nil do return false
-	ts := i64(f64(t) * 1e6) + d.start
+	target := f64(max(t, 0))
+	if keyframe {
+		held := d.has_frame && kf_t >= 0 && d.frame_t + LAV_KF_EPS >= kf_t && d.frame_t <= target + LAV_KF_EPS
+		if !held && !lav_seek_first(c, d, target) {
+			if intrinsics.atomic_load(&app_closing) || intrinsics.atomic_load(&c.stop) {
+				if retry != nil do retry^ = true
+			}
+			return false
+		}
+		return lav_convert(c, d, buf)
+	}
+	if lav_needs_seek(d, target, kf_t) {
+		ts := i64(target * 1e6) + d.start
+		if lav.av_seek_frame(d.fmt, -1, ts, AVSEEK_BACKWARD) < 0 {
+			if lav.av_seek_frame(d.fmt, -1, ts, 0) < 0 do return false
+		}
+		lav.avcodec_flush_buffers(d.dec)
+		lav.av_frame_unref(d.frame)
+		d.has_frame = false; d.draining = false
+	}
+	d.request_t = target; d.pending = true
+	began := time.tick_now()
+	defer lav.av_frame_unref(lav_src)
+	for n := 0; !d.has_frame || d.frame_t + 0.000001 < target; n += 1 {
+		if intrinsics.atomic_load(&app_closing) || intrinsics.atomic_load(&c.stop) {
+			if retry != nil do retry^ = true
+			return false
+		}
+		if n >= 2000 || time.duration_milliseconds(time.tick_since(began)) >= budget_ms {
+			// estado preservado: próximo pedido continua sem flush
+			if partial != nil && d.has_frame && kf_t >= 0 && d.frame_t + LAV_KF_EPS >= kf_t {
+				partial^ = true
+				return lav_convert(c, d, buf)
+			}
+			if retry != nil do retry^ = true
+			return false
+		}
+		r := lav.avcodec_receive_frame(d.dec, lav_src)
+		if r >= 0 {
+			pts := rd(lav_src, FR_BEST_TS, i64)
+			if pts == AV_NOPTS do pts = rd(lav_src, FR_PTS, i64)
+			if pts == AV_NOPTS do return false // sem timestamp confiável: fallback
+			ft := f64(pts) * d.time_base - f64(d.start) / 1e6
+			if d.has_frame && ft < d.frame_t do return false
+			lav.av_frame_unref(d.frame)
+			lav.av_frame_move_ref(d.frame, lav_src)
+			d.frame_t = ft; d.has_frame = true
+			continue
+		}
+		if r == AVERROR_EOF {
+			if !d.has_frame do return false
+			break // alvo após o último PTS: mantém último quadro, inclusive B-frames drenados
+		}
+		if r != AVERROR_EAGAIN || d.draining do return false
+		r = lav.av_read_frame(d.fmt, lav_pkt)
+		if r < 0 {
+			if r != AVERROR_EOF do return false
+			if lav.avcodec_send_packet(d.dec, nil) < 0 do return false
+			d.draining = true
+			continue
+		}
+		sent: i32
+		if rd(lav_pkt, PKT_STREAM_IDX, i32) == d.vidx do sent = lav.avcodec_send_packet(d.dec, lav_pkt)
+		lav.av_packet_unref(lav_pkt)
+		// Após receive=EAGAIN, send deve aceitar o pacote. Nunca ignora erro de envio.
+		if sent < 0 do return false
+	}
+	d.pending = false
+	return lav_convert(c, d, buf)
+}
+
+// Seek para o keyframe ≤ alvo e decodifica só o 1º quadro que sair. Deixa o decoder
+// posicionado: request_t = frame_t, então o refino exato continua daqui sem novo seek.
+@(private="file")
+lav_seek_first :: proc(c: ^Clip, d: ^LavDec, target: f64) -> bool {
+	ts := i64(target * 1e6) + d.start
 	if lav.av_seek_frame(d.fmt, -1, ts, AVSEEK_BACKWARD) < 0 {
 		if lav.av_seek_frame(d.fmt, -1, ts, 0) < 0 do return false
 	}
 	lav.avcodec_flush_buffers(d.dec)
-	got := false
-	flushed := false
-	for n := 0; n < 2000 && !got; n += 1 { // teto: arquivo corrompido não prende o worker
+	lav.av_frame_unref(d.frame)
+	d.has_frame = false; d.draining = false; d.pending = false
+	defer lav.av_frame_unref(lav_src)
+	for n := 0; n < 2000; n += 1 {
 		if intrinsics.atomic_load(&app_closing) || intrinsics.atomic_load(&c.stop) do return false
 		r := lav.avcodec_receive_frame(d.dec, lav_src)
-		if r >= 0 { got = true; break }
-		if r != AVERROR_EAGAIN do break // EOF/erro
-		if flushed do break
-		if lav.av_read_frame(d.fmt, lav_pkt) < 0 {
-			lav.avcodec_send_packet(d.dec, nil) // fim do arquivo: esvazia o decoder
-			flushed = true
+		if r >= 0 {
+			pts := rd(lav_src, FR_BEST_TS, i64)
+			if pts == AV_NOPTS do pts = rd(lav_src, FR_PTS, i64)
+			if pts == AV_NOPTS do return false
+			lav.av_frame_move_ref(d.frame, lav_src)
+			d.frame_t = f64(pts) * d.time_base - f64(d.start) / 1e6
+			d.request_t = d.frame_t; d.has_frame = true
+			return true
+		}
+		if r == AVERROR_EOF || r != AVERROR_EAGAIN || d.draining do return false
+		r = lav.av_read_frame(d.fmt, lav_pkt)
+		if r < 0 {
+			if r != AVERROR_EOF do return false
+			if lav.avcodec_send_packet(d.dec, nil) < 0 do return false
+			d.draining = true
 			continue
 		}
-		if rd(lav_pkt, PKT_STREAM_IDX, i32) == d.vidx do lav.avcodec_send_packet(d.dec, lav_pkt)
+		sent: i32
+		if rd(lav_pkt, PKT_STREAM_IDX, i32) == d.vidx do sent = lav.avcodec_send_packet(d.dec, lav_pkt)
 		lav.av_packet_unref(lav_pkt)
+		if sent < 0 do return false
 	}
-	if !got do return false
-	defer lav.av_frame_unref(lav_src)
+	return false
+}
 
-	fw, fh := rd(lav_src, FR_WIDTH, i32), rd(lav_src, FR_WIDTH + 4, i32)
+// quadro retido (d.frame) -> RGB24 no buffer do scrub, com barras pretas se preciso
+@(private="file")
+lav_convert :: proc(c: ^Clip, d: ^LavDec, buf: []u8) -> bool {
+	src := d.frame
+	fw, fh := rd(src, FR_WIDTH, i32), rd(src, FR_WIDTH + 4, i32)
 	// rotação ±90: o ffmpeg CLI auto-rotaciona e aqui não — vídeo de celular em pé
 	// sairia deitado. Sinal: dims de exibição (c.vw/vh, já corrigidas) invertidas.
 	if c.vw > 0 && fw != fh && fw == c.vh && fh == c.vw do return false
@@ -217,7 +351,7 @@ lav_decode_frame :: proc(c: ^Clip, ci: int, t: f32, buf: []u8) -> bool {
 	wr(lav_dst, FR_WIDTH, i32(cw))
 	wr(lav_dst, FR_WIDTH + 4, i32(ch))
 	wr(lav_dst, FR_WIDTH + 12, AV_PIX_RGB24)
-	ok := lav.sws_scale_frame(lav_sws, lav_dst, lav_src) >= 0
+	ok := lav.sws_scale_frame(lav_sws, lav_dst, src) >= 0
 	wr(lav_dst, 0, rawptr(nil)) // a casca não é dona do buffer
 	return ok
 }

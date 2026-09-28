@@ -48,20 +48,23 @@ stream_hi: bool = true
 stream_dw :: proc() -> i32 { return stream_hi ? STREAM_HI_W : STREAM_LO_W }
 stream_dh :: proc() -> i32 { return stream_hi ? STREAM_HI_H : STREAM_LO_H }
 // scrub (streaming): distância MÁX (s, no tempo da fonte) que o último frame decodificado
-// pode estar do cursor antes de cair pra miniatura 256×144 do filmstrip. Era 1.5 fixo — curto
-// demais: num arrasto lento fundo num vídeo de horas cada seek custa MAIS que 1.5s de
-// movimento do playhead, então o worker nunca chegava a <1.5s e o preview vivia preso na
-// miniatura borrada. 4s mantém o frame REAL (360/720p, levemente atrás do cursor) na tela
-// enquanto o worker persegue. Saltos grandes (clique-seek OU arrasto rápido) passam de 4s
-// e mostram a miniatura na POSIÇÃO certa — senão o player fica CONGELADO no último 720p
-// enquanto o ffmpeg ainda está no seek do ponto antigo. Cache (clipes curtos) decodifica
-// ao vivo — nunca cai aqui.
-SCRUB_SHARP_S :: f32(4.0)
+// pode estar do cursor antes de cair pra miniatura 256×144 do filmstrip. Um limite alto
+// fazia o player conservar por vários segundos o mesmo keyframe nítido enquanto o playhead
+// continuava andando. Com 0.75s, pequenos atrasos ainda preservam o frame real, mas o
+// filmstrip assume cedo quando o decoder não acompanha e mantém a cena seguindo o cursor.
+// Cache (clipes curtos) decodifica ao vivo — nunca cai aqui.
+SCRUB_SHARP_S :: f32(0.75)
 // mata o ffmpeg de scrub em voo se o cursor pulou mais que isto (s da fonte). Sem isto o
 // worker termina um decode de 0.5–2s do ponto ONDE o arrasto começou e só então pega o
 // alvo novo — no meio o player não recebe frame nenhum. O kill desbloqueia o read e o
 // próximo giro decodifica o tempo ATUAL.
 SCRUB_ABORT_S :: f32(2.0)
+// scrub via libav: cursor parado há menos que isto (ms) = "andando". Andando, o worker não
+// persegue o quadro exato quando isso exigiria seek (GOP longo: centenas de quadros por
+// posição) — mostra o keyframe e refina ao parar. SCRUB_MOVE_BUDGET_MS é a fatia de decode
+// exato por giro andando; ao estourar, publica o quadro parcial e continua no próximo giro.
+SCRUB_SETTLE_MS      :: f64(120)
+SCRUB_MOVE_BUDGET_MS :: f64(40)
 // scrub: acima desta latência (ms) de um decode de scrub por SOFTWARE, o clipe migra p/
 // NVDEC no scrub (c.scrub_hw). 700ms é conservador: mesmo o pior init de cuvid (~575ms) +
 // decode (~23ms) fica abaixo, então trocar SEMPRE melhora onde dispara (codec pesado).
@@ -168,6 +171,9 @@ scrub_ps_mu: sync.Mutex
 scrub_ps:    os.Process
 scrub_ps_ok: bool
 scrub_work_t: f32           // alvo que o worker está decodificando agora
+scrub_prev_t: f32 = -1      // (worker) último alvo visto e quando mudou: detecta arrasto parado
+scrub_prev_c: int = -1
+scrub_moved:  time.Tick
 
 // --- vista DUPLICADA por segmento: quando a MESMA fonte aparece em 2+ trilhas de
 // vídeo sob o playhead, um Clip só (1 textura, 1 decoder) não serve 2 tempos — as
@@ -1580,11 +1586,18 @@ scrub_worker :: proc() {
 				sf0 := cframe(&clips[ci]) // dims no INÍCIO do decode (compara na adoção)
 				st0 := scrub_req_t        // alvo capturado 1x (o global muda durante o arrasto)
 				c := &clips[ci]
-				// chave do frame: o keyframe que o -noaccurate_seek entregaria p/ st0. Sem índice
-				// (ainda gerando), a chave é o próprio tempo — só evita redecodificar o MESMO alvo.
+				// Libav usa o alvo real; só o fallback rápido continua colapsando por keyframe.
 				k := kf_lookup(c, st0)
 				dt := k >= 0 ? c.kf[k] + 0.001 : st0 // +1ms: arredondamento não cai no keyframe anterior
-				key := ScrubKey{ ci, c.aid, k, k >= 0 ? 0 : st0, sf0 }
+				kf_t := k >= 0 ? f64(c.kf[k]) : -1
+				if st0 != scrub_prev_t || ci != scrub_prev_c { scrub_prev_t = st0; scrub_prev_c = ci; scrub_moved = time.tick_now() }
+				moving := time.duration_milliseconds(time.tick_since(scrub_moved)) < SCRUB_SETTLE_MS
+				precise := !c.scrub_hw && !c.lav_bad && lav_init()
+				// Cursor andando e o quadro exato exigiria seek (voltou, ou pulou de GOP): o
+				// GOP inteiro não cabe no ritmo do mouse — mostra o keyframe (seek + 1 decode).
+				// Parado, ou avançando dentro do alcance do decoder: quadro exato.
+				kfast := precise && moving && k >= 0 && lav_would_seek(c, ci, st0, kf_t)
+				key := scrub_key(ci, c.aid, k, st0, sf0, precise && !kfast)
 				if scrub_shown_ok && scrub_shown == key { time.sleep(4 * time.Millisecond); continue } // já está na tela
 				if scrub_cache_get(key, scrub_buf[:sf0]) {
 					dbg("SCRUB", "clip=%d t=%.1fs CACHE (kf=%d)", ci, st0, k)
@@ -1596,21 +1609,27 @@ scrub_worker :: proc() {
 				wt0 := time.tick_now()
 				// 1º o decoder PERSISTENTE (libav: sem spawn/probe por frame); codec pesado já
 				// migrado p/ NVDEC (scrub_hw) e clipe onde a libav falhou seguem por processo
-				ok := false
-				if !c.scrub_hw && !c.lav_bad {
-					ok = lav_decode_frame(c, ci, dt, scrub_buf)
+				ok, partial := false, false
+				if precise {
+					retry := false
+					// andando: orçamento curto e entrega o quadro parcial (mais perto que o keyframe)
+					ok = lav_decode_frame(c, ci, st0, scrub_buf, &retry, kf_t, kfast,
+						moving ? SCRUB_MOVE_BUDGET_MS : LAV_BUDGET_MS, moving ? &partial : nil)
+					if retry { time.sleep(time.Millisecond); continue }
 					if !ok && lav_state > 0 && !intrinsics.atomic_load(&c.stop) {
 						c.lav_bad = true
 						dbg("LAV", "clip='%s' decoder libav falhou -> scrub por processo ffmpeg", c.name)
 					}
 				}
-				if ok || scrub_decode_frame(c, dt, scrub_buf, true) { // fast: keyframe basta no arrasto
-					scrub_cache_put(key, scrub_buf[:sf0]) // guarda mesmo se descartado: o cursor pode voltar
+				if !ok do key = scrub_key(ci, c.aid, k, st0, sf0, false)
+				if ok || scrub_decode_frame(c, dt, scrub_buf, true) { // fallback mantém caminho rápido
+					// parcial não é o quadro da chave: não entra no cache nem conta como "na tela"
+					if !partial do scrub_cache_put(key, scrub_buf[:sf0]) // guarda mesmo se descartado: o cursor pode voltar
 					scrub_last_ms = time.duration_milliseconds(time.tick_diff(wt0, time.tick_now()))
 					// codec pesado: um decode SW lento migra este clipe p/ NVDEC no scrub (só
 					// sobe — nunca volta a SW sozinho, p/ não oscilar). scrub_hw_bad trava a
 					// migração se o NVDEC já falhou aqui (senão religaria e oscilaria).
-					if !clips[ci].scrub_hw && !clips[ci].scrub_hw_bad && scrub_last_ms > SCRUB_HW_MS {
+					if !ok && !clips[ci].scrub_hw && !clips[ci].scrub_hw_bad && scrub_last_ms > SCRUB_HW_MS {
 						clips[ci].scrub_hw = true
 						dbg("SCRUBHW", "clip='%s' migrado p/ NVDEC no scrub (decode SW levou %.0fms > %.0f)", clips[ci].name, scrub_last_ms, SCRUB_HW_MS)
 					}
@@ -1620,8 +1639,9 @@ scrub_worker :: proc() {
 						dbg("SCRUB", "clip=%d t=%.1fs DESCARTADO (cursor em %.1fs)", ci, st0, scrub_req_t)
 						continue
 					}
-					dbg("SCRUB", "clip=%d t=%.1fs %s %.0fms", ci, st0, clips[ci].scrub_hw ? "HW" : "SW", scrub_last_ms)
-					scrub_shown = key; scrub_shown_ok = true
+					dbg("SCRUB", "clip=%d t=%.1fs %s%s %.0fms", ci, st0, clips[ci].scrub_hw ? "HW" : "SW",
+						kfast ? " KF" : partial ? " PARCIAL" : "", scrub_last_ms)
+					scrub_shown = key; scrub_shown_ok = !partial
 					scrub_done_c = ci
 					scrub_done_t = st0
 					scrub_done_sf = sf0
@@ -1659,12 +1679,16 @@ scrub_worker :: proc() {
 }
 
 // ---- cache de frames do scrub (só o worker de scrub mexe; sem lock) ----
-// Com -noaccurate_seek todo alvo entre dois keyframes devolve o MESMO frame: guardando os
-// últimos keyframes decodificados, ir-e-voltar no arrasto e parar dentro do mesmo GOP não
-// sobem ffmpeg nenhum. aid na chave: o slot de um clipe removido nunca casa com outro.
+// Libav: chave por alvo; fallback -noaccurate_seek: chave por keyframe. Não mistura
+// os dois resultados. aid impede que o slot removido case com outro clipe.
 SCRUB_CACHE_N :: 24 // × até 2.76MB (720p) = ~66MB no pior caso; alocado sob demanda
 
 ScrubKey :: struct { c, aid, k: int, t: f32, sf: int }
+
+scrub_key :: proc(ci, aid, k: int, target: f32, sf: int, precise: bool) -> ScrubKey {
+	if precise do return ScrubKey{ci, aid, -2, target, sf}
+	return ScrubKey{ci, aid, k, k >= 0 ? 0 : target, sf}
+}
 ScrubEntry :: struct { key: ScrubKey, use: u64, buf: []u8 }
 
 scrub_cache:    [SCRUB_CACHE_N]ScrubEntry

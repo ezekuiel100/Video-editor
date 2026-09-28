@@ -105,6 +105,7 @@ fs_ctl_alpha: f32        // opacidade atual dos controles em tela cheia (0..1, a
 fs_ctl_hold:  f32        // segundos que os controles ainda ficam visíveis (auto-hide estilo NLE)
 fs_vol_drag:  bool       // arrastando o slider de volume da barra em tela cheia
 player_seek_drag: bool   // arrastando a barra de progresso do player
+player_seek_bar:  rl.Rectangle // geometria publicada pelo draw; update processa posição/pedido antes do próximo desenho
 // tocava quando o usuário PEGOU a barra? O scrub pausa (senão brigaria com o relógio de
 // áudio), mas soltar tem de VOLTAR a tocar — antes parava e exigia apertar play de novo.
 // Escrito a cada clique na barra, então um arrasto cancelado (modal, sair da tela cheia)

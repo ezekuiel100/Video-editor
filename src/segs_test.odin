@@ -814,21 +814,21 @@ audio_seg_at_olha_src_audio :: proc(t: ^testing.T) {
 }
 
 @(test)
-scrub_thumb_so_se_mais_perto_que_o_frame :: proc(t: ^testing.T) {
+scrub_thumb_assume_quando_frame_fica_velho :: proc(t: ^testing.T) {
 	t_reset()
 	c := &clips[0]
 	c.nthumbs = 36
 	c.thumb_dt = 100 // vídeo de ~1h: 1 thumb a cada 100s (centros em 50, 150, …)
 	c.tex_t = 50
-	testing.expect(t, !scrub_use_thumb(c, 53), "≤4s do frame nítido: não cai na thumb")
-	testing.expect(t, !scrub_use_thumb(c, 55), "5s atrás, thumb no mesmo instante: empate fica o frame")
+	testing.expect(t, !scrub_use_thumb(c, 50.5), "atraso pequeno: mantém o frame nítido")
+	testing.expect(t, scrub_use_thumb(c, 51), "frame além do limite: usa a thumb mesmo com filmstrip esparso")
 	testing.expect(t, scrub_use_thumb(c, 150), "cursor em outra cena: a thumb de 150s vence o frame em 50s")
 }
 
 @(test)
 scrub_arrasto_usa_filmstrip_quando_frame_atrasado :: proc(t: ^testing.T) {
 	// arrastando um vídeo LONGO o 720p não acompanha: a thumb mais perto do cursor
-	// entra no player (cena certa). Perto do frame nítido (≤4s) o 720p continua.
+	// entra no player (cena certa). Perto do frame nítido (≤0.75s) o 720p continua.
 	t_reset()
 	c := &clips[0]
 	c.nthumbs = 36
@@ -836,7 +836,7 @@ scrub_arrasto_usa_filmstrip_quando_frame_atrasado :: proc(t: ^testing.T) {
 	c.tex_t = 50
 	st.drag = .Playhead
 	testing.expect(t, scrub_player_uses_thumb(c, 150), "arrasto longe: thumb da cena certa")
-	testing.expect(t, !scrub_player_uses_thumb(c, 53), "arrasto perto: fica o 720p")
+	testing.expect(t, !scrub_player_uses_thumb(c, 50.5), "arrasto perto: fica o 720p")
 	st.drag = .None
 	player_seek_drag = true
 	testing.expect(t, scrub_player_uses_thumb(c, 150), "barra longe: mesma regra")

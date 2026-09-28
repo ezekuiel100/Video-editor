@@ -2708,6 +2708,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	total := src_preview >= 0 ? (src_preview < nclips ? clips[src_preview].dur : 0) : timeline_dur()
 	pos   := src_preview >= 0 ? src_t : st.playhead
 	pbar := rl.Rectangle{ tb.x + 16, tb.y + 12, tb.width - 32, 5 }
+	player_seek_bar = pbar
 	pbar_hit := rl.Rectangle{ pbar.x - 4, tb.y + 5, pbar.width + 8, 18 }
 	frac := total > 0 ? clamp(pos / total, 0, 1) : 0
 	rl.DrawRectangleRounded(pbar, 1, 4, rl.Color{ 50, 54, 64, 255 })
@@ -2727,20 +2728,6 @@ draw_preview :: proc(r: rl.Rectangle) {
 		if seek_was_playing { st.playing = true; seek_was_playing = false }
 		when DBG_SEEK do dbg_seek_n = 200
 		if src_preview >= 0 { src_acquire(); clip_frame(&clips[src_preview], src_t) } else do seek_global(st.playhead)
-	}
-	if player_seek_drag && total > 0 {
-		np := clamp((rl.GetMousePosition().x - pbar.x) / pbar.width, 0, 1) * total
-		if src_preview >= 0 {
-			src_t = np
-			if !clips[src_preview].streaming do clip_show(&clips[src_preview], int(np * cfps_of(&clips[src_preview]))) // cache: scrub instantâneo
-			else { // streaming: mesmo worker da régua (o update também pede; aqui antecipa 1 frame)
-				intrinsics.atomic_store(&scrub_req_c, src_preview)
-				scrub_req_t = src_t
-			}
-		} else {
-			st.playhead = np
-			scrub_at_playhead() // todas as trilhas + worker (não só o cache do topo)
-		}
 	}
 
 	// LAYOUT RESPONSIVO da barra: com o player estreito (divisória vertical), timecode + botões
