@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:math"
 import "core:os"
 import "core:strings"
+import "core:time"
 
 // --- EFEITO: distorção radial (bulge/pinch) para o vídeo ---
 bulge_shader: rl.Shader
@@ -853,13 +854,18 @@ render_text_png :: proc(c: ^Clip, sg: Seg, path: string) -> bool {
 
 // o filmstrip só substitui o último frame decodificado se estiver MAIS PERTO do
 // cursor. `tex_t` perto (≤ SCRUB_SHARP_S) sempre vence — é nítido e já é o momento.
-// Empate: fica o frame (nitidez). Thumb mais longe que o frame: fica o frame.
+// Worker entregando (frame adotado há < SCRUB_FRESH_MS): o frame fica mesmo atrasado —
+// num arrasto rápido ele chega 1-2s atrás do cursor, e trocar pela thumb a cada giro
+// piscava nítido/borrado. A thumb só entra quando o decoder parou de acompanhar.
 scrub_use_thumb :: proc(c: ^Clip, lt: f32) -> bool {
 	if c.nthumbs <= 0 || c.thumb_dt <= 0 do return false
-	// Durante o scrub, uma textura velha não pode vencer só por estar numericamente
-	// mais perto que o centro de uma thumb esparsa. Passado o limite, o filmstrip
-	// acompanha o bucket atual até o decoder entregar outro frame nítido.
-	return abs(lt - c.tex_t) > SCRUB_SHARP_S
+	err := abs(lt - c.tex_t)
+	if err <= SCRUB_SHARP_S do return false
+	fresh := scrub_adopt_c >= 0 && scrub_adopt_c < nclips && &clips[scrub_adopt_c] == c &&
+	         time.duration_milliseconds(time.tick_since(scrub_adopt_at)) < SCRUB_FRESH_MS
+	if fresh do return false
+	ti := clamp(int(lt / c.thumb_dt), 0, c.nthumbs - 1)
+	return abs(lt - (f32(ti) + 0.5) * c.thumb_dt) < err
 }
 
 // player e arrasto usam a MESMA regra: frame nítido se está perto; senão a miniatura

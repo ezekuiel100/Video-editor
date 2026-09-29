@@ -171,7 +171,12 @@ scrub_ps_mu: sync.Mutex
 scrub_ps:    os.Process
 scrub_ps_ok: bool
 scrub_work_t: f32           // alvo que o worker está decodificando agora
-scrub_prev_t: f32 = -1      // (worker) último alvo visto e quando mudou: detecta arrasto parado
+// (main) último frame de scrub adotado: enquanto o worker entrega, o frame nítido segue o
+// cursor mesmo atrasado — a miniatura só entra quando ele para de chegar (ver scrub_use_thumb)
+scrub_adopt_c:  int = -1
+scrub_adopt_at: time.Tick
+SCRUB_FRESH_MS :: f64(300)
+scrub_prev_t: f32 = -1     // (worker) último alvo visto e quando mudou: detecta arrasto parado
 scrub_prev_c: int = -1
 scrub_moved:  time.Tick
 
@@ -1633,9 +1638,10 @@ scrub_worker :: proc() {
 						clips[ci].scrub_hw = true
 						dbg("SCRUBHW", "clip='%s' migrado p/ NVDEC no scrub (decode SW levou %.0fms > %.0f)", clips[ci].name, scrub_last_ms, SCRUB_HW_MS)
 					}
-					// o arrasto já foi pra longe: publicar este frame PLANTARIA a cena velha
-					// por cima do filmstrip certo. Descarta e o próximo giro pega o alvo atual.
-					if abs(scrub_req_t - st0) > SCRUB_SHARP_S {
+					// o arrasto já foi pra longe: só descarta se o frame novo não melhora o que
+					// está na tela. Descartar por distância fixa jogava fora TODO frame num
+					// arrasto rápido (o cursor anda >0.75s durante um decode de ~40ms).
+					if !scrub_worth_publish(scrub_req_t, st0, clips[ci].tex_t) {
 						dbg("SCRUB", "clip=%d t=%.1fs DESCARTADO (cursor em %.1fs)", ci, st0, scrub_req_t)
 						continue
 					}
@@ -1676,6 +1682,13 @@ scrub_worker :: proc() {
 		}
 		time.sleep(4 * time.Millisecond)
 	}
+}
+
+// frame decodificado para `done` vale subir com o cursor em `cur` e `shown` na tela?
+// Perto do cursor sempre; longe, só se chega mais perto que o atual (`shown` é lido
+// da main sem lock — f32 velho só erra um giro).
+scrub_worth_publish :: proc(cur, done, shown: f32) -> bool {
+	return abs(cur - done) <= SCRUB_SHARP_S || abs(cur - done) < abs(cur - shown)
 }
 
 // ---- cache de frames do scrub (só o worker de scrub mexe; sem lock) ----

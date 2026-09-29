@@ -12,6 +12,7 @@ package main
 // exercitar remove_seg/seek_global inteiros sem janela.
 
 import "core:testing"
+import "core:time"
 import rl "vendor:raylib"
 
 t_feq :: proc(a, b: f32) -> bool { return abs(a - b) < 0.001 }
@@ -820,9 +821,20 @@ scrub_thumb_assume_quando_frame_fica_velho :: proc(t: ^testing.T) {
 	c.nthumbs = 36
 	c.thumb_dt = 100 // vídeo de ~1h: 1 thumb a cada 100s (centros em 50, 150, …)
 	c.tex_t = 50
+	scrub_adopt_c = -1
 	testing.expect(t, !scrub_use_thumb(c, 50.5), "atraso pequeno: mantém o frame nítido")
-	testing.expect(t, scrub_use_thumb(c, 51), "frame além do limite: usa a thumb mesmo com filmstrip esparso")
+	testing.expect(t, !scrub_use_thumb(c, 51), "thumb não mais perto que o frame: fica o nítido")
 	testing.expect(t, scrub_use_thumb(c, 150), "cursor em outra cena: a thumb de 150s vence o frame em 50s")
+	scrub_adopt_c = 0; scrub_adopt_at = time.tick_now()
+	testing.expect(t, !scrub_use_thumb(c, 150), "worker entregando: frame atrasado não pisca p/ thumb")
+	scrub_adopt_c = -1
+}
+
+@(test)
+scrub_publica_se_melhora_a_tela :: proc(t: ^testing.T) {
+	testing.expect(t, scrub_worth_publish(10.5, 10, 0), "perto do cursor: publica")
+	testing.expect(t, scrub_worth_publish(12, 10, 5), "atrasado mas melhor que a tela: publica")
+	testing.expect(t, !scrub_worth_publish(12, 10, 11.5), "tela já está mais perto: descarta")
 }
 
 @(test)
