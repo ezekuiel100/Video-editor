@@ -187,6 +187,7 @@ close_now :: proc() {
 	for i in 0 ..< MAX_SEGS do for s in 0 ..< 2 do if spv[i][s].path != "" do os.remove(spv[i][s].path)
 	if spv_render_path != "" do os.remove(spv_render_path) // render em voo (o Job mata o ffmpeg)
 	for t in spv_trash do os.remove(t)                     // lixeira ainda não varrida
+	export_arep_cleanup()                                  // áudio reparado de fontes corrompidas
 	// 4) sai — sem joins, sem desmontar o raylib; Jobs KILL_ON_JOB_CLOSE varrem o que escapou
 	os.exit(0)
 }

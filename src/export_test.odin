@@ -256,6 +256,36 @@ graph_movie_escapa_caminho :: proc(t: ^testing.T) {
 	testing.expect_value(t, exp_movie_path(`C:\it's.mp4`), `'C\:/it\'\''s.mp4'`)
 }
 
+// ÁUDIO CORROMPIDO NA FONTE: o 1º frame AAC inválido derruba o movie= inteiro. Fonte
+// marcada como quebrada → o build pede o pedaço (fase de reparo) e, com ele pronto, lê o
+// áudio do pedaço SEM seek (ele já começa no trecho) e o vídeo segue da fonte original.
+@(test)
+graph_audio_reparado_substitui_o_da_fonte :: proc(t: ^testing.T) {
+	t_export_reset()
+	add_seg(0, 0, 60, 10) // A: fonte 60..70
+	add_seg(1, 10, 60, 10) // B: intacta
+	append(&export_arep_bad, "A.mp4")
+	defer { clear(&export_arep_bad); clear(&export_arep_done) }
+
+	// sem pedaço: o build pede o trecho [seek, fim do atrim + folga] só da fonte quebrada
+	export_build_args("saida.mp4", false, true)
+	if testing.expectf(t, len(exp_arep_need) == 1, "1 pedaço pedido, veio %d", len(exp_arep_need)) {
+		r := exp_arep_need[0]
+		testing.expect_value(t, r.path, "A.mp4")
+		testing.expectf(t, t_feq(r.t0, 58) && r.t1 >= 70, "pedaço deve cobrir o seek (58) até o fim do atrim (70), veio %.3f..%.3f", r.t0, r.t1)
+	}
+
+	// com o pedaço pronto: nada a pedir, áudio vem dele
+	append(&export_arep_done, ARep{ path = "A.mp4", file = "rep.mka", t0 = 58, t1 = 71 })
+	_, g := t_build(t)
+	testing.expect(t, len(exp_arep_need) == 0, "pedaço já existe: nada a reparar")
+	testing.expect(t, strings.contains(g, "movie='rep.mka':s=da[ma0];"), "áudio de A sai do pedaço reparado")
+	testing.expect(t, strings.contains(g, "movie='A.mp4':seek_point=58.000:s=dv,"), "vídeo de A segue da fonte, só vídeo")
+	testing.expect(t, strings.contains(g, "movie='B.mp4':seek_point=58.000:s=dv+da"), "fonte intacta não muda")
+	a, b, ok := t_range(g, "[ma0]atrim=")
+	testing.expectf(t, ok && t_feq(a, 60) && t_feq(b, 70), "atrim continua em tempo absoluto da fonte (60..70), veio %.3f..%.3f", a, b)
+}
+
 // clipe separado: o que não toca o trecho nem entra no comando
 @(test)
 graph_intervalo_deixa_fora_quem_nao_toca :: proc(t: ^testing.T) {

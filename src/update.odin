@@ -919,6 +919,7 @@ update :: proc() {
 		export_pending_path = ""
 		if path != "" {
 			export_gpu_fallback = false // corrida nova: libera o retry por CPU
+			export_arep_tried = false   // ...e o reparo de áudio corrompido
 			start_export(path, gpu)
 			delete(path)
 		}
@@ -930,7 +931,9 @@ update :: proc() {
 		export_was_running = false
 		if export_thr != nil { thread.join(export_thr); thread.destroy(export_thr); export_thr = nil }
 		if export_prev_thr != nil { thread.join(export_prev_thr); thread.destroy(export_prev_thr); export_prev_thr = nil }
-		if export_cancel { // cancelado: remove o arquivo parcial, não é falha
+		if export_arep_run { // era um pedaço do reparo de áudio (não há arquivo de saída ainda)
+			export_arep_finish()
+		} else if export_cancel { // cancelado: remove o arquivo parcial, não é falha
 			if export_out != "" do os.remove(export_out)
 			set_toast("Exportação cancelada")
 			export_gpu_fallback = false
@@ -966,6 +969,12 @@ update :: proc() {
 				start_export(export_out, false)
 				// se o retry armou, NÃO limpa flags de cancel/pause de novo abaixo
 				// (start_export já zerou); só sai do bloco de conclusão desta corrida
+			} else if !export_arep_tried && export_bad_data && export_out != "" && export_arep_mark_bad() {
+				// frame de áudio corrompido derrubou o movie= (ver ARep): regrava o áudio
+				// das fontes e refaz o render UMA vez
+				export_arep_tried = true
+				os.remove(export_out)
+				start_export(export_out, export_used_gpu)
 			} else {
 				// mostra a CAUSA (última linha de stderr do ffmpeg) em vez do genérico: sem
 				// console, era a única informação e ela ia direto para o lixo

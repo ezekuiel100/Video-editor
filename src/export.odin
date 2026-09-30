@@ -5,6 +5,7 @@ import "base:intrinsics"
 import "core:fmt"
 import "core:math"
 import "core:os"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -240,8 +241,37 @@ ExpMovie :: struct {
 	w, h: i32, // dimensões de EXIBIÇÃO do probe (já com a rotação); 0 = não normaliza
 	rot:  int, // rotação de exibição em graus horários (0/90/180/270)
 	v, a: bool,
+	aend: f32,    // fim (tempo da fonte) do último atrim que lê o áudio deste movie
+	arep: string, // pedaço de áudio REPARADO que cobre [seek, aend]; "" = áudio da própria fonte
 }
 exp_movies: [dynamic]ExpMovie
+
+// ÁUDIO CORROMPIDO NA FONTE. Live gravada costuma ter frames AAC com lixo (perda de pacote,
+// reconexão). Pelo -i o ffmpeg só avisa e pula o frame; pelo movie= (ver MOVIE_BASE) o
+// primeiro frame inválido derruba o grafo inteiro ("Error sending frames to consumers:
+// Invalid data found") e o toast mostrava só a queixa do decoder ("Number of bands (63)
+// exceeds limit (42)"). O movie não tem opção p/ ignorar erro de decode.
+// Saída: quando o export morre assim, as fontes de áudio dele entram em export_arep_bad e o
+// trecho de áudio que cada movie lê é regravado ANTES do render por um ffmpeg com -i (que
+// pula os frames ruins) num FLAC em .mka. -copyts mantém o PTS absoluto da fonte, então os
+// atrim do grafo não mudam; aresample=async=1 tapa com silêncio o buraco do frame pulado.
+// Só o trecho exportado (+ folga) é regravado, não a live inteira.
+ARep :: struct {
+	path, file: string, // fonte e pedaço reparado (%TEMP%, some no close_now/sweep)
+	t0, t1:     f32,    // intervalo coberto, em tempo da fonte (o mesmo do -ss)
+}
+export_arep_bad:   [dynamic]string // fontes cujo áudio já derrubou um export nesta sessão
+export_arep_done:  [dynamic]ARep   // pedaços prontos (reusados por exports seguintes / lote)
+export_arep_todo:  [dynamic]ARep   // fila da fase de reparo em curso
+export_arep_pos:   int
+export_arep_run:   bool   // o ffmpeg em voo é um reparo, não o render
+export_arep_tried: bool   // esta corrida já reparou: nova falha vira toast (sem laço)
+export_arep_out:   string // saída e GPU do render que continua depois do reparo
+export_arep_gpu:   bool
+export_arep_seq:   int
+export_bad_data:   bool   // o stderr teve "Invalid data found" (decode quebrado)
+export_last_apaths: [dynamic]string // fontes de áudio (movie) do último render disparado
+exp_arep_need:     [dynamic]ARep   // (temp) o que o build pediu e ainda não existe
 
 exp_add_movie :: proc(c: ^Clip, seek: f32) -> int {
 	m := ExpMovie{ path = c.path, seek = seek, w = c.vw, h = c.vh }
@@ -318,16 +348,23 @@ exp_movie_head :: proc() -> string {
 	b := strings.builder_make(context.temp_allocator)
 	for m, k in exp_movies {
 		if !m.v && !m.a do continue
+		a := m.a
+		if a && m.arep != "" {
+			// áudio do pedaço reparado (sem seek: ele já começa no trecho); o vídeo segue da fonte
+			fmt.sbprintf(&b, "movie=%s:s=da[ma%d];", exp_movie_path(m.arep), k)
+			a = false
+			if !m.v do continue
+		}
 		strings.write_string(&b, "movie=")
 		strings.write_string(&b, exp_movie_path(m.path))
 		if m.seek > 0.001 do fmt.sbprintf(&b, ":seek_point=%.3f", m.seek)
 		switch {
-		case m.v && m.a: fmt.sbprintf(&b, ":s=dv+da")
-		case m.v:        fmt.sbprintf(&b, ":s=dv")
-		case:            fmt.sbprintf(&b, ":s=da[ma%d];", k); continue
+		case m.v && a: fmt.sbprintf(&b, ":s=dv+da")
+		case m.v:      fmt.sbprintf(&b, ":s=dv")
+		case:          fmt.sbprintf(&b, ":s=da[ma%d];", k); continue
 		}
 		vl := fmt.tprintf("mv%d", k)
-		if m.a {
+		if a {
 			// 2 saídas: a de vídeo ganha nome p/ passar pela normalização
 			fmt.sbprintf(&b, "[mvr%d][ma%d];[mvr%d]", k, k, k)
 		} else {
@@ -417,11 +454,13 @@ export_worker :: proc() {
 					if len(s) > 0 && s[len(s)-1] == '\r' do s = s[:len(s)-1] // Windows: -progress usa CRLF
 					if export_apply_progress(s) {
 						// out_time_* atualizou o %
-					} else if !progress_line(s) && !export_err_noise(s) {
+					} else if !progress_line(s) {
+						// decode quebrado na fonte (ver ARep): vale mesmo nas linhas de rodapé
+						if strings.contains(s, "Invalid data found") do export_bad_data = true
 						// guarda a PRIMEIRA linha útil: o ffmpeg 7+ termina com
 						// "Terminating thread ... -22", que sobrescrevia a causa
 						// ("non monotonically increasing dts", "height not divisible"...).
-						if export_err_n == 0 {
+						if export_err_n == 0 && !export_err_noise(s) {
 							n2 := min(len(s), len(export_err))
 							copy(export_err[:], s[:n2]); export_err_n = n2
 						}
@@ -1774,6 +1813,7 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 		// não desloca nada aqui — nada a compensar).
 		// exp_ainp: quando o vídeo é um PNG de freeze, o áudio vem noutro movie do arquivo.
 		ainp := exp_ainp[i] >= 0 ? exp_ainp[i] : seg_inp[i]
+		if ainp >= MOVIE_BASE { m := &exp_movies[ainp - MOVIE_BASE]; m.aend = max(m.aend, sg.in_off + sg.dur*sp) }
 		fmt.sbprintf(&fb, "%s%satrim=%.3f:%.3f,asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,volume=%.3f",
 			sep, exp_ain(ainp), sg.in_off, sg.in_off+sg.dur*sp, vv)
 		// velocidade: atempo aceita 0.5..2 por estágio; encadeia p/ cobrir 0.25..4.
@@ -1816,8 +1856,16 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 	// assim: -/opt (ler o valor de um arquivo) só existe do ffmpeg 7 p/ cima, e o binário é
 	// resolvido pelo PATH, então trocar quebraria em qualquer instalação mais antiga. O aviso
 	// de deprecação sai em nível warning e o -loglevel error acima já o silencia.
+	// fonte com áudio já sabidamente quebrado: lê o pedaço reparado (ou pede o reparo)
+	exp_arep_need = make([dynamic]ARep, context.temp_allocator)
+	for &m in exp_movies {
+		if !m.a || !slice.contains(export_arep_bad[:], m.path) do continue
+		t0, t1 := max(m.seek, 0), m.aend + 1
+		if f := export_arep_find(m.path, t0, t1); f != "" { m.arep = f; continue }
+		append(&exp_arep_need, ARep{ path = m.path, t0 = t0, t1 = t1 })
+	}
 	// as fontes movie= vão na FRENTE (só agora se sabe quais streams cada uma usa)
-	graph = strings.concatenate({exp_movie_head(), strings.to_string(fb)}, context.temp_allocator)
+	graph =strings.concatenate({exp_movie_head(), strings.to_string(fb)}, context.temp_allocator)
 	fg_path := fmt.tprintf("%s_%d_fgraph.txt", AUDIO_BASE, u32(win.GetCurrentProcessId()))
 	if !dry {
 		if os.write_entire_file(fg_path, transmute([]u8)graph) != nil {
@@ -2016,24 +2064,45 @@ start_export :: proc(out: string, gpu: bool) {
 	}
 	args, _, built := export_build_args(out, use_gpu)
 	if !built do return // o motivo já foi ao toast lá dentro
+	// áudio de fonte quebrada sem pedaço reparado: repara primeiro, o render vem depois
+	if len(exp_arep_need) > 0 { export_arep_begin(out, gpu); return }
 	// só agora publica a saída: se a montagem falhasse, export_out (usado pelo "Abrir
-	// pasta" da conclusão) ficaria apontando p/ um arquivo que nunca foi criado
+	// pasta" da conclusão) ficaria apontando p/ um arquivo que nunca foi criado.
+	// Clona ANTES de soltar: os retries chamam start_export(export_out, …) — `out` É o antigo.
+	o := strings.clone(out)
 	if export_out != "" do delete(export_out)
-	export_out = strings.clone(out)
+	export_out = o
+	// fontes de áudio deste render: se ele morrer com decode quebrado, são elas que vão p/ reparo
+	for p in export_last_apaths do delete(p)
+	clear(&export_last_apaths)
+	for m in exp_movies do if m.a && m.arep == "" && !slice.contains(export_last_apaths[:], m.path) {
+		append(&export_last_apaths, strings.clone(m.path))
+	}
 	total := export_range_on ? export_range_end - export_range_start : timeline_dur()
 	W, H := export_dims()
 	want_video := export_fmt != .MP3
 
+	export_arep_run = false
+	export_total = total
+	if !export_spawn(args[:], want_video) do return
+	export_used_gpu = use_gpu
+	if want_video do set_toast(rl.TextFormat("Exportando %dx%d%s...", i32(W), i32(H), use_gpu ? cstring(" (GPU)") : cstring("")))
+	else          do set_toast("Exportando áudio (MP3)...")
+}
+
+// sobe o ffmpeg com o stderr (-progress + erros) na export_worker e, se `want_video`, a
+// prévia rgb24 pelo stdout. export_total já deve estar certo (o worker lê na hora).
+export_spawn :: proc(args: []string, want_video: bool) -> bool {
 	pr, pw: ^os.File
 	if want_video {
 		e: os.Error
 		pr, pw, e = export_big_pipe() // prévia (stdout) — buffer grande p/ não travar o encode
-		if e != nil { set_toast("Falha ao criar pipe"); return }
+		if e != nil { set_toast("Falha ao criar pipe"); return false }
 	}
 	gr, gw, e2 := os.pipe() // progresso (stderr)
 	if e2 != nil {
 		if want_video { os.close(pr); os.close(pw) }
-		set_toast("Falha ao criar pipe"); return
+		set_toast("Falha ao criar pipe"); return false
 	}
 	export_r = gr; export_prev_r = pr
 	intrinsics.atomic_store(&export_prev_pub, -1)
@@ -2053,7 +2122,7 @@ start_export :: proc(out: string, gpu: bool) {
 		// padrão do Windows (~64 KB) e o processo fica bloqueado no write até a thread existir.
 		export_prev_thr = thread.create_and_start(export_preview_worker)
 	}
-	desc := os.Process_Desc{ command = args[:], stderr = gw }
+	desc := os.Process_Desc{ command = args, stderr = gw }
 	if want_video do desc.stdout = pw
 	p, pe := os.process_start(desc)
 	if want_video do os.close(pw)
@@ -2066,20 +2135,107 @@ start_export :: proc(out: string, gpu: bool) {
 		// pe costuma ser "executable file not found" quando o ffmpeg sumiu do PATH —
 		// antes virava um toast mudo e o usuário não sabia o que instalar/onde olhar.
 		set_toast(rl.TextFormat("Falha ao iniciar ffmpeg: %v", pe))
-		return
+		return false
 	}
 	export_job = make_kill_job()
 	if export_job != nil do AssignProcessToJobObject(export_job, win.HANDLE(p.handle))
 	sync.mutex_lock(&export_ps_mu); export_ps = p; export_ps_ok = true; sync.mutex_unlock(&export_ps_mu)
-	export_total = total; export_pct = 0; export_ok = false
+	export_pct = 0; export_ok = false
 	export_err_n = 0 // erro da exportação ANTERIOR não vale para esta
-	export_used_gpu = use_gpu
+	export_bad_data = false
 	export_paused = false; export_cancel = false
 	intrinsics.atomic_store(&export_run, true)
 	export_was_running = true // garante que o bloco de conclusão rode mesmo se o clique de cancelar der early-return
 	export_thr = thread.create_and_start(export_worker)
-	if want_video do set_toast(rl.TextFormat("Exportando %dx%d%s...", i32(W), i32(H), use_gpu ? cstring(" (GPU)") : cstring("")))
-	else          do set_toast("Exportando áudio (MP3)...")
+	return true
+}
+
+// pedaço reparado de `path` que cobre [t0, t1] inteiro ("" = nenhum)
+export_arep_find :: proc(path: string, t0, t1: f32) -> string {
+	for r in export_arep_done do if r.path == path && r.t0 <= t0 + 0.01 && r.t1 >= t1 - 0.01 do return r.file
+	return ""
+}
+
+// render morreu com decode quebrado: as fontes de áudio dele passam a ser lidas de pedaços
+// reparados. false = nenhuma fonte nova (todas já vinham reparadas: o problema é outro).
+export_arep_mark_bad :: proc() -> bool {
+	added := false
+	for p in export_last_apaths do if !slice.contains(export_arep_bad[:], p) {
+		append(&export_arep_bad, strings.clone(p))
+		added = true
+	}
+	return added
+}
+
+// fase de reparo: um ffmpeg por pedaço pedido pelo build (exp_arep_need), em sequência, no
+// mesmo encanamento do render (overlay, cancelar, pausar, job que morre com o app).
+export_arep_begin :: proc(out: string, gpu: bool) {
+	o := strings.clone(out)
+	if export_arep_out != "" do delete(export_arep_out)
+	export_arep_out = o
+	export_arep_gpu = gpu
+	export_arep_drop_todo()
+	pid := u32(win.GetCurrentProcessId())
+	for r in exp_arep_need {
+		export_arep_seq += 1
+		append(&export_arep_todo, ARep{
+			path = strings.clone(r.path), t0 = r.t0, t1 = r.t1,
+			file = fmt.aprintf("%s_%d_arep%d.mka", AUDIO_BASE, pid, export_arep_seq),
+		})
+	}
+	export_arep_pos = 0
+	export_arep_next()
+}
+
+export_arep_next :: proc() {
+	r := export_arep_todo[export_arep_pos]
+	// -ss/-to como opção de INPUT (tempo da fonte, o mesmo do seek_point); -copyts preserva o
+	// PTS absoluto. -max_error_rate 1: frame ruim nunca vira código de saída ≠ 0 aqui.
+	args := []string{
+		"ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+		"-progress", "pipe:2", "-nostats", "-max_error_rate", "1",
+		"-ss", fmt.tprintf("%.3f", r.t0), "-to", fmt.tprintf("%.3f", r.t1), "-copyts", "-i", r.path,
+		"-vn", "-sn", "-dn", "-af", "aresample=async=1", "-c:a", "flac", r.file,
+	}
+	export_arep_run = true
+	export_total = 0 // out_time com -copyts é o PTS absoluto: o % sai da contagem de pedaços
+	if !export_spawn(args, false) { export_arep_run = false; export_arep_drop_todo(); return }
+	export_pct = f32(export_arep_pos) / f32(len(export_arep_todo))
+	set_toast(rl.TextFormat("Áudio corrompido na fonte — reparando trecho %d de %d…", i32(export_arep_pos+1), i32(len(export_arep_todo))))
+}
+
+// (main) o ffmpeg de um pedaço terminou: próximo pedaço, ou o render de volta
+export_arep_finish :: proc() {
+	export_arep_run = false
+	if export_cancel { set_toast("Exportação cancelada"); export_arep_drop_todo(); return }
+	if !export_ok {
+		if export_err_n > 0 do set_toast(rl.TextFormat("Falha ao reparar o áudio: %s", cs(string(export_err[:export_err_n]))))
+		else                do set_toast("Falha ao reparar o áudio")
+		export_arep_drop_todo()
+		return
+	}
+	r := &export_arep_todo[export_arep_pos]
+	append(&export_arep_done, r^)
+	r^ = {} // strings agora são do done
+	export_arep_pos += 1
+	if export_arep_pos < len(export_arep_todo) { export_arep_next(); return }
+	clear(&export_arep_todo)
+	start_export(export_arep_out, export_arep_gpu)
+}
+
+// descarta a fila (e os arquivos dos pedaços que não chegaram ao fim)
+export_arep_drop_todo :: proc() {
+	for r in export_arep_todo {
+		if r.file != "" do os.remove(r.file)
+		delete(r.path); delete(r.file)
+	}
+	clear(&export_arep_todo)
+}
+
+// close_now: apaga os pedaços reparados (o Job já matou o ffmpeg que escrevia um deles)
+export_arep_cleanup :: proc() {
+	for r in export_arep_done do os.remove(r.file)
+	for r in export_arep_todo do if r.file != "" do os.remove(r.file)
 }
 
 // pipe de prévia com buffer de 1 MB (CreatePipe default ~4–64 KB). 1 frame rgb24 da
