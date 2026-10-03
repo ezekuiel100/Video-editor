@@ -20,27 +20,28 @@ import "core:unicode/utf8"
 import win "core:sys/windows"
 
 
-// ---------- paleta (tema escuro) ----------
-BG       :: rl.Color{ 24, 26, 32, 255 }
-PANEL    :: rl.Color{ 33, 36, 44, 255 }
-PANEL2   :: rl.Color{ 28, 30, 37, 255 }
-TOPBAR   :: rl.Color{ 20, 22, 27, 255 }
-LINE     :: rl.Color{ 46, 49, 58, 255 }
-TEXT     :: rl.Color{ 208, 212, 219, 255 }
-MUTED    :: rl.Color{ 122, 128, 140, 255 }
-ACCENT   :: rl.Color{ 40, 200, 182, 255 }
-ACCENT_D :: rl.Color{ 24, 120, 110, 255 }
+// ---------- paleta (tema escuro de alto contraste) ----------
+// Três níveis de superfície mantêm os painéis separados sem depender de bordas pesadas.
+BG       :: rl.Color{ 18, 21, 27, 255 }
+PANEL    :: rl.Color{ 34, 39, 48, 255 }
+PANEL2   :: rl.Color{ 26, 30, 38, 255 }
+TOPBAR   :: rl.Color{ 15, 18, 24, 255 }
+LINE     :: rl.Color{ 62, 69, 84, 255 }
+TEXT     :: rl.Color{ 239, 243, 248, 255 }
+MUTED    :: rl.Color{ 157, 168, 186, 255 }
+ACCENT   :: rl.Color{ 45, 212, 192, 255 }
+ACCENT_D :: rl.Color{ 25, 143, 130, 255 }
 PLAYHEAD :: rl.Color{ 236, 72, 60, 255 }
-CLIP     :: rl.Color{ 48, 78, 98, 255 }
-CLIP_HDR :: rl.Color{ 62, 100, 122, 255 }
-AUDIOCLIP:: rl.Color{ 44, 66, 60, 255 }
-HOVER    :: rl.Color{ 48, 52, 62, 255 }
-PV_BACK  :: rl.Color{ 40, 43, 52, 255 } // fundo do painel de preview FORA do quadro de saída (não é preto:
+CLIP     :: rl.Color{ 55, 90, 113, 255 }
+CLIP_HDR :: rl.Color{ 71, 115, 140, 255 }
+AUDIOCLIP:: rl.Color{ 46, 78, 68, 255 }
+HOVER    :: rl.Color{ 51, 58, 71, 255 }
+PV_BACK  :: rl.Color{ 31, 35, 43, 255 } // fundo do painel de preview FORA do quadro de saída (não é preto:
                                         // separa à vista o que é vídeo do que é só sobra do painel)
-PV_EDGE  :: rl.Color{ 96, 104, 120, 230 } // moldura do quadro de saída
+PV_EDGE  :: rl.Color{ 104, 114, 132, 235 } // moldura do quadro de saída
 
 ui_font: rl.Font
-g_us: f32 = 1.3 // escala da UI (fontes/barras) — janelas grandes ficam mais legíveis
+g_us: f32 = 1.35 // texto ligeiramente maior para leitura confortável em telas densas
 sdf_shader: rl.Shader // shader do texto SDF (nítido em qualquer tamanho)
 sdf_ok: bool          // SDF carregou? (senão desenha sem shader)
 // fontes disponíveis p/ os clipes de TEXTO (índice 0 = Segoe UI = ui_font)

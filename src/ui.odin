@@ -1234,7 +1234,8 @@ draw_toolbar :: proc(sw, y, h: f32) {
 		w := txt_w(tab, 13) + 26
 		r := rl.Rectangle{ x, y, w, h }
 		active := i == st.active_tab
-		if hovered(r) && !active do rl.DrawRectangleRec(r, HOVER)
+		if active do rl.DrawRectangleRounded({ x + 4, y + 5, w - 8, h - 10 }, 0.18, 4, rl.Color{ 31, 50, 54, 255 })
+		else if hovered(r) do rl.DrawRectangleRec(r, HOVER)
 		if clicked(r) do st.active_tab = i
 		icol := active ? ACCENT : MUTED
 		rl.DrawRectangleRoundedLinesEx({ x + w/2 - 9, y + 12, 18, 15 }, 0.25, 4, 1.5, icol)
