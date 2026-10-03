@@ -1223,6 +1223,41 @@ draw_topbar :: proc(sw, h: f32) {
 }
 
 // ---------- abas ----------
+// Ícones vetoriais em uma área de 20 × 20, com traço e cor comuns às abas.
+draw_tab_icon :: proc(cx, cy: f32, kind: int, col: rl.Color) {
+	stroke :: f32(1.5)
+	switch kind {
+	case 0: // Mídia: película com perfurações nas laterais.
+		rl.DrawRectangleRoundedLinesEx({ cx - 9, cy - 8, 18, 16 }, 0.2, 4, stroke, col)
+		rl.DrawLineEx({ cx - 5, cy - 8 }, { cx - 5, cy + 8 }, stroke, col)
+		rl.DrawLineEx({ cx + 5, cy - 8 }, { cx + 5, cy + 8 }, stroke, col)
+		for row in 0 ..< 3 {
+			y := cy - 5 + f32(row) * 5
+			rl.DrawLineEx({ cx - 9, y }, { cx - 5, y }, stroke, col)
+			rl.DrawLineEx({ cx + 5, y }, { cx + 9, y }, stroke, col)
+		}
+	case 1: // Transições: dois quadros sobrepostos.
+		rl.DrawRectangleRoundedLinesEx({ cx - 9, cy - 7, 12, 11 }, 0.2, 4, stroke, col)
+		rl.DrawRectangleRoundedLinesEx({ cx - 3, cy - 3, 12, 11 }, 0.2, 4, stroke, col)
+	case 2: // Efeitos: varinha diagonal e brilhos.
+		rl.DrawLineEx({ cx - 8, cy + 8 }, { cx + 3, cy - 3 }, stroke, col)
+		rl.DrawLineEx({ cx - 4, cy + 2 }, { cx - 2, cy + 4 }, stroke, col)
+		rl.DrawLineEx({ cx + 3, cy - 9 }, { cx + 3, cy - 5 }, stroke, col)
+		rl.DrawLineEx({ cx + 1, cy - 7 }, { cx + 5, cy - 7 }, stroke, col)
+		rl.DrawLineEx({ cx + 7, cy - 2 }, { cx + 7, cy + 4 }, stroke, col)
+		rl.DrawLineEx({ cx + 4, cy + 1 }, { cx + 10, cy + 1 }, stroke, col)
+		rl.DrawLineEx({ cx - 6, cy - 7 }, { cx - 6, cy - 3 }, stroke, col)
+		rl.DrawLineEx({ cx - 8, cy - 5 }, { cx - 4, cy - 5 }, stroke, col)
+	case 3: // Cor: três círculos sobrepostos, no tom do estado da aba.
+		rl.DrawRing({ cx, cy - 4 }, 4 - stroke/2, 4 + stroke/2, 0, 360, 32, col)
+		rl.DrawRing({ cx - 4, cy + 3 }, 4 - stroke/2, 4 + stroke/2, 0, 360, 32, col)
+		rl.DrawRing({ cx + 4, cy + 3 }, 4 - stroke/2, 4 + stroke/2, 0, 360, 32, col)
+	case 4: // Tela dividida: grade com quatro quadrantes.
+		rl.DrawRectangleRoundedLinesEx({ cx - 9, cy - 8, 18, 16 }, 0.2, 4, stroke, col)
+		rl.DrawLineEx({ cx, cy - 8 }, { cx, cy + 8 }, stroke, col)
+		rl.DrawLineEx({ cx - 9, cy }, { cx + 9, cy }, stroke, col)
+	}
+}
 draw_toolbar :: proc(sw, y, h: f32) {
 	rl.DrawRectangleRec({0, y, sw, h}, PANEL2)
 	rl.DrawRectangle(0, i32(y + h) - 1, i32(sw), 1, LINE)
@@ -1238,7 +1273,7 @@ draw_toolbar :: proc(sw, y, h: f32) {
 		else if hovered(r) do rl.DrawRectangleRec(r, HOVER)
 		if clicked(r) do st.active_tab = i
 		icol := active ? ACCENT : MUTED
-		rl.DrawRectangleRoundedLinesEx({ x + w/2 - 9, y + 12, 18, 15 }, 0.25, 4, 1.5, icol)
+		draw_tab_icon(x + w/2, y + 20, i, icol)
 		txt_c(tab, x + w/2, y + 34, 13, active ? TEXT : MUTED)
 		if active do rl.DrawRectangleRec({ x + 8, y + h - 3, w - 16, 3 }, ACCENT)
 		x += w
