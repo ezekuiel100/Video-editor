@@ -247,13 +247,13 @@ g_vlane:   rl.Rectangle // retângulo de TODAS as trilhas (p/ hit-test do drop d
 g_newv_zone: rl.Rectangle // banda escura acima do vídeo: soltar aqui cria trilha de vídeo nova
 g_newa_zone: rl.Rectangle // banda escura abaixo do áudio: soltar aqui cria trilha de áudio nova
 g_lanes_top: f32        // y do topo da área das trilhas (p/ mapear Y<->trilha)
-g_track_h:   f32 = 84   // altura PADRÃO de trilha (px); por trilha vem de track_h/th()
-g_track_gap: f32 = 3    // espaço vertical entre trilhas
+g_track_h:   f32 = 76   // altura PADRÃO compacta; por trilha vem de track_h/th()
+g_track_gap: f32 = 2    // separação sutil, sem aparência de tabela
 // altura POR TRILHA (arrastar a borda de baixo do cabeçalho). 0 = usar o padrão g_track_h, então
 // projeto novo/trilha nova já nasce certo sem inicializar nada. Trilha mais alta = miniaturas
 // maiores E forma de onda proporcionalmente maior (facilita achar o ponto do corte no áudio).
 track_h: [MAXTRACKS]f32
-TRACK_H_MIN :: f32(44)   // ainda mostra a barra de título + um fio de conteúdo
+TRACK_H_MIN :: f32(44)   // ainda mostra título, controles e conteúdo ao compactar
 TRACK_H_MAX :: f32(320)
 track_resize: int = -1   // trilha sendo redimensionada (-1 = nenhuma)
 // altura efetiva da trilha t

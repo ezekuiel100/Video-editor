@@ -93,7 +93,7 @@ base_name :: proc(path: string) -> string {
 }
 
 
-LANE_X :: 128 // largura do cabeçalho das trilhas
+LANE_X :: 128 // cabeçalho compacto das trilhas
 
 
 // carrega uma fonte TTF como atlas SDF (nítida em qualquer tamanho com o sdf_shader).

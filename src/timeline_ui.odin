@@ -109,7 +109,7 @@ tl_marquee_apply :: proc(mq, view: rl.Rectangle, add: bool) {
 draw_timeline :: proc(r: rl.Rectangle) {
 	pt := prof_beg(.Timeline); defer prof_end(.Timeline, pt)
 	toolbar_h: f32 = 34
-	ruler_h: f32 = 22
+	ruler_h: f32 = 24
 	rl.DrawRectangleRec(r, PANEL2)
 	rl.DrawRectangle(i32(r.x), i32(r.y), i32(r.width), 1, LINE)
 
@@ -340,9 +340,10 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	// retângulo de recorte: nada desenhado nas trilhas vaza sobre os cabeçalhos
 	clip_rect := rl.Rectangle{ r.x + f32(LANE_X), r.y + toolbar_h, view_w, r.height - toolbar_h }
 
-	// régua
+	// Régua discreta: contraste no texto, não em linhas pesadas.
 	ruler := rl.Rectangle{ r.x + LANE_X, r.y + toolbar_h, r.width - LANE_X, ruler_h }
-	rl.DrawRectangleRec(ruler, PANEL2)
+	rl.DrawRectangleRec(ruler, rl.Color{ 22, 26, 33, 255 })
+	rl.DrawRectangleRec({ ruler.x, ruler.y + ruler.height - 1, ruler.width, 1 }, LINE)
 	rl.BeginScissorMode(i32(clip_rect.x), i32(clip_rect.y), i32(clip_rect.width), i32(clip_rect.height))
 	// passo adaptativo: escolhe um intervalo "redondo" (s) que garanta ~7px entre
 	// marcas e ~55px entre rótulos. Sem isso, no zoom-out extremo a régua tentaria
@@ -358,10 +359,10 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		x := tl_x(f32(sec))
 		if x > ruler.x + ruler.width do break
 		if x >= ruler.x {
-			rl.DrawLineEx({x, ruler.y + ruler.height - 8}, {x, ruler.y + ruler.height}, 1, MUTED)
+			rl.DrawLineEx({x, ruler.y + ruler.height - 7}, {x, ruler.y + ruler.height}, 1, rl.Color{ 126, 136, 153, 210 })
 			if sec % lstep == 0 {
-				rl.DrawLineEx({x, ruler.y + 4}, {x, ruler.y + ruler.height}, 1, LINE)
-				txt(timecode(f32(sec)), x + 3, ruler.y + 3, 11, MUTED)
+				rl.DrawLineEx({x, ruler.y + 5}, {x, ruler.y + ruler.height}, 1, LINE)
+				txt(timecode(f32(sec)), x + 4, ruler.y + 4, 11, rl.Color{ 170, 180, 196, 255 })
 			}
 		}
 		sec += tstep
@@ -394,7 +395,10 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			lh = th(t)
 		}
 		draw_track_header({ r.x, ly, LANE_X, lh }, label, t)
-		rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, aud ? rl.Color{ 28, 34, 32, 255 } : rl.Color{ 30, 33, 40, 255 })
+		// Fundo neutro: a cor identifica o tipo no rótulo e nos clipes, não na faixa inteira.
+		lane_col := row % 2 == 0 ? rl.Color{ 28, 32, 40, 255 } : rl.Color{ 30, 34, 42, 255 }
+		rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, lane_col)
+		rl.DrawRectangleRec({ r.x, ly + lh - 1, r.width, 1 }, rl.Color{ 49, 55, 67, 190 })
 		if track_locked[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, rl.Color{ 210, 160, 50, 20 }) // tint bloqueada
 		if track_muted[t]  do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, rl.Color{ 170, 60, 60, 24 })  // tint muda
 		if track_hidden[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, rl.Color{ 80, 100, 130, 30 })  // tint oculta
@@ -438,7 +442,11 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			tl_vscroll = rel * max_vscroll
 		}
 	}
-	if segs_ready() == 0 do txt_c("arraste um clipe do bin para cá", vlane.x + vlane.width/2, track_y(0) + th(0)/2 - 8, 13, MUTED)
+	if segs_ready() == 0 {
+		empty_y := rows_top + rows_vh/2
+		txt_c("Timeline vazia", vlane.x + vlane.width/2, empty_y - 15, 14, TEXT)
+		txt_c("Arraste uma mídia para começar", vlane.x + vlane.width/2, empty_y + 7, 12, MUTED)
+	}
 
 	// segmentos de vídeo (e blocos de áudio) colocados na timeline
 	vc := view_seg()
@@ -459,7 +467,9 @@ draw_timeline :: proc(r: rl.Rectangle) {
 
 		vr := rl.Rectangle{ x, track_y(sg.track) + 4, w, th(sg.track) - 8 }
 		alike := c.is_audio || sg.aonly // se comporta como áudio (mídia só-áudio OU áudio separado)
-		rl.DrawRectangleRounded(vr, 0.06, 4, alike ? rl.Color{ 34, 52, 46, 255 } : (c.is_text ? rl.Color{ 58, 48, 78, 255 } : CLIP))
+		clip_col := alike ? AUDIOCLIP : (c.is_text ? rl.Color{ 66, 54, 86, 255 } : CLIP)
+		rl.DrawRectangleRounded(vr, 0.06, 4, clip_col)
+		rl.DrawRectangleRoundedLinesEx(vr, 0.06, 4, 1, alike ? rl.Color{ 66, 102, 88, 200 } : (c.is_text ? rl.Color{ 105, 84, 132, 200 } : CLIP_HDR))
 		// clipe só-áudio: a onda ocupa o bloco todo (sem filmstrip). Vídeo: REPARTIÇÃO em que a
 		// IMAGEM cresce devagar (FILM_BASE + 25% do espaço extra, teto FILM_MAX) e TODO o resto
 		// vai pra ONDA — aumentar a trilha engorda o áudio, que é o ponto (achar o corte). Na
@@ -850,11 +860,11 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		}
 	}
 
-	// playhead
+	// Playhead fino, com marcador suficiente para não parecer uma borda do painel.
 	px := tl_x(st.playhead)
 	if px >= vlane.x && px <= r.x + r.width {
 		rl.DrawTriangle({px - 6, ruler.y}, {px + 6, ruler.y}, {px, ruler.y + 10}, PLAYHEAD)
-		rl.DrawLineEx({px, ruler.y}, {px, r.y + r.height}, 1.5, PLAYHEAD)
+		rl.DrawLineEx({px, ruler.y}, {px, r.y + r.height}, 1.6, PLAYHEAD)
 		// TESOURA no playhead (estilo NLE): corta tudo que estiver sob ele, sem precisar
 		// da tecla S nem de ligar a lâmina. Só aparece quando HÁ o que cortar (algum segmento
 		// destravado cruzando o playhead) — botão morto confunde mais do que ajuda.
@@ -1160,11 +1170,16 @@ draw_new_track_zone :: proc(z: rl.Rectangle, aud: bool) {
 }
 
 draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
+	aud := is_audio_track(t)
 	rl.DrawRectangleRec(r, PANEL)
 	rl.DrawRectangle(i32(r.x + r.width) - 1, i32(r.y), 1, i32(r.height), LINE)
 	muted := track_muted[t]; locked := track_locked[t]; hidden := track_hidden[t]
-	rl.DrawRectangleRec({r.x, r.y, 3, r.height}, locked ? rl.Color{ 210, 160, 50, 255 } : PLAYHEAD)
-	txt(name, r.x + 12, r.y + 8, 13, TEXT)
+	track_col := locked ? rl.Color{ 210, 160, 50, 255 } : (aud ? rl.Color{ 70, 148, 116, 255 } : rl.Color{ 76, 128, 174, 255 })
+	rl.DrawRectangleRec({r.x, r.y, 3, r.height}, track_col)
+	// Rótulo pequeno concentra a cor sem tingir todo o cabeçalho.
+	name_bg := rl.Rectangle{ r.x + 10, r.y + 7, 30, 18 }
+	rl.DrawRectangleRounded(name_bg, 0.25, 4, rl.Color{ track_col.r, track_col.g, track_col.b, 95 })
+	txt_c(name, name_bg.x + name_bg.width/2, name_bg.y + 2, 12, TEXT)
 	// "×" p/ remover a trilha — só na PONTA de cada tipo (topo do vídeo / base do áudio) e se
 	// estiver VAZIA (sem segmentos). Só as pontas removem sem precisar re-indexar as outras.
 	removable := is_audio_track(t) ? (t == MAXV + g_na - 1 && g_na > 1) : (t == g_nv - 1 && g_nv > 1)
