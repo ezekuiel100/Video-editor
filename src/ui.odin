@@ -2235,6 +2235,54 @@ ui_slider :: proc(id: int, r: rl.Rectangle, val: ^f32, lo, hi: f32) -> bool {
 	return false
 }
 
+// texto com dígitos de largura fixa (tabular): timecode não muda de largura a cada quadro.
+// draw=false só mede. Retorna a largura.
+txt_tab :: proc(s: string, x, y, size: f32, col: rl.Color, draw := true) -> f32 {
+	dw := txt_w("0", size)
+	cx := x
+	buf: [2]u8
+	for ch in transmute([]u8)s {
+		buf[0] = ch
+		c := cstring(&buf[0])
+		cw := txt_w(c, size)
+		w := (ch >= '0' && ch <= '9') ? dw : cw
+		if draw do txt(c, cx + (w - cw)/2, y, size, col)
+		cx += w + 0.5 * g_us // mesmo espaçamento do DrawTextEx
+	}
+	return cx - x
+}
+
+// botão de ícone do transporte (28x28 centrado em cx,cy): fundo no hover + dica acima.
+// Retorna a cor do ícone e se foi clicado; o ícone é desenhado pelo chamador.
+transport_btn :: proc(cx, cy: f32, tip: cstring) -> (rl.Color, bool) {
+	r := rl.Rectangle{ cx - 14, cy - 14, 28, 28 }
+	hot := hovered(r)
+	if hot {
+		rl.DrawRectangleRounded(r, 0.3, 6, HOVER)
+		tw := txt_w(tip, 12) + 14
+		tr := rl.Rectangle{ cx - tw/2, cy - 44, tw, 22 }
+		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 12, 14, 18, 235 })
+		txt_c(tip, cx, tr.y + 4, 12, TEXT)
+	}
+	return hot ? TEXT : MUTED, clicked(r)
+}
+
+// fundo dos ícones do cluster direito do transporte (mesmo padrão do transport_btn)
+icon_hover_bg :: proc(r: rl.Rectangle, on := false) {
+	if hovered(r) || on do rl.DrawRectangleRounded({ r.x - 5, r.y - 5, r.width + 10, r.height + 10 }, 0.3, 6, HOVER)
+}
+
+// pausa e posiciona (timeline ou prévia de origem), como as setas/Home/End do teclado
+transport_seek :: proc(t: f32) {
+	st.playing = false
+	if src_preview >= 0 {
+		if src_preview >= nclips do return
+		src_t = clamp(t, 0, clips[src_preview].dur)
+		src_acquire()
+		clip_frame(&clips[src_preview], src_t)
+	} else do seek_global(t)
+}
+
 // slider VERTICAL (topo = hi, base = lo). Mesmo id/estado do ui_slider (ui_slider_active).
 ui_vslider :: proc(id: int, r: rl.Rectangle, val: ^f32, lo, hi: f32) -> bool {
 	cx := r.x + r.width/2
@@ -2624,17 +2672,42 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// alargar). O cluster central centra no ESPAÇO LIVRE entre o timecode e a direita, clampado.
 	narrow := tb.width < 700
 	tight  := tb.width < 560
-	tc: cstring = narrow ? timecode(pos) : rl.TextFormat("%s / %s", timecode(pos), timecode(total))
-	tcw := txt_w(tc, 15)
+	// timecode com dígitos de largura fixa (não "dança" durante a reprodução): atual claro, total apagado
+	tc_pos := string(timecode(pos))
+	tc_tot := narrow ? "" : fmt.tprintf(" / %s", timecode(total))
+	tcw := txt_tab(tc_pos, 0, 0, 15, TEXT, false) + txt_tab(tc_tot, 0, 0, 15, MUTED, false)
 	// direita: fullscreen(‑30) + câmera(‑32) + alto-falante(‑30) => spr.x = fim‑92; proporção fica 150 antes
 	rclust := tb.x + tb.width - 92 - (tight ? 0 : 150)
 	cl := tb.x + 16 + tcw + 12
 	cy := tb.y + 42 // linha de botões abaixo da barra de progresso
-	cx := clamp((cl + rclust) / 2, cl + 76, max(cl + 76, rclust - 118))
+	cx := clamp((cl + rclust) / 2, cl + 92, max(cl + 92, rclust - 104))
 
-	rl.DrawTriangle({cx - 60, cy - 7}, {cx - 60, cy + 7}, {cx - 68, cy}, TEXT)
-	rl.DrawRectangleRec({cx - 70, cy - 7, 2, 14}, TEXT)
-	rl.DrawTriangle({cx - 34, cy - 7}, {cx - 34, cy + 7}, {cx - 42, cy}, TEXT)
+	// passo de 1 quadro: mesmo fps das setas do teclado (clipe sob o playhead / clipe da prévia de origem)
+	fstep := f32(1) / DEC_FPS
+	if src_preview >= 0 && src_preview < nclips do fstep = 1 / cfps_of(&clips[src_preview])
+	else if vs := view_seg(); vs >= 0 do fstep = 1 / cfps_of(seg_src(vs))
+	{ c, hit := transport_btn(cx - 78, cy, "Início (Home)")
+		draw_tri2({cx - 78 - 1, cy}, {cx - 78 + 6, cy - 6}, {cx - 78 + 6, cy + 6}, c)
+		draw_tri2({cx - 78 - 7, cy}, {cx - 78, cy - 6}, {cx - 78, cy + 6}, c)
+		rl.DrawRectangleRec({cx - 78 - 9, cy - 6, 2, 12}, c)
+		if hit do transport_seek(0)
+	}
+	{ c, hit := transport_btn(cx - 44, cy, "Voltar 1 quadro")
+		draw_tri2({cx - 44 - 5, cy}, {cx - 44 + 3, cy - 6}, {cx - 44 + 3, cy + 6}, c)
+		rl.DrawRectangleRec({cx - 44 + 4, cy - 6, 2, 12}, c)
+		if hit do transport_seek(pos - fstep)
+	}
+	{ c, hit := transport_btn(cx + 44, cy, "Avançar 1 quadro")
+		rl.DrawRectangleRec({cx + 44 - 6, cy - 6, 2, 12}, c)
+		draw_tri2({cx + 44 - 3, cy - 6}, {cx + 44 - 3, cy + 6}, {cx + 44 + 5, cy}, c)
+		if hit do transport_seek(pos + fstep)
+	}
+	{ c, hit := transport_btn(cx + 78, cy, "Fim (End)")
+		draw_tri2({cx + 78 - 6, cy - 6}, {cx + 78 - 6, cy + 6}, {cx + 78 + 1, cy}, c)
+		draw_tri2({cx + 78, cy - 6}, {cx + 78, cy + 6}, {cx + 78 + 7, cy}, c)
+		rl.DrawRectangleRec({cx + 78 + 7, cy - 6, 2, 12}, c)
+		if hit do transport_seek(total)
+	}
 
 	pr := rl.Rectangle{ cx - 16, cy - 16, 32, 32 }
 	rl.DrawCircleV({cx, cy}, 16, hovered(pr) ? ACCENT : ACCENT_D)
@@ -2643,28 +2716,18 @@ draw_preview :: proc(r: rl.Rectangle) {
 		rl.DrawRectangleRec({cx - 6, cy - 7, 4, 14}, rl.WHITE)
 		rl.DrawRectangleRec({cx + 2, cy - 7, 4, 14}, rl.WHITE)
 	} else {
-		rl.DrawTriangle({cx - 5, cy - 8}, {cx - 5, cy + 8}, {cx + 8, cy}, rl.WHITE)
+		draw_tri2({cx - 5, cy - 8}, {cx - 5, cy + 8}, {cx + 8, cy}, rl.WHITE)
 	}
-
-	rl.DrawTriangle({cx + 34, cy - 7}, {cx + 42, cy}, {cx + 34, cy + 7}, TEXT)
-	rl.DrawTriangle({cx + 60, cy - 7}, {cx + 68, cy}, {cx + 60, cy + 7}, TEXT)
-	rl.DrawRectangleRec({cx + 68, cy - 7, 2, 14}, TEXT)
-
-	sr := rl.Rectangle{ cx + 92, cy - 7, 14, 14 }
-	if clicked(sr) {
-		st.playing = false
-		if src_preview >= 0 { src_t = 0; src_acquire(); clip_frame(&clips[src_preview], 0) }
-		else do seek_global(0)
-	}
-	rl.DrawRectangleRec(sr, hovered(sr) ? TEXT : MUTED)
 
 	// timecode à esquerda: posição atual (e a duração total quando há espaço)
-	txt(tc, tb.x + 16, cy - 8, 15, TEXT)
+	tx := tb.x + 16 + txt_tab(tc_pos, tb.x + 16, cy - 8, 15, TEXT)
+	txt_tab(tc_tot, tx, cy - 8, 15, MUTED)
 
 	// --- cluster à direita: volume do player | screenshot | tela cheia ---
 	// tela cheia (canto): 4 cantoneiras
 	fsr := rl.Rectangle{ tb.x + tb.width - 30, cy - 10, 20, 20 }
 	if clicked(fsr) do toggle_fullscreen_preview()
+	icon_hover_bg(fsr)
 	{
 		fc := hovered(fsr) ? ACCENT : TEXT
 		L :: f32(6)
@@ -2676,6 +2739,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// screenshot (câmera): corpo + lente
 	shr := rl.Rectangle{ fsr.x - 32, cy - 9, 22, 18 }
 	if clicked(shr) do open_shot_modal()
+	icon_hover_bg(shr)
 	{
 		cc := hovered(shr) ? ACCENT : TEXT
 		rl.DrawRectangleRoundedLinesEx(shr, 0.25, 4, 1.6, cc)
@@ -2686,6 +2750,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// horizontal fixo que confundia com o zoom da timeline.
 	spr := rl.Rectangle{ shr.x - 30, cy - 9, 20, 18 }
 	if clicked(spr) do vol_popup = !vol_popup
+	icon_hover_bg(spr, vol_popup)
 	{
 		sc := player_vol < 0.01 ? rl.Color{ 210, 100, 100, 255 } : ((hovered(spr) || vol_popup) ? ACCENT : TEXT)
 		bx := spr.x + 3; bcy := spr.y + spr.height/2
@@ -2729,7 +2794,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	if clicked(arb) do ar_menu_open = !ar_menu_open
 	rl.DrawRectangleRounded(arb, 0.3, 4, (ar_menu_open || hovered(arb)) ? HOVER : PANEL2)
 	txt(ar_label(proj_ar), arb.x + 8, arb.y + 4, 12, TEXT)
-	rl.DrawTriangle({ arb.x + arb.width - 14, arb.y + 9 }, { arb.x + arb.width - 6, arb.y + 9 }, { arb.x + arb.width - 10, arb.y + 14 }, MUTED)
+	draw_tri2({ arb.x + arb.width - 14, arb.y + 9 }, { arb.x + arb.width - 6, arb.y + 9 }, { arb.x + arb.width - 10, arb.y + 14 }, MUTED)
 	if ar_menu_open {
 		ih := f32(26); mw := f32(130); mh := f32(len(AR_PRESETS) + 1) * ih + 8
 		mr := rl.Rectangle{ arb.x, arb.y - mh - 4, mw, mh }

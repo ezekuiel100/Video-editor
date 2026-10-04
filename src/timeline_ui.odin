@@ -871,7 +871,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	// Playhead fino, com marcador suficiente para não parecer uma borda do painel.
 	px := tl_x(st.playhead)
 	if px >= vlane.x && px <= r.x + r.width {
-		rl.DrawTriangle({px - 6, ruler.y}, {px + 6, ruler.y}, {px, ruler.y + 10}, PLAYHEAD)
+		draw_tri2({px - 6, ruler.y}, {px + 6, ruler.y}, {px, ruler.y + 10}, PLAYHEAD)
 		rl.DrawLineEx({px, ruler.y}, {px, r.y + r.height}, 1.6, PLAYHEAD)
 		// TESOURA no playhead (estilo NLE): corta tudo que estiver sob ele, sem precisar
 		// da tecla S nem de ligar a lâmina. Só aparece quando HÁ o que cortar (algum segmento
