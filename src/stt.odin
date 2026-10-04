@@ -255,21 +255,11 @@ stt_spawn_watch :: proc(cmd: []string, kind: STTWatch, dur: f32) -> bool {
 	if len(cmd) == 0 do return false
 	stt_watch_kind = kind
 	stt_watch_dur = dur
-	desc := os.Process_Desc{ command = cmd }
-	er, ew, epe := os.pipe()
-	if epe == nil {
-		desc.stderr = ew
-		desc.stdout = ew
-	}
-	p, e := os.process_start(desc)
-	if epe == nil do os.close(ew)
-	if e != nil {
-		if epe == nil do os.close(er)
-		return false
-	}
+	p, er, _, e := spawn(cmd, merge = true) // stdout e stderr no mesmo pipe
+	if e != nil do return false
 	if stt_job != nil do AssignProcessToJobObject(stt_job, win.HANDLE(p.handle))
 	SetPriorityClass(win.HANDLE(p.handle), win.BELOW_NORMAL_PRIORITY_CLASS)
-	if epe == nil {
+	{
 		buf: [4096]u8
 		line: [512]u8
 		ll := 0

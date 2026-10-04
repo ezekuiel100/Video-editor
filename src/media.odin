@@ -447,10 +447,8 @@ clip_seq:  int      // contador p/ ids únicos
 // container (format), retornando o MAIOR legível. 0 = desconhecido (muitos .mkv/.webm não
 // expõem bit_rate do stream). Usado só no modo de export "Automático" p/ dimensionar o teto.
 source_bitrate :: proc(path: string) -> int {
-	_, out, _, e := os.process_exec(os.Process_Desc{
-		command = []string{ "ffprobe", "-v", "error", "-select_streams", "v:0",
-			"-show_entries", "stream=bit_rate:format=bit_rate", "-of", "default=nw=1:nokey=1", path },
-	}, context.temp_allocator)
+	out, _, e := exec_capture([]string{ "ffprobe", "-v", "error", "-select_streams", "v:0",
+		"-show_entries", "stream=bit_rate:format=bit_rate", "-of", "default=nw=1:nokey=1", path })
 	if e != nil do return 0
 	best := 0
 	for ln in strings.split_lines(strings.trim_space(string(out)), context.temp_allocator) {
@@ -476,16 +474,14 @@ timeline_max_src_bitrate :: proc() -> int {
 }
 
 video_probe :: proc(path: string) -> (dur, v_dur: f32, codec: string, vw, vh: i32, fps: f32) {
-	_, out, _, e := os.process_exec(os.Process_Desc{
-		command = []string{
-			"ffprobe", "-v", "error", "-select_streams", "v:0",
-			// stream=duration (vídeo) + format=duration (container). Em lives o áudio
-			// costuma durar além do vídeo: a timeline usa o format; o export congela
-			// frame depois do stream de vídeo.
-			"-show_entries", "stream=codec_name,width,height,duration,avg_frame_rate,r_frame_rate:stream_side_data=rotation:stream_tags=rotate:format=duration",
-			"-of", "default=nw=1", path,
-		},
-	}, context.temp_allocator)
+	out, _, e := exec_capture([]string{
+		"ffprobe", "-v", "error", "-select_streams", "v:0",
+		// stream=duration (vídeo) + format=duration (container). Em lives o áudio
+		// costuma durar além do vídeo: a timeline usa o format; o export congela
+		// frame depois do stream de vídeo.
+		"-show_entries", "stream=codec_name,width,height,duration,avg_frame_rate,r_frame_rate:stream_side_data=rotation:stream_tags=rotate:format=duration",
+		"-of", "default=nw=1", path,
+	})
 	if e != nil do return
 	return probe_parse(string(out))
 }
@@ -495,12 +491,10 @@ video_probe :: proc(path: string) -> (dur, v_dur: f32, codec: string, vw, vh: i3
 // nada). Erro do ffprobe também devolve false: o export apenas não emite a cadeia de áudio,
 // que é o mesmo que acontecia antes deste campo existir.
 probe_has_audio :: proc(path: string) -> bool {
-	_, out, _, e := os.process_exec(os.Process_Desc{
-		command = []string{
-			"ffprobe", "-v", "error", "-select_streams", "a:0",
-			"-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", path,
-		},
-	}, context.temp_allocator)
+	out, _, e := exec_capture([]string{
+		"ffprobe", "-v", "error", "-select_streams", "a:0",
+		"-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", path,
+	})
 	if e != nil do return false
 	return len(strings.trim_space(string(out))) > 0
 }
@@ -1081,8 +1075,6 @@ apply_split :: proc(kind: int) {
 // trocar a velocidade do NVDEC pela correção do software compensa. `-threads 2`: não toma todos os
 // cores durante o playback. (streaming/scrub seguem usando NVDEC — lá o decode é por -ss, não índice.)
 cache_dec_start :: proc(c: ^Clip) -> bool {
-	r, w, e := os.pipe()
-	if e != nil do return false
 	rb: [16]u8
 	fps_s := fmt.bprintf(rb[:], "%.5f", cfps_of(c)) // fps do cache = fps da fonte (cap 60)
 	vfb: [128]u8; vf := dec_vf_of(c, vfb[:]) // encaixe por quadro (resolução que muda no meio)
@@ -1091,9 +1083,8 @@ cache_dec_start :: proc(c: ^Clip) -> bool {
 		"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", fps_s,
 		"-an", "-sn", "pipe:1",
 	}
-	p, pe := os.process_start(os.Process_Desc{ command = cmd, stdout = w })
-	os.close(w)
-	if pe != nil { os.close(r); return false }
+	p, r, _, pe := spawn(cmd, stdout = true)
+	if pe != nil do return false
 	tame_process(c, p, false)
 	c.dec_ps = p; c.dec_r = r; c.dec_run = true
 	return true
@@ -1121,9 +1112,7 @@ is_audio_path :: proc(path: string) -> bool {
 
 // duração (s) de um arquivo de áudio via ffprobe (format=duration, sem stream de vídeo)
 audio_probe_dur :: proc(path: string) -> f32 {
-	_, out, _, e := os.process_exec(os.Process_Desc{
-		command = []string{ "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nokey=1", path },
-	}, context.temp_allocator)
+	out, _, e := exec_capture([]string{ "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nokey=1", path })
 	if e != nil do return 0
 	if v, ok := strconv.parse_f64(strings.trim_space(string(out))); ok do return f32(v)
 	return 0
@@ -1131,16 +1120,13 @@ audio_probe_dur :: proc(path: string) -> f32 {
 
 // decodifica UM frame da imagem (letterbox p/ DEC_W×DEC_H) direto p/ c.cache[0]
 image_decode :: proc(c: ^Clip) -> bool {
-	r, w, e := os.pipe()
-	if e != nil do return false
 	cmd := []string{
 		"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", c.path,
 		"-vf", DEC_VF, // mesma escala/letterbox do vídeo (DEC_W×DEC_H) — casa com o tamanho de FRAME
 		"-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
 	}
-	p, pe := os.process_start(os.Process_Desc{ command = cmd, stdout = w })
-	os.close(w)
-	if pe != nil { os.close(r); return false }
+	p, r, _, pe := spawn(cmd, stdout = true)
+	if pe != nil do return false
 	tame_process(c, p, false)
 	total := 0
 	for total < FRAME {
@@ -1160,6 +1146,10 @@ import_stream_setup :: proc(c: ^Clip) {
 	c.dw = stream_dw(); c.dh = stream_dh() // qualidade atual (Alta/Baixa); dims de decode do clipe
 	c.fbuf = make([]u8, STREAM_FBYTES_MAX) // max (720p): trocar de qualidade não realoca
 	stream_seek(c, 0, false) // lê o 1º frame para fbuf (sem GL)
+	// e fecha o decoder: parado no pipe ele segura ~200MB de RAM (+ sessão NVDEC) por mídia
+	// à toa — medido: 12 vídeos importados = 2.3GB em decoders esperando um play do início.
+	// O 1º play (ou qualquer seek) respawna pelo caminho normal do clip_frame (~300ms).
+	stream_stop(c)
 	intrinsics.atomic_store(&c.probed, true)
 	// head de áudio: 30s de WAV ficam prontos em ~1s -> o clipe já toca com som
 	c.head_dur = min(HEAD_SECS, c.dur)
@@ -1198,7 +1188,10 @@ import_worker :: proc(c: ^Clip) {
 		if intrinsics.atomic_load(&c.stop) do return // fechando: não dispara mais ffmpeg (escaparia do job)
 		c.nparts = 1
 		c.parts_thr = thread.create_and_start_with_poly_data(c, parts_worker) // gera o _full.ogg; audio_load_ready abre
-		compute_waveform(c) // forma de onda (mostra na trilha de áudio)
+		if lane_enter(&lane_scan, c) { // forma de onda (mostra na trilha de áudio)
+			compute_waveform(c)
+			lane_leave(&lane_scan)
+		}
 		return
 	}
 
@@ -1271,16 +1264,23 @@ import_worker :: proc(c: ^Clip) {
 	// o ffmpeg terminar sozinho. (Muito mais provável com vários imports = janela maior.)
 	if intrinsics.atomic_load(&c.stop) do return
 
-	// áudio completo num ÚNICO FLAC (thread própria, paralela à waveform/miniaturas):
-	// fica pronto em ~15s p/ 5h; até lá o head + chunks cobrem a interatividade.
+	// áudio completo em OGG (thread própria, paralela à onda/miniaturas; espera a vez na
+	// lane_ogg lá dentro). Até ficar pronto, o head + chunks cobrem a interatividade.
 	c.nparts = 1
 	c.parts_thr = thread.create_and_start_with_poly_data(c, parts_worker)
 
+	// daqui em diante a mídia JÁ aparece no bin e toca: o resto lê o arquivo inteiro e espera
+	// a vez nas filas (ver Lane) em vez de rodar junto com o de todo vídeo importado.
 	// índice de keyframes ANTES da onda e das miniaturas: sem ele o arrasto num GOP longo
 	// não entrega quadro nenhum (medido: GOP de 8.3s, cursor a 10-70s/s = 0-2 quadros em 3s,
 	// player parado) e ele chegava por último: ~36s depois da mídia aparecer numa live de
-	// 48min. É só demux: ~0.5s mesmo nesse tamanho (.mp4 ou .ts).
-	if c.streaming do build_kf_index(c)
+	// 48min. É só demux: ~0.5s mesmo nesse tamanho (.mp4 ou .ts) — por isso tem fila própria.
+	if c.streaming && lane_enter(&lane_kf, c) {
+		build_kf_index(c)
+		lane_leave(&lane_kf)
+	}
+	if !lane_enter(&lane_scan, c) do return // fechando/removida durante a espera
+	defer lane_leave(&lane_scan)
 	compute_waveform(c) // forma de onda: PCM por pipe, preenche progressivo e rápido
 	decode_thumbs(c)    // miniaturas (cache: instantâneo do RAM; streaming: -ss por frame)
 }
@@ -1291,15 +1291,12 @@ import_worker :: proc(c: ^Clip) {
 // pedi no comando). Indexa por tempo absoluto; `wave_ready` já no 1º bloco.
 compute_waveform :: proc(c: ^Clip) {
 	if c.dur <= 0 do return
-	r, w, e := os.pipe()
-	if e != nil do return
 	cmd := []string{
 		"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", c.path,
 		"-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1", // "8000" deve casar com WAVE_RATE
 	}
-	p, pe := os.process_start(os.Process_Desc{ command = cmd, stdout = w })
-	os.close(w)
-	if pe != nil { os.close(r); return }
+	p, r, _, pe := spawn(cmd, stdout = true)
+	if pe != nil do return
 	tame_process(c, p, true) // fundo
 
 	if c.wave == nil do c.wave = make([]f32, max(1, int(c.dur * WAVE_PPS)))
@@ -1405,8 +1402,6 @@ thumb_decode :: proc(c: ^Clip, t: f32, dst: []u8) -> bool {
 	for {
 		if intrinsics.atomic_load(&c.stop) do return false // abortando: não re-spawna (fora do job já fechado)
 		hw := use_cuvid(c)
-		r, w, e := os.pipe()
-		if e != nil do return false
 		tb: [32]u8
 		ss := fmt.bprintf(tb[:], "%.3f", t)
 		sw_cmd := []string{
@@ -1419,9 +1414,8 @@ thumb_decode :: proc(c: ^Clip, t: f32, dst: []u8) -> bool {
 			"-ss", ss, "-c:v", hw, "-i", c.path,
 			"-frames:v", "1", "-vf", THUMB_VF, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
 		}
-		p, pe := os.process_start(os.Process_Desc{ command = hw != "" ? hw_cmd : sw_cmd, stdout = w })
-		os.close(w)
-		if pe != nil { os.close(r); return false }
+		p, r, _, pe := spawn(hw != "" ? hw_cmd : sw_cmd, stdout = true)
+		if pe != nil do return false
 		tame_process(c, p, true) // fundo: não disputa CPU com o playback
 		total := 0
 		for total < THUMB_FR {
@@ -1534,8 +1528,6 @@ scrub_decode_frame :: proc(c: ^Clip, t: f32, buf: []u8, fast := false) -> bool {
 		// leva ~1-2s/keyframe — aí c.scrub_hw (setado no worker quando um decode SW estoura
 		// SCRUB_HW_MS) libera o NVDEC, que mesmo pagando o init entrega ~4x mais rápido.
 		hw := (fast && !c.scrub_hw) ? "" : use_cuvid(c)
-		r, w, e := os.pipe()
-		if e != nil do return false
 		tb: [32]u8
 		ss := fmt.bprintf(tb[:], "%.3f", t)
 		acc := fast ? "-noaccurate_seek" : "-accurate_seek" // opção de INPUT (antes do -i)
@@ -1559,9 +1551,8 @@ scrub_decode_frame :: proc(c: ^Clip, t: f32, buf: []u8, fast := false) -> bool {
 			acc, "-ss", ss, "-c:v", hw, "-i", c.path, "-an", "-sn", "-dn",
 			"-frames:v", "1", "-sws_flags", sws, "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
 		}
-		p, pe := os.process_start(os.Process_Desc{ command = hw != "" ? hw_cmd : sw_cmd, stdout = w })
-		os.close(w)
-		if pe != nil { os.close(r); return false }
+		p, r, _, pe := spawn(hw != "" ? hw_cmd : sw_cmd, stdout = true)
+		if pe != nil do return false
 		tame_process(c, p, false)
 		if fast {
 			sync.mutex_lock(&scrub_ps_mu)
@@ -1777,21 +1768,18 @@ kf_csv_path :: proc(c: ^Clip) -> string { return fmt.tprintf("%s_kf.csv", c.aud_
 // (import worker) lista os keyframes do vídeo pelos FLAGS dos pacotes: só demux, sem
 // decodificar — segundos mesmo num arquivo de horas. Tempos ficam relativos ao
 // format.start_time, que é a base do -ss.
-// Saída num ARQUIVO (-o) e espera pelo PROCESSO, não pelo fim de um pipe: o os.pipe do
-// Odin cria as pontas HERDÁVEIS e todo spawn herda handles, então um ffmpeg longo nascido
-// no mesmo instante em outra thread (a extração de áudio deste clipe, o import de outro,
-// um decoder ao vivo) ficava com a ponta de escrita e a leitura só via o fim quando ELE
-// morria — medido numa live de 48min: o ffprobe de 0.4s virava 33s.
+// Saída num ARQUIVO (-o) e espera pelo PROCESSO, não pelo fim de um pipe: antes do spawn()
+// os pipes vazavam para todo filho, e um ffmpeg longo nascido no mesmo instante em outra
+// thread ficava com a ponta de escrita — medido numa live de 48min: o ffprobe de 0.4s
+// virava 33s. O spawn() fechou esse vazamento; a saída em arquivo ficou.
 build_kf_index :: proc(c: ^Clip) {
 	if intrinsics.atomic_load(&c.stop) do return
 	csv := kf_csv_path(c)
 	defer os.remove(csv)
-	p, e := os.process_start(os.Process_Desc{
-		command = []string{ "ffprobe", "-v", "error", "-select_streams", "v:0",
-			"-show_entries", "packet=pts_time,flags:format=start_time", "-of", "csv=p=0", "-o", csv, c.path },
-	})
+	p, _, _, e := spawn([]string{ "ffprobe", "-v", "error", "-select_streams", "v:0",
+		"-show_entries", "packet=pts_time,flags:format=start_time", "-of", "csv=p=0", "-o", csv, c.path })
 	if e != nil do return
-	tame_process(c, p, false) // job do clipe: remover/fechar mata junto
+	tame_process(c, p, true) // job do clipe (remover/fechar mata junto); fundo: lê o arquivo inteiro
 	if !audio_extract_wait(c, p) do return // polla c.stop; false = falhou ou abortado
 	out, re := os.read_entire_file(csv, context.allocator)
 	if re != nil do return
@@ -1837,8 +1825,6 @@ dup_open :: proc(c: ^Clip, t: f32) {
 	for {
 		if intrinsics.atomic_load(&app_closing) || intrinsics.atomic_load(&c.stop) do return
 		hw := force_sw ? "" : use_cuvid(c)
-		r, w, e := os.pipe()
-		if e != nil do return
 		tb: [32]u8
 		ss := fmt.bprintf(tb[:], "%.3f", t)
 		vfb: [128]u8; vf := dec_vf_of(c, vfb[:]) // mesma resolução do primário (dec_content_rect é compartilhado)
@@ -1860,9 +1846,8 @@ dup_open :: proc(c: ^Clip, t: f32) {
 			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", rs,
 			"-an", "-sn", "pipe:1",
 		}
-		p, pe := os.process_start(os.Process_Desc{ command = hw != "" ? hw_cmd : sw_cmd, stdout = w })
-		os.close(w)
-		if pe != nil { os.close(r); return }
+		p, r, _, pe := spawn(hw != "" ? hw_cmd : sw_cmd, stdout = true)
+		if pe != nil do return
 		tame_process(c, p, false)
 		total := 0
 		for total < sf {
@@ -2125,8 +2110,6 @@ stream_seek :: proc(c: ^Clip, sec: f32, upload: bool) {
 	for {
 		if intrinsics.atomic_load(&app_closing) || intrinsics.atomic_load(&c.stop) do return // fechando: não spawna decoder
 		hw := force_sw ? "" : use_cuvid(c)
-		r, w, e := os.pipe()
-		if e != nil do return
 		ss := fmt.tprintf("%.3f", sec)
 		vfb: [128]u8; vf := dec_vf_of(c, vfb[:]) // 360p (const) ou 720p conforme a qualidade
 		fps := c.rsp_fps > 0 ? c.rsp_fps : DEC_FPS
@@ -2147,9 +2130,8 @@ stream_seek :: proc(c: ^Clip, sec: f32, upload: bool) {
 			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", rs,
 			"-an", "-sn", "pipe:1",
 		}
-		p, pe := os.process_start(os.Process_Desc{ command = hw != "" ? hw_cmd : sw_cmd, stdout = w })
-		os.close(w)
-		if pe != nil { os.close(r); return }
+		p, r, _, pe := spawn(hw != "" ? hw_cmd : sw_cmd, stdout = true)
+		if pe != nil do return
 		tame_process(c, p, false) // alimenta o playback: prioridade normal, mas no job
 		c.live_ps = p; c.live_r = r; c.live_on = true
 		c.live_hw = hw != "" // rodando por hardware: um "EOF" no meio pode ser recusa do NVDEC

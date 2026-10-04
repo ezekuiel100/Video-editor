@@ -34,7 +34,7 @@ audio_extract_start :: proc(c: ^Clip, out: string, head: bool) -> (os.Process, b
 		"ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", c.path,
 		"-vn", "-c:a", "pcm_s16le", out,
 	}
-	ap, ape := os.process_start(os.Process_Desc{ command = head ? head_cmd : full_cmd })
+	ap, _, _, ape := spawn(head ? head_cmd : full_cmd)
 	if ape != nil do return {}, false
 	tame_process(c, ap, !head) // head é curto e sensível a latência; completo é fundo
 	return ap, true
@@ -82,11 +82,19 @@ parts_worker :: proc(c: ^Clip) {
 		"ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", c.path,
 		"-vn", "-c:a", "libvorbis", "-q:a", "4", part_path(c, 0),
 	}
+	// fila (lane_ogg) só p/ quem JÁ toca pelo head — vídeo longo, onde head + chunks cobrem
+	// o som até o OGG chegar. Clipe em cache e mídia só-áudio não têm head: sem o OGG ficam
+	// MUDOS, então vão direto (num clipe curto ele sai em ~1s).
+	queued := intrinsics.atomic_load(&c.head_ok)
+	entered := queued && lane_enter(&lane_ogg, c)
 	ok := false
-	if ap, ape := os.process_start(os.Process_Desc{ command = cmd }); ape == nil {
-		tame_process(c, ap, true) // fundo: o head cobre a interatividade até ficar pronto
-		ok = audio_extract_wait(c, ap)
+	if !queued || entered {
+		if ap, _, _, ape := spawn(cmd); ape == nil {
+			tame_process(c, ap, true) // fundo: o head cobre a interatividade até ficar pronto
+			ok = audio_extract_wait(c, ap)
+		}
 	}
+	if entered do lane_leave(&lane_ogg)
 	if ok do intrinsics.atomic_store(&c.parts_done, 1)
 	intrinsics.atomic_store(&c.ogg_ok, ok)
 	intrinsics.atomic_store(&c.ogg_done, true)
@@ -122,7 +130,7 @@ chunk_worker :: proc(c: ^Clip) {
 		"-ss", fmt.tprintf("%.2f", base), "-t", fmt.tprintf("%.0f", CHUNK_SECS), "-i", c.path,
 		"-vn", "-c:a", "pcm_s16le", out,
 	}
-	ap, ape := os.process_start(os.Process_Desc{ command = cmd })
+	ap, _, _, ape := spawn(cmd)
 	if ape == nil {
 		tame_process(c, ap, false) // sensível a latência: o usuário está esperando o som
 		c.chunk_base = base     // antes do done: a main só lê depois do atomic
@@ -601,11 +609,7 @@ spv_worker :: proc() {
 	ok := false
 	// captura o stderr do ffmpeg: sem isso uma falha de render vira só "ok=false" e o
 	// motivo se perde (o editor então retenta em laço, mudo, sem ninguém saber por quê)
-	desc := os.Process_Desc{ command = spv_args }
-	er, ew, epe := os.pipe()
-	if epe == nil do desc.stderr = ew
-	p, pe := os.process_start(desc)
-	if epe == nil do os.close(ew) // a ponta de escrita agora é do filho
+	p, _, er, pe := spawn(spv_args, stderr = true)
 	if pe != nil {
 		when DBG_SPV do fmt.eprintfln("[spv] SPAWN FALHOU: %v", pe)
 	}
@@ -619,15 +623,14 @@ spv_worker :: proc() {
 		// filho fecha a ponta dele, ou seja, ao terminar — então isto já serve de espera
 		// e o poll seguinte retorna de imediato. `app_closing` é visto ENTRE leituras,
 		// mesmo idioma do compute_waveform.
-		if epe == nil {
-			buf: [4096]u8
-			for {
-				if intrinsics.atomic_load(&app_closing) { _ = os.process_kill(p); break }
-				n, rerr := os.read(er, buf[:])
-				when DBG_SPV do if n > 0 do fmt.eprintfln("[spv] FFMPEG: %s", string(buf[:n]))
-				if n <= 0 || rerr != nil do break
-			}
+		buf: [4096]u8
+		for {
+			if intrinsics.atomic_load(&app_closing) { _ = os.process_kill(p); break }
+			n, rerr := os.read(er, buf[:])
+			when DBG_SPV do if n > 0 do fmt.eprintfln("[spv] FFMPEG: %s", string(buf[:n]))
+			if n <= 0 || rerr != nil do break
 		}
+		os.close(er)
 		for { // poll: se o app fechar, mata o render em voo em vez de esperar terminar
 			if intrinsics.atomic_load(&app_closing) { _ = os.process_kill(p); _, _ = os.process_wait(p); break }
 			state, we := os.process_wait(p, 50 * time.Millisecond)
@@ -636,7 +639,6 @@ spv_worker :: proc() {
 		}
 		if job != nil do win.CloseHandle(job)
 	}
-	if epe == nil do os.close(er)
 	intrinsics.atomic_store(&spv_ok, ok)
 	intrinsics.atomic_store(&spv_done, true)
 }

@@ -395,7 +395,7 @@ take_screenshot :: proc(out: string) {
 		// `e == nil` só diz que o ffmpeg FOI LANÇADO — fonte sem stream de vídeo, caminho
 		// inválido ou arquivo em uso saem no código de saída, e sem olhá-lo o toast dizia
 		// "salvo" (e contava o shot_n) sem nenhum arquivo no disco
-		if p, e := os.process_start(os.Process_Desc{ command = cmd }); e == nil {
+		if p, _, _, e := spawn(cmd); e == nil {
 			state, _ := os.process_wait(p) // 1 frame: rápido
 			if state.exited && state.exit_code == 0 {
 				shot_n += 1

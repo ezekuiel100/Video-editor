@@ -195,10 +195,11 @@ dump_export_cli :: proc() -> bool {
 		append(&run, a)
 	}
 	fmt.printfln("--- RUN ffmpeg loglevel warning ---")
-	state, stdout, stderr, e := os.process_exec(os.Process_Desc{ command = run[:] }, context.temp_allocator)
-	fmt.printfln("exec_err=%v exited=%v code=%d stdout=%d", e, state.exited, state.exit_code, len(stdout))
+	// o pipe:1 virou arquivo acima, então o que chega aqui é o stderr do ffmpeg
+	log, state, e := exec_capture(run[:], merge = true)
+	fmt.printfln("exec_err=%v exited=%v code=%d", e, state.exited, state.exit_code)
 	fmt.println("--- STDERR ---")
-	fmt.println(string(stderr))
+	fmt.println(string(log))
 	return true
 }
 // prévia AO VIVO da exportação: um 2º ramo do filtro (split) manda frames rgb24
@@ -287,12 +288,10 @@ exp_add_movie :: proc(c: ^Clip, seek: f32) -> int {
 // rotação que o ffmpeg aplicaria no -i (autorotate). ffprobe dá a side data `rotation`
 // em graus ANTI-horários (-90 = celular deitado) e a tag antiga `rotate` em horários.
 exp_probe_rot :: proc(path: string) -> int {
-	_, out, _, e := os.process_exec(os.Process_Desc{
-		command = []string{
-			"ffprobe", "-v", "error", "-select_streams", "v:0",
-			"-show_entries", "stream_side_data=rotation:stream_tags=rotate", "-of", "default=nw=1", path,
-		},
-	}, context.temp_allocator)
+	out, _, e := exec_capture([]string{
+		"ffprobe", "-v", "error", "-select_streams", "v:0",
+		"-show_entries", "stream_side_data=rotation:stream_tags=rotate", "-of", "default=nw=1", path,
+	})
 	if e != nil do return 0
 	theta := 0
 	for ln in strings.split_lines(string(out), context.temp_allocator) {
@@ -1191,13 +1190,11 @@ export_emit_direct_video :: proc(fb: ^strings.Builder, idxs: []int, W, H: int, t
 // do stream de vídeo (congela o último quadro e segue o áudio).
 write_freeze_png :: proc(src: string, t: f32, out_png: string) -> bool {
 	ss := max(t, 0)
-	_, _, _, e := os.process_exec(os.Process_Desc{
-		command = []string{
-			"ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-			"-ss", fmt.tprintf("%.3f", ss), "-i", src,
-			"-frames:v", "1", "-q:v", "2", out_png,
-		},
-	}, context.temp_allocator)
+	_, _, e := exec_capture([]string{
+		"ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+		"-ss", fmt.tprintf("%.3f", ss), "-i", src,
+		"-frames:v", "1", "-q:v", "2", out_png,
+	})
 	if e != nil do return false
 	return os.exists(out_png) && !os.is_dir(out_png)
 }
@@ -1970,13 +1967,11 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 // "GPU indisponível" numa RTX 4070. Mínimo real do h264_nvenc é ~145×49; 256×144
 // fica bem acima e ainda é 1 frame barato.
 probe_nvenc :: proc() -> bool {
-	state, _, _, e := os.process_exec(os.Process_Desc{
-		command = []string{
-			"ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-			"-i", "color=c=black:s=256x144:d=0.04", "-frames:v", "1",
-			"-c:v", "h264_nvenc", "-f", "null", "-",
-		},
-	}, context.temp_allocator)
+	_, state, e := exec_capture([]string{
+		"ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+		"-i", "color=c=black:s=256x144:d=0.04", "-frames:v", "1",
+		"-c:v", "h264_nvenc", "-f", "null", "-",
+	})
 	return e == nil && state.exited && state.exit_code == 0
 }
 
@@ -2093,16 +2088,14 @@ start_export :: proc(out: string, gpu: bool) {
 // sobe o ffmpeg com o stderr (-progress + erros) na export_worker e, se `want_video`, a
 // prévia rgb24 pelo stdout. export_total já deve estar certo (o worker lê na hora).
 export_spawn :: proc(args: []string, want_video: bool) -> bool {
-	pr, pw: ^os.File
-	if want_video {
-		e: os.Error
-		pr, pw, e = export_big_pipe() // prévia (stdout) — buffer grande p/ não travar o encode
-		if e != nil { set_toast("Falha ao criar pipe"); return false }
-	}
-	gr, gw, e2 := os.pipe() // progresso (stderr)
-	if e2 != nil {
-		if want_video { os.close(pr); os.close(pw) }
-		set_toast("Falha ao criar pipe"); return false
+	// prévia (stdout) com buffer de 1 MB: 1 frame rgb24 dela tem ~380 KB, e no buffer padrão
+	// do pipe (~4-64 KB) o ffmpeg bloqueava a cada quadro esperando a thread drenar
+	p, pr, gr, pe := spawn(args, stdout = want_video, stderr = true, out_size = want_video ? 1 << 20 : 0)
+	if pe != nil {
+		// pe costuma ser "executable file not found" quando o ffmpeg sumiu do PATH —
+		// antes virava um toast mudo e o usuário não sabia o que instalar/onde olhar.
+		set_toast(rl.TextFormat("Falha ao iniciar ffmpeg: %v", pe))
+		return false
 	}
 	export_r = gr; export_prev_r = pr
 	intrinsics.atomic_store(&export_prev_pub, -1)
@@ -2118,24 +2111,8 @@ export_spawn :: proc(args: []string, want_video: bool) -> bool {
 			rl.UnloadImage(img)
 			export_prev_tex_ok = export_prev_tex.id != 0
 		}
-		// drena o pipe ANTES do ffmpeg subir: senão o 1º frame (~380 KB) enche o buffer
-		// padrão do Windows (~64 KB) e o processo fica bloqueado no write até a thread existir.
+		// o 1º quadro cabe no buffer de 1 MB: o ffmpeg não espera a thread existir
 		export_prev_thr = thread.create_and_start(export_preview_worker)
-	}
-	desc := os.Process_Desc{ command = args, stderr = gw }
-	if want_video do desc.stdout = pw
-	p, pe := os.process_start(desc)
-	if want_video do os.close(pw)
-	os.close(gw)
-	if pe != nil {
-		os.close(gr)
-		if export_prev_thr != nil {
-			thread.join(export_prev_thr); thread.destroy(export_prev_thr); export_prev_thr = nil
-		}
-		// pe costuma ser "executable file not found" quando o ffmpeg sumiu do PATH —
-		// antes virava um toast mudo e o usuário não sabia o que instalar/onde olhar.
-		set_toast(rl.TextFormat("Falha ao iniciar ffmpeg: %v", pe))
-		return false
 	}
 	export_job = make_kill_job()
 	if export_job != nil do AssignProcessToJobObject(export_job, win.HANDLE(p.handle))
@@ -2236,21 +2213,6 @@ export_arep_drop_todo :: proc() {
 export_arep_cleanup :: proc() {
 	for r in export_arep_done do os.remove(r.file)
 	for r in export_arep_todo do if r.file != "" do os.remove(r.file)
-}
-
-// pipe de prévia com buffer de 1 MB (CreatePipe default ~4–64 KB). 1 frame rgb24 da
-// prévia tem ~380 KB: no buffer pequeno o ffmpeg bloqueava a cada quadro.
-// Só o WRITE é herdável: se o ffmpeg herdar o READ, o pipe nunca dá EOF na thread.
-export_big_pipe :: proc() -> (r, w: ^os.File, err: os.Error) {
-	sa: win.SECURITY_ATTRIBUTES
-	sa.nLength = size_of(sa)
-	sa.bInheritHandle = true
-	hr, hw: win.HANDLE
-	if win.CreatePipe(&hr, &hw, &sa, 1 << 20) {
-		win.SetHandleInformation(hr, win.HANDLE_FLAG_INHERIT, 0)
-		return os.new_file(uintptr(hr), ""), os.new_file(uintptr(hw), ""), nil
-	}
-	return os.pipe()
 }
 
 // pausa/retoma a exportação suspendendo o processo ffmpeg (as threads de leitura só

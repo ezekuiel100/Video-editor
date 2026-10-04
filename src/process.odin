@@ -152,6 +152,130 @@ tame_process :: proc(c: ^Clip, p: os.Process, bg: bool) {
 	if bg do SetPriorityClass(win.HANDLE(p.handle), win.BELOW_NORMAL_PRIORITY_CLASS)
 }
 
+// ---------- criação de processos sem vazar handles ----------
+// O core:os cria as DUAS pontas de todo pipe como herdáveis e o process_start chama o
+// CreateProcess com bInheritHandles=TRUE: cada filho leva TODO handle herdável aberto no
+// editor naquele instante — inclusive a ponta de ESCRITA de um pipe que OUTRA thread acabou
+// de criar para OUTRO filho. Quem lê esse pipe só vê o EOF quando todos os donos da ponta
+// morrem. Medido importando 12 vídeos de uma vez: os 12 ffprobe (~120ms cada sozinhos)
+// terminavam TODOS juntos em ~690ms, e os VP9 4K (o NVDEC recusa sem escrever nada) ficavam
+// em "importando..." para sempre — o EOF esperava o decoder ao vivo de outro vídeo morrer.
+// Regra: TODO processo do editor nasce por spawn(). Pipes, CreateProcess e o fechamento das
+// pontas do filho acontecem sob um mutex único, então nenhum filho nasce enquanto existe
+// ponta de escrita herdável aberta; a ponta que fica com o editor nem chega a ser herdável.
+spawn_mu: sync.Mutex
+
+// pipe p/ um filho: a ponta de LEITURA (fica com o editor) não é herdável; a de escrita é,
+// porque vai para o filho. size = buffer do pipe (0 = padrão do Windows). Só sob spawn_mu.
+@(private = "file")
+child_pipe :: proc(size: u32) -> (r, w: ^os.File, err: os.Error) {
+	sa := win.SECURITY_ATTRIBUTES{ nLength = size_of(win.SECURITY_ATTRIBUTES), bInheritHandle = true }
+	hr, hw: win.HANDLE
+	if !win.CreatePipe(&hr, &hw, &sa, size) do return nil, nil, os.Platform_Error(win.GetLastError())
+	win.SetHandleInformation(hr, win.HANDLE_FLAG_INHERIT, 0)
+	return os.new_file(uintptr(hr), ""), os.new_file(uintptr(hw), ""), nil
+}
+
+// sobe `cmd`. stdout/stderr = true dão a cada um o PRÓPRIO pipe (out_r/err_r); merge = true
+// manda stdout E stderr para um pipe só (out_r). O que não tem pipe vai para NUL.
+// out_size = buffer do pipe do stdout (0 = padrão do Windows).
+spawn :: proc(cmd: []string, stdout := false, stderr := false, merge := false, out_size: u32 = 0) -> (p: os.Process, out_r, err_r: ^os.File, err: os.Error) {
+	sync.mutex_lock(&spawn_mu)
+	defer sync.mutex_unlock(&spawn_mu)
+	out_w, err_w: ^os.File
+	// as pontas do FILHO fecham aqui, ainda sob o mutex, dê certo ou não
+	defer if out_w != nil do os.close(out_w)
+	defer if err_w != nil do os.close(err_w)
+	if stdout || merge {
+		out_r, out_w, err = child_pipe(out_size)
+		if err != nil do return
+	}
+	if stderr && !merge {
+		err_r, err_w, err = child_pipe(0)
+		if err != nil {
+			if out_r != nil { os.close(out_r); out_r = nil }
+			return
+		}
+	}
+	p, err = os.process_start(os.Process_Desc{ command = cmd, stdout = out_w, stderr = merge ? out_w : err_w })
+	if err != nil {
+		if out_r != nil { os.close(out_r); out_r = nil }
+		if err_r != nil { os.close(err_r); err_r = nil }
+	}
+	return
+}
+
+// roda `cmd` até o fim e devolve o stdout inteiro (com merge, o stderr junto). Lê BLOQUEANDO
+// até o EOF: o os.process_exec do core:os espera girando em PeekNamedPipe sem pausa — um
+// núcleo a 100% por chamada enquanto o filho roda (12 imports = 12 núcleos só esperando).
+exec_capture :: proc(cmd: []string, allocator := context.temp_allocator, merge := false) -> (out: []u8, state: os.Process_State, err: os.Error) {
+	p, r, _, e := spawn(cmd, stdout = true, merge = merge)
+	if e != nil do return nil, {}, e
+	buf := make([dynamic]u8, allocator)
+	chunk: [4096]u8
+	for {
+		n, re := os.read(r, chunk[:])
+		if n > 0 do append(&buf, ..chunk[:n])
+		if n <= 0 || re != nil do break
+	}
+	os.close(r)
+	state, err = os.process_wait(p)
+	return buf[:], state, err
+}
+
+// ---------- filas do trabalho PESADO do import ----------
+// Além do 1º quadro e do head de áudio (o que faz a mídia aparecer e tocar), cada import
+// lia o ARQUIVO INTEIRO várias vezes ao mesmo tempo — índice de keyframes, onda, áudio
+// completo em OGG — mais 1 ffmpeg por miniatura. O OGG domina: libvorbis usa 1 núcleo e leva
+// ~139s p/ 83min de áudio (a onda, ~10s; o índice, ~0.6s). Importando 12 vídeos pesados de
+// uma vez eram 27 ffmpeg/ffprobe, CPU a 100% por minutos, disco a 500-800 MB/s, e o Windows
+// deixava a thread da interface parada 0.5-1.4s (medido: 0ms de CPU no trecho travado).
+// Cada fila deixa no máx `max` mídias naquela etapa ao mesmo tempo, na ordem de chegada.
+Lane :: struct {
+	mu:     sync.Mutex,
+	max:    int,
+	active: int,
+	seq:    int,          // próximo número de chegada
+	wait:   [dynamic]int, // números de chegada esperando, em ordem
+}
+
+lane_kf   := Lane{ max = 2 } // índice de keyframes: só demux (~0.6s), cedo — o scrub depende dele
+lane_scan := Lane{ max = 2 } // onda + miniaturas
+lane_ogg  := Lane{ max = 2 } // áudio completo em OGG (o mais caro de todos)
+
+// entra na fila (FIFO, no máx l.max dentro). Espera checando c.stop: remover a mídia ou
+// fechar o app durante a espera não pode prender o join do worker. false = desistiu (c.stop);
+// nesse caso NÃO chame lane_leave.
+lane_enter :: proc(l: ^Lane, c: ^Clip) -> bool {
+	sync.mutex_lock(&l.mu)
+	me := l.seq
+	l.seq += 1
+	append(&l.wait, me)
+	sync.mutex_unlock(&l.mu)
+	for {
+		sync.mutex_lock(&l.mu)
+		if intrinsics.atomic_load(&c.stop) {
+			for v, i in l.wait do if v == me { ordered_remove(&l.wait, i); break }
+			sync.mutex_unlock(&l.mu)
+			return false
+		}
+		if l.active < l.max && l.wait[0] == me {
+			ordered_remove(&l.wait, 0)
+			l.active += 1
+			sync.mutex_unlock(&l.mu)
+			return true
+		}
+		sync.mutex_unlock(&l.mu)
+		time.sleep(30 * time.Millisecond)
+	}
+}
+
+lane_leave :: proc(l: ^Lane) {
+	sync.mutex_lock(&l.mu)
+	l.active -= 1
+	sync.mutex_unlock(&l.mu)
+}
+
 // FECHAMENTO INSTANTÂNEO. O teardown "educado" (juntar todas as threads) era lento por 3
 // motivos: o worker de fontes SDF (`tf_thr`) é CPU puro e não checa `stop` -> o join podia
 // esperar ~2.5s; cada ffmpeg de fundo só morria no polling de 50ms do `audio_extract_wait`,
