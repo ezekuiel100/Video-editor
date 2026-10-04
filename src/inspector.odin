@@ -9,6 +9,7 @@ insp_tab: int
 insp_drawing: bool
 insp_content: bool
 insp_view: rl.Rectangle
+insp_video_inset: f32 // largura tirada da área do vídeo pelo cartão flutuante
 insp_scroll: f32
 insp_total: f32
 insp_last_seg: int = -1
@@ -29,6 +30,7 @@ inspector_clear_focus :: proc() {
 // ao quadro real. Em janela estreita o modo flutuante preserva o transporte.
 inspector_layout :: proc(area: rl.Rectangle) -> rl.Rectangle {
 	g_insp_card = {}
+	insp_video_inset = 0
 	floating := area.width < 860
 	// Sem cabeçalho: vídeo e inspetor aproveitam toda a altura disponível.
 	preview := area
@@ -38,6 +40,8 @@ inspector_layout :: proc(area: rl.Rectangle) -> rl.Rectangle {
 	}
 	if floating {
 		g_insp_card = { preview.x + preview.width - 300, preview.y + 8, 288, max(f32(40), preview.height - 82) }
+		// O transporte segue com a largura toda; só o canvas encolhe para não ficar atrás do cartão.
+		insp_video_inset = 308
 	} else {
 		g_insp_card = { preview.x + preview.width - 300, preview.y, 300, preview.height - 6 }
 		preview.width -= 300

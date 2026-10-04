@@ -2525,8 +2525,8 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// Desenha por último para alças e overlays da prévia ficarem atrás do painel.
 	defer draw_seg_inspector(g_insp_card)
 	transport_h: f32 = 66 // barra de progresso (topo) + linha de botões
-	video := rl.Rectangle{ r.x, r.y, r.width, r.height - transport_h }
-	rl.DrawRectangleRec(video, PV_BACK) // sobra do painel: cinza, NÃO entra no export
+	rl.DrawRectangleRec({ r.x, r.y, r.width, r.height - transport_h }, PV_BACK) // sobra do painel: cinza, NÃO entra no export
+	video := rl.Rectangle{ r.x, r.y, max(f32(1), r.width - insp_video_inset), r.height - transport_h }
 
 	// CANVAS ajustado à área de preview: proporção do projeto — ou, na prévia de origem, a da fonte
 	par := preview_ar()
