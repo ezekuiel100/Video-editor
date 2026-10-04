@@ -14,6 +14,7 @@ Icon :: enum {
 	Undo, Redo, Trash, Scissors, Crop, Silence, Captions, CloseGap, Magnet,
 	Volume, VolumeMute, Camera, Fullscreen, ExitFullscreen,
 	Play, Pause, SkipBack, SkipForward, StepBack, StepForward,
+	Film, Music, Folder,
 }
 
 // caneta: origem do quadro 24×24 na tela, escala e espessura do traço
@@ -164,5 +165,20 @@ draw_icon :: proc(kind: Icon, cx, cy, size: f32, col: rl.Color) {
 		line(p, 16, 3, 16, 8, 21, 8)
 		line(p, 3, 16, 8, 16, 8, 21)
 		line(p, 21, 16, 16, 16, 16, 21)
+	case .Film: // película: quadro com as faixas de perfuração dos lados
+		line(p, 3, 4, 21, 4, 21, 20, 3, 20, 3, 4)
+		line(p, 7.5, 4, 7.5, 20)
+		line(p, 16.5, 4, 16.5, 20)
+		line(p, 3, 12, 21, 12)
+		line(p, 3, 8, 7.5, 8)
+		line(p, 3, 16, 7.5, 16)
+		line(p, 16.5, 8, 21, 8)
+		line(p, 16.5, 16, 21, 16)
+	case .Music: // colcheia dupla
+		line(p, 9, 18, 9, 5, 21, 3, 21, 16)
+		circle(p, 6, 18, 3)
+		circle(p, 18, 16, 3)
+	case .Folder:
+		line(p, 3, 5, 9, 5, 11, 7.5, 21, 7.5, 21, 19, 3, 19, 3, 5)
 	}
 }

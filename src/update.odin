@@ -120,6 +120,7 @@ update :: proc() {
 			else if modal == .STT do stt_close()
 			else if modal == .Caps do caps_close()
 			else if modal == .Silence do sil_close()
+			else if modal == .Export do modal = .None
 		}
 		st.drag = .None; player_seek_drag = false; return
 	}

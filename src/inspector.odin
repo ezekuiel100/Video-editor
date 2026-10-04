@@ -392,24 +392,13 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	body := rl.Rectangle{ area.x + 1, area.y + hdr_h + 1, area.width - 2, max(f32(1), area.height - hdr_h - 7) }
 	if has_tabs {
 		// controle segmentado: trilho rebaixado, aba ativa elevada
-		track := rl.Rectangle{ area.x + 12, area.y + 62, area.width - 24, 30 }
-		rl.DrawRectangleRounded(track, 0.3, 6, SUNK)
 		tabs := [3]cstring{ "Vídeo", "Áudio", "Velocidade" }
-		tw := (track.width - 6)/3
-		for tab, i in tabs {
-			r := rl.Rectangle{ track.x + 3 + f32(i)*tw, track.y + 3, tw, track.height - 6 }
-			active := insp_tab == i
-			hot := hovered(r)
-			if active do rl.DrawRectangleRounded(r, 0.3, 6, CONTROL)
-			else if hot do rl.DrawRectangleRounded(r, 0.3, 6, alpha(CONTROL, 120))
-			txt_c(tab, r.x + tw/2, r.y + 4, FS_MD, active || hot ? TEXT : MUTED)
-			if clicked(r) && insp_tab != i {
-				insp_tab = i
-				insp_last_tab = i
-				insp_scroll = 0
-				insp_total = 0
-				inspector_clear_focus()
-			}
+		if i := ui_segmented({ area.x + 12, area.y + 62, area.width - 24, 30 }, tabs[:], insp_tab); i >= 0 {
+			insp_tab = i
+			insp_last_tab = i
+			insp_scroll = 0
+			insp_total = 0
+			inspector_clear_focus()
 		}
 	}
 	max_scroll := max(f32(0), insp_total - body.height)

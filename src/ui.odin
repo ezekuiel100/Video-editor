@@ -93,6 +93,19 @@ elide :: proc(s: string, size, max_w: f32) -> cstring {
 	return "…"
 }
 
+// como elide, mas corta o INÍCIO — p/ caminhos, onde o que identifica é o fim (pasta/arquivo).
+elide_left :: proc(s: string, size, max_w: f32) -> cstring {
+	if txt_w(cs(s), size) <= max_w do return cs(s)
+	i := 0
+	for i < len(s) {
+		_, w := utf8.decode_rune_in_string(s[i:])
+		i += w
+		cand := fmt.ctprintf("…%s", s[i:])
+		if txt_w(cand, size) <= max_w do return cand
+	}
+	return "…"
+}
+
 base_name :: proc(path: string) -> string {
 	start := 0
 	for i := len(path) - 1; i >= 0; i -= 1 {
@@ -383,9 +396,6 @@ draw_projset_modal :: proc(sw, sh: f32) {
 	}
 }
 
-// linha "Rótulo: valor" do painel de infos do modal de exportar.
-mrow :: proc(x, y: f32, k, v: cstring) { txt(k, x, y, FS_MD, MUTED); txt(v, x + 150, y, FS_MD, TEXT) }
-
 // tamanho ESTIMADO do arquivo (MB) p/ o modal. Aproximação (CRF = bitrate variável, por isso
 // exibido com "~"): bitrate nominal por qualidade, escalado pela resolução; HEVC/VP9 ~40%
 // menores; MP3 usa só o bitrate de áudio. Não faz probe (roda todo frame do modal).
@@ -418,8 +428,8 @@ draw_modal :: proc(sw, sh: f32) {
 	if modal == .STT { draw_stt_modal(sw, sh); return }
 	if modal == .Caps { draw_caps_modal(sw, sh); return }
 	rl.DrawRectangleRec({0,0,sw,sh}, SCRIM) // backdrop escuro
-	cw: f32 = modal == .Export ? 700 : 540
-	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : (modal == .Export ? 430 : 430)))
+	cw: f32 = modal == .Export ? 760 : 540
+	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : (modal == .Export ? 490 : 430)))
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
 	rl.DrawRectangleRounded(card, 0.04, 8, SURFACE)
@@ -456,43 +466,69 @@ draw_modal :: proc(sw, sh: f32) {
 		return
 	}
 
-	// ---- modal EXPORTAR (barra de formatos à esquerda + painel de infos à direita) ----
+	// ---- modal EXPORTAR: formatos à esquerda, ajustes + resumo à direita, rodapé com destino ----
 	if modal == .Export {
-		// barra lateral de FORMATOS à esquerda
-		sbx := cx + 24; sby := cy + 56; sbw := f32(150); rowh := f32(46)
-		FMT_LABELS := [ExportFmt]cstring{ .MP4 = "MP4", .HEVC = "HEVC", .WEBM = "WEBM", .MP3 = "MP3" }
-		FMT_DESC   := [ExportFmt]cstring{ .MP4 = "H.264 · compatível", .HEVC = "H.265 · menor", .WEBM = "VP9 · web", .MP3 = "só áudio" }
-		fi := 0
-		for f in ExportFmt {
-			rr := rl.Rectangle{ sbx, sby + f32(fi)*rowh, sbw, rowh - 6 }
-			sel := export_fmt == f
-			if sel        do rl.DrawRectangleRounded(rr, 0.18, 4, CONTROL)
-			else if hovered(rr) do rl.DrawRectangleRounded(rr, 0.18, 4, PANEL)
-			if sel do rl.DrawRectangleRec({ rr.x, rr.y + 6, 3, rr.height - 12 }, ACCENT)
-			txt(FMT_LABELS[f], rr.x + 14, rr.y + 6, FS_LG, TEXT)
-			txt(FMT_DESC[f],   rr.x + 14, rr.y + 26, FS_XS, MUTED)
-			if clicked(rr) do export_fmt = f
-			fi += 1
-		}
-		rl.DrawLineEx({ sbx + sbw + 14, cy + 52 }, { sbx + sbw + 14, cy + ch - 66 }, 1, LINE) // divisória
+		HDR :: 56 // cabeçalho (título + X, desenhados acima)
+		FTR :: 68 // rodapé (destino + botões)
+		body_y := cy + HDR
+		body_h := ch - HDR - FTR
+		foot_y := cy + ch - FTR
+		rl.DrawLineEx({ cx + 1, body_y }, { cx + cw - 1, body_y }, 1, LINE)
+		rl.DrawLineEx({ cx + 1, foot_y }, { cx + cw - 1, foot_y }, 1, LINE)
 
-		// painel à direita
-		px := sbx + sbw + 32; pw := cx + cw - 24 - px; py := cy + 58
-		txt("Exportar para arquivo e salvar no computador", px, py, FS_SM, MUTED); py += 28
-		// Nome
-		txt("Nome:", px, py + 6, FS_MD, TEXT)
-		nf := rl.Rectangle{ px + 84, py, pw - 84, 28 }
-		rl.DrawRectangleRounded(nf, 0.2, 4, PANEL2)
-		tf_field(&tf_name, nf, &name_focus, false)
-		rl.DrawRectangleRoundedLinesEx(nf, 0.2, 4, 1, ACCENT)
-		py += 40
-		// Salvar em
-		txt("Salvar em:", px, py + 6, FS_MD, TEXT)
-		df := rl.Rectangle{ px + 84, py, pw - 84 - 36, 28 }
-		rl.DrawRectangleRounded(df, 0.2, 4, PANEL2)
-		dds := save_dir; if len(dds) > 40 do dds = fmt.tprintf("...%s", dds[len(dds)-37:])
-		txt(cs(dds), df.x + 8, df.y + 6, FS_SM, MUTED)
-		if ui_btn({ df.x + df.width + 6, py, 30, 28 }, "...", false) {
+		// barra lateral de FORMATOS, um degrau abaixo do cartão
+		sbw := f32(200)
+		rl.DrawRectangleRec({ cx + 1, body_y + 1, sbw, body_h - 1 }, PANEL2)
+		rl.DrawLineEx({ cx + 1 + sbw, body_y }, { cx + 1 + sbw, foot_y }, 1, LINE)
+		txt("FORMATO", cx + 22, body_y + 16, FS_XS, MUTED)
+		FMT_LABELS := [ExportFmt]cstring{ .MP4 = "MP4", .HEVC = "HEVC", .WEBM = "WEBM", .MP3 = "MP3" }
+		FMT_DESC   := [ExportFmt]cstring{ .MP4 = "H.264 · mais compatível", .HEVC = "H.265 · arquivo menor", .WEBM = "VP9 · para web", .MP3 = "Só o áudio" }
+		fy := body_y + 40
+		for f in ExportFmt {
+			rr := rl.Rectangle{ cx + 10, fy, sbw - 19, 50 }
+			sel := export_fmt == f
+			hot := hovered(rr)
+			if sel do rl.DrawRectangleRounded(rr, 0.2, 6, CONTROL)
+			else if hot do rl.DrawRectangleRounded(rr, 0.2, 6, alpha(CONTROL, 120))
+			ib := rl.Rectangle{ rr.x + 9, rr.y + 9, 32, 32 }
+			rl.DrawRectangleRounded(ib, 0.3, 6, sel ? ACCENT_BG : (hot ? CONTROL : SURFACE))
+			draw_icon(f == .MP3 ? .Music : .Film, ib.x + 16, ib.y + 16, 18, sel ? ACCENT : (hot ? TEXT : MUTED))
+			txt(FMT_LABELS[f], rr.x + 52, rr.y + 8, FS_MD, sel || hot ? TEXT : MUTED)
+			txt(elide(string(FMT_DESC[f]), FS_XS, rr.width - 60), rr.x + 52, rr.y + 27, FS_XS, MUTED)
+			if clicked(rr) do export_fmt = f
+			fy += 54
+		}
+
+		// painel à direita: coluna de rótulos medida (acompanha a escala da fonte)
+		px := cx + sbw + 28
+		pr := cx + cw - 28
+		LBLS := [4]cstring{ "Nome", "Salvar em", "Qualidade", "Renderizar" }
+		lw: f32 = 0
+		for l in LBLS do lw = max(lw, txt_w(l, FS_MD))
+		fx := px + lw + 20
+		fw := pr - fx
+		py := body_y + 22
+		ext := cs(export_fmt_ext(export_fmt))
+
+		// Nome — a extensão do formato aparece fixa no fim do campo
+		txt("Nome", px, py + 9, FS_MD, MUTED)
+		nf := rl.Rectangle{ fx, py, fw, 32 }
+		rl.DrawRectangleRounded(nf, 0.25, 6, SUNK)
+		ew := txt_w(ext, FS_MD)
+		tf_field(&tf_name, { nf.x, nf.y + 2, nf.width - ew - 16, 28 }, &name_focus, false)
+		txt(ext, nf.x + nf.width - ew - 10, nf.y + 9, FS_MD, MUTED)
+		rl.DrawRectangleRoundedLinesEx(nf, 0.25, 6, 1, ACCENT)
+		py += 44
+
+		// Salvar em — o campo todo abre o diálogo
+		txt("Salvar em", px, py + 9, FS_MD, MUTED)
+		df := rl.Rectangle{ fx, py, fw, 32 }
+		dhot := hovered(df)
+		rl.DrawRectangleRounded(df, 0.25, 6, dhot ? PANEL2 : SUNK)
+		rl.DrawRectangleRoundedLinesEx(df, 0.25, 6, 1, dhot ? GRIP : LINE)
+		txt(elide_left(save_dir, FS_MD, df.width - 46), df.x + 10, df.y + 9, FS_MD, TEXT)
+		draw_icon(.Folder, df.x + df.width - 18, df.y + 16, 16, dhot ? TEXT : MUTED)
+		if clicked(df) {
 			if p, ok := save_dialog(name_str()); ok {
 				if d := dir_of(p); d != "" { if save_dir != "" do delete(save_dir); save_dir = strings.clone(d) }
 				b := p[len(dir_of(p)) + 1:]
@@ -500,59 +536,93 @@ draw_modal :: proc(sw, sh: f32) {
 				set_name(b)
 			}
 		}
-		py += 42
-		// Predefinição (qualidade)
-		txt("Qualidade:", px, py + 3, FS_MD, TEXT)
+		py += 44
+
+		// Qualidade + o que cada opção significa
+		txt("Qualidade", px, py + 9, FS_MD, MUTED)
 		QLABELS := [ExportQual]cstring{ .High = "Alta", .Medium = "Média", .Low = "Baixa", .Auto = "Auto" }
-		qx := px + 84
-		for q in ExportQual {
-			if ui_btn({ qx, py - 2, 66, 26 }, QLABELS[q], export_qual == q) do export_qual = q
-			qx += 72
+		QHINTS  := [ExportQual]cstring{
+			.High   = "Máxima fidelidade — arquivo maior, exportação mais lenta",
+			.Medium = "Equilíbrio entre qualidade, tamanho e velocidade",
+			.Low    = "Arquivo leve e exportação rápida — perde detalhe",
+			.Auto   = "Alta qualidade, sem passar do bitrate dos clipes de origem",
 		}
-		py += 36
+		qs: [len(ExportQual)]cstring
+		for q in ExportQual do qs[int(q)] = QLABELS[q]
+		if i := ui_segmented({ fx, py, fw, 32 }, qs[:], int(export_qual)); i >= 0 do export_qual = ExportQual(i)
+		txt(QHINTS[export_qual], fx + 2, py + 39, FS_XS, MUTED)
+		py += 64
+
 		// modo de renderização
-		txt("Renderizar:", px, py + 3, FS_MD, TEXT)
-		if ui_btn({ px + 84, py - 2, 106, 26 }, "Vídeo único", !export_individual) do export_individual = false
-		if ui_btn({ px + 196, py - 2, 132, 26 }, "Separados", export_individual) do export_individual = true
-		py += 36
-		// infos
+		txt("Renderizar", px, py + 9, FS_MD, MUTED)
+		modes := [2]cstring{ "Vídeo único", "Um arquivo por clipe" }
+		if i := ui_segmented({ fx, py, fw, 32 }, modes[:], export_individual ? 1 : 0); i >= 0 do export_individual = i == 1
+		py += 50
+
+		// resumo: quatro números lado a lado num cartão rebaixado
 		W, H := export_dims()
 		total := timeline_dur()
 		ts := int(total + 0.5)
+		est := export_est_size_mb(int(W), int(H), total)
+		keys, vals: [4]cstring
 		if export_fmt == .MP3 {
-			mrow(px, py, "Tipo:", "Áudio (MP3)"); py += 26
+			keys[0], vals[0] = "TIPO", "Áudio"
+			kbps := export_qual == .High ? 320 : (export_qual == .Low ? 128 : 192)
+			keys[1], vals[1] = "BITRATE", rl.TextFormat("%d kbps", i32(kbps))
 		} else {
-			mrow(px, py, "Resolução:", rl.TextFormat("%dx%d", i32(W), i32(H))); py += 26
-			mrow(px, py, "Taxa de Frames:", "30 fps"); py += 26
+			keys[0], vals[0] = "RESOLUÇÃO", rl.TextFormat("%d×%d", i32(W), i32(H))
+			keys[1], vals[1] = "QUADROS", "30 fps"
 		}
 		if export_individual {
-			mrow(px, py, "Saída:", rl.TextFormat("%d vídeos separados", i32(individual_clip_count()))); py += 26
+			keys[2], vals[2] = "ARQUIVOS", rl.TextFormat("%d", i32(individual_clip_count()))
 		} else {
-			mrow(px, py, "Duração:", rl.TextFormat("%02d:%02d:%02d", i32(ts/3600), i32((ts%3600)/60), i32(ts%60))); py += 26
+			keys[2], vals[2] = "DURAÇÃO", rl.TextFormat("%02d:%02d:%02d", i32(ts/3600), i32((ts%3600)/60), i32(ts%60))
 		}
-		est := export_est_size_mb(int(W), int(H), total)
-		szs: cstring = est >= 1024 ? rl.TextFormat("~ %.2f GB", est/1024) : rl.TextFormat("~ %.0f MB", est)
-		mrow(px, py, "Tamanho estimado:", szs); py += 32
-		// GPU só existe p/ H.264/HEVC (NVENC); VP9 é sempre CPU
-		if export_fmt == .MP4 || export_fmt == .HEVC {
-			chk := rl.Rectangle{ px, py, 18, 18 }
-			if export_nvenc_ok {
-				if clicked(chk) do export_gpu = !export_gpu
-				rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, export_gpu ? ACCENT : MUTED)
-				if export_gpu do rl.DrawRectangleRec({ chk.x + 4, chk.y + 4, 10, 10 }, ACCENT)
-				txt("GPU (NVENC) — bem mais rápido", px + 26, py + 2, FS_MD, TEXT)
-			} else {
-				rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, MUTED)
-				txt("GPU (NVENC) indisponível — usa CPU", px + 26, py + 2, FS_MD, MUTED)
-			}
-			py += 26
-		} else if export_fmt == .WEBM {
-			txt("VP9 codifica por CPU — export mais lento.", px, py + 2, FS_SM, MUTED)
-			py += 26
+		keys[3] = "TAMANHO EST."
+		vals[3] = est >= 1024 ? rl.TextFormat("~%.2f GB", est/1024) : rl.TextFormat("~%.0f MB", est)
+		sc := rl.Rectangle{ px, py, pr - px, 64 }
+		rl.DrawRectangleRounded(sc, 0.2, 6, PANEL2)
+		colw := sc.width / 4
+		for i in 0 ..< 4 {
+			x := sc.x + f32(i)*colw
+			if i > 0 do rl.DrawLineEx({ x, sc.y + 14 }, { x, sc.y + sc.height - 14 }, 1, SEP)
+			txt(keys[i], x + 14, sc.y + 13, FS_XS, MUTED)
+			txt(vals[i], x + 14, sc.y + 31, FS_LG, TEXT)
 		}
-		// botões
-		if ui_btn({ cx + cw - 244, cy + ch - 52, 100, 36 }, "Cancelar", false) do modal = .None
-		if ui_btn({ cx + cw - 134, cy + ch - 52, 110, 36 }, "Exportar", true) {
+		py += 80
+
+		// GPU: só H.264/HEVC têm NVENC; VP9 aparece desligado com o porquê; MP3 não tem vídeo
+		if export_fmt != .MP3 {
+			ok := export_nvenc_ok && export_fmt != .WEBM
+			gr := rl.Rectangle{ px, py, pr - px, 36 }
+			ghot := ok && hovered(gr)
+			ui_switch({ px, py + 9, 34, 18 }, export_gpu, ghot, ok)
+			txt("Aceleração por GPU (NVENC)", px + 46, py, FS_MD, ok ? TEXT : MUTED)
+			sub: cstring = "Codifica na placa de vídeo — bem mais rápido"
+			if export_fmt == .WEBM do sub = "VP9 não usa GPU — exporta por CPU, mais devagar"
+			else if !export_nvenc_ok do sub = "Indisponível neste computador — exporta por CPU"
+			txt(sub, px + 46, py + 19, FS_XS, MUTED)
+			if ok && clicked(gr) do export_gpu = !export_gpu
+		}
+
+		// rodapé: onde o arquivo vai parar + ações (Enter exporta, Esc cancela no update)
+		bx := cx + cw - 24 - 128
+		dest: string
+		if export_individual {
+			dest = fmt.tprintf("%s\\%s_001%s … _%03d%s", save_dir, name_str(), ext, i32(individual_clip_count()), ext)
+		} else {
+			dest = fmt.tprintf("%s\\%s%s", save_dir, name_str(), ext)
+		}
+		dmax := bx - 114 - 20 - (cx + 24)
+		txt("Destino", cx + 24, foot_y + 15, FS_XS, MUTED)
+		txt(elide_left(dest, FS_SM, dmax), cx + 24, foot_y + 32, FS_SM, TEXT)
+		cr := rl.Rectangle{ bx - 114, foot_y + 16, 104, 36 }
+		chot := hovered(cr)
+		if chot do rl.DrawRectangleRounded(cr, 0.3, 6, CONTROL)
+		rl.DrawRectangleRoundedLinesEx(cr, 0.3, 6, 1, chot ? GRIP : LINE)
+		txt_c("Cancelar", cr.x + cr.width/2, cr.y + cr.height/2 - 8, FS_MD, TEXT)
+		if clicked(cr) do modal = .None
+		if ui_btn({ bx, foot_y + 16, 128, 36 }, "Exportar", true) || rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.KP_ENTER) {
 			if tf_name.len == 0 do set_toast("Digite um nome")
 			else {
 				// enfileira: o start real roda no update (fora do BeginDrawing)
@@ -2314,6 +2384,34 @@ ui_btn :: proc(r: rl.Rectangle, label: cstring, active: bool) -> bool {
 	rl.DrawRectangleRounded(r, 0.3, 6, col)
 	txt_c(label, r.x + r.width/2, r.y + r.height/2 - 8, FS_MD, active ? rl.WHITE : TEXT)
 	return clicked(r)
+}
+
+// controle segmentado: trilho rebaixado, opção ativa elevada (abas do inspetor, opções do
+// modal de exportar). Devolve o índice clicado que NÃO era o ativo; -1 = nada mudou.
+ui_segmented :: proc(r: rl.Rectangle, labels: []cstring, active: int) -> int {
+	rl.DrawRectangleRounded(r, 0.3, 6, SUNK)
+	w := (r.width - 6) / f32(len(labels))
+	hit := -1
+	for label, i in labels {
+		b := rl.Rectangle{ r.x + 3 + f32(i)*w, r.y + 3, w, r.height - 6 }
+		on := i == active
+		hot := hovered(b)
+		if on do rl.DrawRectangleRounded(b, 0.3, 6, CONTROL)
+		else if hot do rl.DrawRectangleRounded(b, 0.3, 6, alpha(CONTROL, 120))
+		txt_c(label, b.x + w/2, b.y + b.height/2 - 8, FS_MD, on || hot ? TEXT : MUTED)
+		if clicked(b) && !on do hit = i
+	}
+	return hit
+}
+
+// interruptor liga/desliga (só desenha; o clique é do chamador, que costuma usar a linha
+// inteira com o rótulo). ok=false → apagado, sem estado ligado.
+ui_switch :: proc(r: rl.Rectangle, on, hot, ok: bool) {
+	lit := on && ok
+	track := lit ? (hot ? ACCENT : ACCENT_D) : (hot && ok ? HOVER : CONTROL)
+	rl.DrawRectangleRounded(r, 1, 12, track)
+	kx := lit ? r.x + r.width - r.height/2 : r.x + r.height/2
+	rl.DrawCircleV({ kx, r.y + r.height/2 }, r.height/2 - 3, ok ? KNOB : DISABLED)
 }
 
 // botão em "pílula" (cantos totalmente arredondados) — estilo do rodapé do painel de efeito.
