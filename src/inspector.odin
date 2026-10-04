@@ -1,6 +1,7 @@
 package main
 
 import rl "vendor:raylib"
+import "core:math"
 import "core:strconv"
 import "core:strings"
 
@@ -55,17 +56,53 @@ inspector_section :: proc(label: cstring, x, y, w: f32) {
 	rl.DrawLineEx({ x + lw + 12, y + 11 }, { x + w, y + 11 }, 1, LINE)
 }
 
+INSP_HDR     :: rl.Color{ 42, 48, 59, 255 } // um degrau acima do PANEL: cabeçalho destacado sem borda
+INSP_HDR_HOT :: rl.Color{ 49, 56, 69, 255 }
+
+// chevron desenhado (a fonte não garante ▾/▸): aberto aponta p/ baixo, fechado p/ a direita
+inspector_chevron :: proc(cx, cy: f32, open: bool, col: rl.Color) {
+	if open {
+		rl.DrawLineEx({ cx - 4, cy - 2 }, { cx, cy + 2 }, 1.8, col)
+		rl.DrawLineEx({ cx, cy + 2 }, { cx + 4, cy - 2 }, 1.8, col)
+	} else {
+		rl.DrawLineEx({ cx - 2, cy - 4 }, { cx + 2, cy }, 1.8, col)
+		rl.DrawLineEx({ cx + 2, cy }, { cx - 2, cy + 4 }, 1.8, col)
+	}
+}
+
+// ↺: arco aberto no alto-direito com a ponta seguindo no sentido anti-horário
+inspector_reset_icon :: proc(cx, cy: f32, col: rl.Color) {
+	R :: f32(5.5)
+	rl.DrawRing({ cx, cy }, R - 0.9, R + 0.9, -50, 230, 24, col)
+	a := f32(-50) * rl.DEG2RAD
+	p := rl.Vector2{ cx + R*math.cos(a), cy + R*math.sin(a) }
+	n := rl.Vector2{ math.cos(a), math.sin(a) }  // normal (radial)
+	t := rl.Vector2{ math.sin(a), -math.cos(a) } // tangente no sentido anti-horário
+	draw_tri2(p + t*4, p + n*3.2, p - n*3.2, col)
+}
+
 // Cabeçalho independente da área de redefinição: recolher não altera o clipe.
-inspector_group :: proc(label: cstring, x, y, w: f32, open: ^bool) -> bool {
+// `dirty` = algum valor do grupo saiu do padrão; só então o ↺ aparece (e responde ao clique).
+inspector_group :: proc(label: cstring, x, y, w: f32, open: ^bool, dirty: bool) -> bool {
 	bar := rl.Rectangle{ x, y, w, 32 }
-	rl.DrawRectangleRounded(bar, 0.15, 4, PANEL2)
-	if clicked({ x, y, w - 76, 32 }) {
+	reset := rl.Rectangle{ x + w - 30, y + 4, 24, 24 }
+	toggle := dirty ? rl.Rectangle{ x, y, w - 34, 32 } : bar
+	rl.DrawRectangleRounded(bar, 0.2, 4, hovered(toggle) ? INSP_HDR_HOT : INSP_HDR)
+	if clicked(toggle) {
 		open^ = !open^
 		inspector_clear_focus()
 	}
-	txt(open^ ? "-" : "+", x + 9, y + 8, 14, MUTED)
-	txt(label, x + 26, y + 8, 14, TEXT)
-	return ui_btn({ x + w - 72, y + 3, 68, 26 }, "Redefinir", false)
+	inspector_chevron(x + 14, y + 16, open^, hovered(toggle) ? TEXT : MUTED)
+	txt(label, x + 28, y + 8, 14, TEXT)
+	if !dirty do return false
+	hot := hovered(reset)
+	if hot {
+		rl.DrawRectangleRounded(reset, 0.3, 4, HOVER)
+		lw := txt_w("Redefinir", 12)
+		txt("Redefinir", reset.x - lw - 6, y + 9, 12, ACCENT)
+	}
+	inspector_reset_icon(reset.x + 12, reset.y + 12, hot ? ACCENT : MUTED)
+	return clicked(reset)
 }
 
 // Campo numérico + slider. A digitação só altera o valor ao confirmar (Enter
@@ -127,7 +164,7 @@ inspector_controls :: proc(body: rl.Rectangle) -> f32 {
 			txt("Este clipe não contém vídeo.", x, y, 13, MUTED)
 			return 48
 		}
-		if inspector_group("Transformação", x, y, w, &insp_transform_open) {
+		if inspector_group("Transformação", x, y, w, &insp_transform_open, sg.scale != 1 || sg.px != 0 || sg.py != 0 || sg.rot != 0) {
 			inspector_clear_focus()
 			sg.scale = 1
 			sg.px = 0
@@ -151,7 +188,7 @@ inspector_controls :: proc(body: rl.Rectangle) -> f32 {
 			inspector_row(7, "Rotação", x, y, w, &sg.rot, -180, 180, 1, "°")
 			y += 64
 		}
-		if inspector_group("Recorte", x, y, w, &insp_crop_open) {
+		if inspector_group("Recorte", x, y, w, &insp_crop_open, seg_cropped(selected)) {
 			inspector_clear_focus()
 			sg.crop_x = 0
 			sg.crop_y = 0
@@ -173,7 +210,7 @@ inspector_controls :: proc(body: rl.Rectangle) -> f32 {
 			}
 			y += 44
 		}
-		if inspector_group("Aparência", x, y, w, &insp_appearance_open) {
+		if inspector_group("Aparência", x, y, w, &insp_appearance_open, sg.opacity != 1 || sg.vfin != 0 || sg.vfout != 0) {
 			inspector_clear_focus()
 			sg.opacity = 1
 			sg.vfin = 0

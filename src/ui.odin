@@ -2213,12 +2213,14 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 // (imediato-mode não tem foco). Retorna true no frame em que o valor muda.
 ui_slider :: proc(id: int, r: rl.Rectangle, val: ^f32, lo, hi: f32) -> bool {
 	cy := r.y + r.height/2
-	rl.DrawRectangleRounded({r.x, cy - 2, r.width, 4}, 1, 4, rl.Color{50, 54, 64, 255})
+	// trilho com contraste visível sobre o PANEL; knob com anel escuro p/ destacar do preenchimento
+	rl.DrawRectangleRounded({r.x, cy - 2, r.width, 4}, 1, 4, rl.Color{62, 70, 86, 255})
 	frac := clamp((val^ - lo) / (hi - lo), 0, 1)
 	kx := r.x + frac * r.width
-	rl.DrawRectangleRounded({r.x, cy - 2, kx - r.x, 4}, 1, 4, ACCENT)
+	if kx > r.x + 1 do rl.DrawRectangleRounded({r.x, cy - 2, kx - r.x, 4}, 1, 4, ACCENT)
 	hot := ui_slider_active == id || hovered(r)
-	rl.DrawCircleV({kx, cy}, hot ? 7 : 6, hot ? rl.WHITE : rl.Color{205, 210, 220, 255})
+	rl.DrawCircleV({kx, cy}, hot ? 8 : 7, hot ? ACCENT : rl.Color{20, 23, 29, 255})
+	rl.DrawCircleV({kx, cy}, hot ? 6 : 5.5, hot ? rl.WHITE : rl.Color{225, 230, 238, 255})
 	if rl.IsMouseButtonPressed(.LEFT) && hovered(r) && (modal == .None || g_modal_draw) do ui_slider_active = id
 	if ui_slider_active == id {
 		// !Down (não só Released): se o slider sumir no frame do soltar (fade que
