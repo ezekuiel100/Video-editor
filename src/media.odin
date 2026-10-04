@@ -131,13 +131,25 @@ cdw :: proc(c: ^Clip) -> i32 { return (c.streaming && c.dw > 0) ? c.dw : i32(DEC
 cdh :: proc(c: ^Clip) -> i32 { return (c.streaming && c.dh > 0) ? c.dh : i32(DEC_H) }
 cframe :: proc(c: ^Clip) -> int { return int(cdw(c)) * int(cdh(c)) * 3 } // bytes rgb24 de 1 frame
 
-// filtro scale+letterbox p/ o clipe. Baixa/cache usa a constante DEC_VF; streaming em
-// alta gera o filtro p/ c.dw×c.dh. buf = stack do chamador (procs de decode rodam em
+// filtro scale+letterbox p/ o clipe. buf = stack do chamador (procs de decode rodam em
 // threads de vida longa, sem temp allocator) — a string retornada vive só na chamada.
+// O quadro é encaixado no RETÂNGULO DE CONTEÚDO (dec_content_rect, aspecto vw:vh), não no
+// DEC inteiro: gravação de live MUDA de resolução no meio (640×1280 -> 720×1280) e o probe
+// só vê uma delas. Encaixando por quadro (decrease reavalia a cada troca de resolução) o
+// trecho de outro aspecto ganha barras dentro do conteúdo em vez de sair ESPREMIDO/cortado.
+// Quando o aspecto do quadro bate com vw:vh é o mesmo letterbox de antes.
 dec_vf_of :: proc(c: ^Clip, buf: []u8) -> string {
 	w, h := cdw(c), cdh(c)
-	if w == i32(DEC_W) && h == i32(DEC_H) do return DEC_VF
-	return fmt.bprintf(buf, "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2", w, h, w, h)
+	cw, ch := dec_content_size(c)
+	if w == i32(DEC_W) && h == i32(DEC_H) && cw == w && ch == h do return DEC_VF
+	return fmt.bprintf(buf, "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2", cw, ch, w, h)
+}
+
+// dims inteiras do retângulo de conteúdo — as mesmas que lav_convert usa, p/ o pipe do ffmpeg
+// e o scrub via libav pintarem o quadro no mesmo lugar.
+dec_content_size :: proc(c: ^Clip) -> (cw, ch: i32) {
+	r := dec_content_rect(c)
+	return max(i32(r.width + 0.5), 2), max(i32(r.height + 0.5), 2)
 }
 
 dec_content_rect :: proc(c: ^Clip) -> rl.Rectangle {
@@ -1073,9 +1085,10 @@ cache_dec_start :: proc(c: ^Clip) -> bool {
 	if e != nil do return false
 	rb: [16]u8
 	fps_s := fmt.bprintf(rb[:], "%.5f", cfps_of(c)) // fps do cache = fps da fonte (cap 60)
+	vfb: [128]u8; vf := dec_vf_of(c, vfb[:]) // encaixe por quadro (resolução que muda no meio)
 	cmd := []string{
 		"ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "2", "-i", c.path,
-		"-vf", DEC_VF, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", fps_s,
+		"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", fps_s,
 		"-an", "-sn", "pipe:1",
 	}
 	p, pe := os.process_start(os.Process_Desc{ command = cmd, stdout = w })

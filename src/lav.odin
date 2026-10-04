@@ -341,8 +341,17 @@ lav_convert :: proc(c: ^Clip, d: ^LavDec, buf: []u8) -> bool {
 	sf := dw * dh * 3
 	if len(buf) < sf do return false
 	r := dec_content_rect(c)
-	x0, y0 := int(r.x + 0.5), int(r.y + 0.5)
-	cw, ch := max(int(r.width + 0.5), 2), max(int(r.height + 0.5), 2)
+	icw, ich := dec_content_size(c)
+	cw, ch := int(icw), int(ich)
+	// encaixa ESTE quadro no conteúdo mantendo o aspecto dele (igual ao decrease+pad do
+	// dec_vf_of): live que muda de resolução no meio saía espremida no aspecto do probe.
+	if fw > 0 && fh > 0 {
+		far := f32(fw) / f32(fh)
+		if far > f32(cw) / f32(ch) do ch = max(int(f32(cw) / far + 0.5), 2)
+		else do cw = max(int(f32(ch) * far + 0.5), 2)
+	}
+	x0 := int(r.x + 0.5) + (int(icw) - cw) / 2
+	y0 := int(r.y + 0.5) + (int(ich) - ch) / 2
 	x0 = clamp(x0, 0, dw - cw); y0 = clamp(y0, 0, dh - ch)
 	if cw != dw || ch != dh do for &b in buf[:sf] do b = 0 // barras pretas
 	lav.av_frame_unref(lav_dst)
