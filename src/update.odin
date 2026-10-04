@@ -200,7 +200,7 @@ update :: proc() {
 	// Ctrl+Z = desfazer | Ctrl+Y ou Ctrl+Shift+Z = refazer
 	ctrl := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
 	shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
-	if ctrl && src_preview < 0 {
+	if ctrl && src_preview < 0 && insp_num_id < 0 {
 		if rl.IsKeyPressed(.Z) && !shift do do_undo()
 		if rl.IsKeyPressed(.Y) || (rl.IsKeyPressed(.Z) && shift) do do_redo()
 	}
@@ -213,7 +213,7 @@ update :: proc() {
 	// Ctrl+C/X = copiar/recortar o clipe selecionado (ou grupo marcado) da timeline
 	// Ctrl+V = colar no playhead | Ctrl+D = duplicar logo após o original
 	// (campos de texto têm o próprio Ctrl+C/V/X — gate por txt_edit/search_focus)
-	if ctrl && src_preview < 0 && !txt_edit && !search_focus {
+	if ctrl && src_preview < 0 && !txt_edit && !search_focus && insp_num_id < 0 {
 		if rl.IsKeyPressed(.C) {
 			if fx_sel >= 0 && fx_sel < nfx && selected < 0 do copy_fx_clip(fx_sel)
 			else do copy_segs()
@@ -232,7 +232,7 @@ update :: proc() {
 
 	// Delete/Backspace: item do bin selecionado tem prioridade (remove a mídia do
 	// editor); senão remove o segmento selecionado da timeline (Alt = deixa o vão)
-	if (rl.IsKeyPressed(.DELETE) || rl.IsKeyPressed(.BACKSPACE)) && !txt_edit && !search_focus {
+	if (rl.IsKeyPressed(.DELETE) || rl.IsKeyPressed(.BACKSPACE)) && !txt_edit && !search_focus && insp_num_id < 0 {
 		if bin_marks_count() > 0 { // remove todas as mídias marcadas (tombstone; índices estáveis)
 			rm := 0
 			for k in 0 ..< nclips do if bin_marked[k] && !intrinsics.atomic_load(&clips[k].failed) { remove_media(k); rm += 1 }
@@ -289,12 +289,13 @@ update :: proc() {
 	//  S = dividir no playhead | B = ferramenta lâmina | F = ajustar à janela | Esc = sair da lâmina
 	if rl.IsKeyPressed(.F3) do prof_show = !prof_show // HUD do profiler (global, mede o custo da main thread)
 	if rl.IsKeyPressed(.F4) do dbg_toggle() // liga/desliga o log de diagnóstico do decoder (arquivo ao lado do .exe)
-	if rl.IsKeyPressed(.SPACE) && !txt_edit && !search_focus && !cue_focus {
+	if rl.IsKeyPressed(.SPACE) && !txt_edit && !search_focus && insp_num_id < 0 && !cue_focus {
 		if modal == .Silence do sil_play = !sil_play // no editor de silêncio: toca o RESULTADO
 		else do toggle_play()
 	}
 	if rl.IsKeyPressed(.ESCAPE) {
-		if search_focus do search_focus = false // sai da busca primeiro
+		if insp_num_id >= 0 do insp_num_id = -1 // cancela o campo numérico sem alterar o clipe
+		else if search_focus do search_focus = false // sai da busca primeiro
 		else if txt_edit do txt_edit = false // depois da edição de texto
 		else if modal == .Silence do sil_close()
 		else if modal == .STT do stt_close()
@@ -304,7 +305,7 @@ update :: proc() {
 		else if sel_trans >= 0 do sel_trans = -1 // Esc desseleciona a transição
 		blade_mode = false
 	}
-	if modal == .None && src_preview < 0 && !ctrl && !txt_edit && !search_focus { // atalhos de edição da timeline (não digitando; Ctrl reservado)
+	if modal == .None && src_preview < 0 && !ctrl && !txt_edit && !search_focus && insp_num_id < 0 { // atalhos de edição da timeline (não digitando; Ctrl reservado)
 		if rl.IsKeyPressed(.S) do split_at_playhead()
 		if rl.IsKeyPressed(.B) do blade_mode = !blade_mode
 		if rl.IsKeyPressed(.M) do set_magnetic(!magnetic)

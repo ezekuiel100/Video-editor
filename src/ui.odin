@@ -35,6 +35,11 @@ hovered :: proc(r: rl.Rectangle) -> bool {
 	// porque o clique caía na timeline e desmarcava o clipe)
 	if modal != .None && !g_modal_draw do return false
 	if sil_eat || stt_eat do return false // 1º frame depois de abrir: o clique que abriu ainda está down
+	// O painel flutuante bloqueia a prévia; controles rolados não recebem cliques fora da janela.
+	if !g_modal_draw && !g_file_menu_draw {
+		if insp_content && !rl.CheckCollisionPointRec(rl.GetMousePosition(), insp_view) do return false
+		if !insp_drawing && rl.CheckCollisionPointRec(rl.GetMousePosition(), g_insp_card) do return false
+	}
 	return rl.CheckCollisionPointRec(rl.GetMousePosition(), r)
 }
 // clique válido; quando há modal aberto, só conta se for DENTRO do modal (g_modal_draw)
@@ -717,6 +722,8 @@ draw :: proc() {
 	// colisão (só olha export_run) — os rects do último frame em janela viravam uma faixa
 	// invisível no meio do vídeo que cancelava a exportação com um clique qualquer.
 	g_exp_pause_btn = {}; g_exp_cancel_btn = {}
+	g_insp_card = {}
+	if fullscreen_preview do inspector_clear_focus()
 
 	if fullscreen_preview { // modo tela cheia: só o vídeo
 		draw_fullscreen_video(sw, sh)
@@ -783,7 +790,8 @@ draw :: proc() {
 	draw_toolbar(sw, topbar_h, toolbar_h)
 	draw_subbar(topbar_h + toolbar_h, media_w, subbar_h)
 	draw_media_panel(rl.Rectangle{ 0, content_top, media_w, tl_top - content_top })
-	draw_preview(rl.Rectangle{ media_w, topbar_h + toolbar_h, sw - media_w, tl_top - (topbar_h + toolbar_h) })
+	preview_area := inspector_layout({ media_w, topbar_h + toolbar_h, sw - media_w, tl_top - (topbar_h + toolbar_h) })
+	draw_preview(preview_area)
 	draw_timeline(rl.Rectangle{ 0, tl_top, sw, tl_h })
 
 	// feedback das divisórias (depois do draw_timeline: o cursor setado aqui vence o de lá)
@@ -2374,7 +2382,9 @@ tf_field :: proc(t: ^TField, r: rl.Rectangle, focused: ^bool, allow_unfocus: boo
 		if t.scroll < 0 do t.scroll = 0
 		tx0 = r.x + 8 - t.scroll
 	}
-	rl.BeginScissorMode(i32(r.x + 2), i32(r.y), i32(r.width - 4), i32(r.height))
+	clip := rl.Rectangle{ r.x + 2, r.y, r.width - 4, r.height }
+	if insp_content do clip = rl.GetCollisionRec(clip, insp_view)
+	rl.BeginScissorMode(i32(clip.x), i32(clip.y), i32(max(f32(0), clip.width)), i32(max(f32(0), clip.height)))
 	if focused^ && t.sel != t.caret {
 		xa := tx0 + tf_prefix_w(t, tf_lo(t)); xb := tx0 + tf_prefix_w(t, tf_hi(t))
 		rl.DrawRectangleRec({ xa, r.y + 5, xb - xa, r.height - 10 }, rl.Color{ 58, 108, 170, 150 })
@@ -2384,6 +2394,8 @@ tf_field :: proc(t: ^TField, r: rl.Rectangle, focused: ^bool, allow_unfocus: boo
 		rl.DrawRectangleRec({ tx0 + tf_prefix_w(t, t.caret), r.y + 6, 1.5, 18 }, TEXT)
 	}
 	rl.EndScissorMode()
+	// raylib não empilha scissors: restaura o recorte externo do inspetor.
+	if insp_content do rl.BeginScissorMode(i32(insp_view.x), i32(insp_view.y), i32(insp_view.width), i32(insp_view.height))
 	return changed
 }
 
@@ -2508,172 +2520,10 @@ draw_caps_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	txt("Arraste no preview para mover.", x, y, 11, MUTED)
 }
 
-// inspector do segmento selecionado — controles de áudio (volume/mudo/fade), estilo
-// NLE. Desenhado como cartão sobre o canto do preview.
-insp_tab: int = 1 // aba do inspector: 0=Vídeo 1=Áudio 2=Velocidade (Áudio é a implementada)
-
-draw_seg_inspector :: proc(area: rl.Rectangle) {
-	if selected < 0 || selected >= nsegs || !seg_ready(selected) { txt_edit = false; return }
-	sg := &segs[selected]
-	c := seg_src(selected)
-	if !c.is_text || c.is_caps do txt_edit = false // edição de texto só vale p/ título (não faixa de legendas)
-	pad: f32 = 12
-	cw: f32 = 250
-	vextra := 0 // linhas extras na aba Vídeo (fades preto aplicados + botão Remover recorte)
-	alike := c.is_audio || sg.aonly // se comporta como áudio (aba Vídeo mostra "(sem vídeo)")
-	if insp_tab == 0 && !c.is_text && !alike {
-		if segs[selected].vfin  > 0.01 do vextra += 1
-		if segs[selected].vfout > 0.01 do vextra += 1
-	}
-	crop_extra := (insp_tab == 0 && !c.is_text && !alike && seg_cropped(selected)) ? f32(30) : f32(0)
-	// aba Áudio: sem o botão "Detectar silêncio" (fica só na toolbar da timeline)
-	ch := c.is_text ? (c.is_caps ? f32(410) : f32(388)) : (insp_tab == 0 ? (f32(378) + f32(vextra)*46 + crop_extra) : (insp_tab == 2 ? f32(212) : f32(268)))
-	// o cartão NÃO pode invadir o transporte/timeline: em janela baixa os sliders
-	// caíam em cima da régua e o clique "do playhead" ainda acionava o inspector.
-	ch = min(ch, max(f32(80), area.height - 20))
-	card := rl.Rectangle{ area.x + area.width - cw - 14, area.y + 14, cw, ch }
-	g_insp_card = card // p/ o preview não roubar cliques daqui
-	rl.DrawRectangleRounded(card, 0.06, 8, rl.Color{ 28, 31, 38, 236 })
-	rl.DrawRectangleRoundedLinesEx(card, 0.06, 8, 1, LINE)
-	x := card.x + pad
-	txt(cs(c.name), x, card.y + 8, 12, MUTED)
-
-	if c.is_text { // ---- painel de TEXTO (título/legenda): conteúdo, tamanho, cor, opacidade ----
-		if c.is_caps do draw_caps_inspector(c, sg, card, x, pad, cw)
-		else do draw_text_inspector(c, sg, card, x, pad, cw)
-		return
-	}
-	// abas (estilo NLE): Vídeo | Áudio | Velocidade
-	tabs := []cstring{ "Vídeo", "Áudio", "Velocidade" }
-	ty := card.y + 28
-	tw := cw / f32(len(tabs))
-	for tab, i in tabs {
-		tr := rl.Rectangle{ card.x + f32(i)*tw, ty, tw, 24 }
-		act := i == insp_tab
-		if clicked(tr) do insp_tab = i
-		txt_c(tab, tr.x + tw/2, tr.y + 5, 13, act ? TEXT : MUTED)
-		if act do rl.DrawRectangleRec({ tr.x + 10, tr.y + 22, tw - 20, 2 }, ACCENT)
-	}
-	rl.DrawLine(i32(card.x + pad), i32(ty + 26), i32(card.x + cw - pad), i32(ty + 26), LINE)
-	y := ty + 38
-
-	vx := card.x + cw - pad - 46
-
-	if insp_tab == 0 { // ---- VÍDEO: transform (escala/posição/rotação/opacidade) ----
-		if c.is_audio || sg.aonly { txt("(clipe sem vídeo)", x, y, 13, MUTED); return }
-		if sg.scale <= 0 do sg.scale = 1
-		if sg.opacity <= 0 do sg.opacity = 1
-		txt("Escala", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(sg.scale*100+0.5)), vx, y, 13, ACCENT); y += 20
-		if ui_slider(4, { x, y, cw - 2*pad, 16 }, &sg.scale, 0.1, 3) { if abs(sg.scale-1) < 0.04 do sg.scale = 1 }
-		y += 28
-		txt("Posição X", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(sg.px*100)), vx, y, 13, ACCENT); y += 20
-		if ui_slider(5, { x, y, cw - 2*pad, 16 }, &sg.px, -1, 1) { if abs(sg.px) < 0.03 do sg.px = 0 }
-		y += 28
-		txt("Posição Y", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(sg.py*100)), vx, y, 13, ACCENT); y += 20
-		if ui_slider(6, { x, y, cw - 2*pad, 16 }, &sg.py, -1, 1) { if abs(sg.py) < 0.03 do sg.py = 0 }
-		y += 28
-		txt("Rotação", x, y, 13, TEXT); txt(rl.TextFormat("%d°", i32(sg.rot)), vx, y, 13, ACCENT); y += 20
-		if ui_slider(7, { x, y, cw - 2*pad, 16 }, &sg.rot, -180, 180) { if abs(sg.rot) < 5 do sg.rot = 0 }
-		y += 28
-		txt("Opacidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(sg.opacity*100+0.5)), vx, y, 13, ACCENT); y += 20
-		ui_slider(8, { x, y, cw - 2*pad, 16 }, &sg.opacity, 0, 1)
-		y += 26
-		// (o dissolver é ajustado direto na timeline: clique na pastilha do corte e arraste
-		// as alças — o slider daqui foi removido a pedido do usuário)
-		// fades preto (aparecem quando aplicados pelo painel Transições; arraste a 0 p/ remover)
-		fmx := max(f32(0.2), sg.dur * 0.9)
-		if sg.vfin > 0.01 {
-			txt("Fade entrada", x, y, 13, TEXT); txt(rl.TextFormat("%.1fs", f64(sg.vfin)), vx, y, 13, ACCENT); y += 20
-			if ui_slider(14, { x, y, cw - 2*pad, 16 }, &sg.vfin, 0, fmx) { if sg.vfin < 0.1 do sg.vfin = 0 }
-			y += 26
-		}
-		if sg.vfout > 0.01 {
-			txt("Fade saída", x, y, 13, TEXT); txt(rl.TextFormat("%.1fs", f64(sg.vfout)), vx, y, 13, ACCENT); y += 20
-			if ui_slider(15, { x, y, cw - 2*pad, 16 }, &sg.vfout, 0, fmx) { if sg.vfout < 0.1 do sg.vfout = 0 }
-			y += 26
-		}
-		// RECORTE espacial (crop): entra no modo de moldura no preview
-		if ui_btn({ x, y, cw - 2*pad, 26 }, seg_cropped(selected) ? "Recortar (ativo)" : "Recortar", seg_cropped(selected)) {
-			set_crop_mode(true)
-			if !seg_cropped(selected) { sg.crop_x = 0; sg.crop_y = 0; sg.crop_w = 1; sg.crop_h = 1 } // começa do quadro inteiro
-		}
-		y += 32
-		if seg_cropped(selected) {
-			if ui_btn({ x, y, cw - 2*pad, 24 }, "Remover recorte", false) {
-				sg.crop_x = 0; sg.crop_y = 0; sg.crop_w = 0; sg.crop_h = 0
-			}
-			y += 30
-		}
-		if ui_btn({ x, y, cw - 2*pad, 26 }, "Resetar transform", false) {
-			sg.scale = 1; sg.px = 0; sg.py = 0; sg.rot = 0; sg.opacity = 1
-		}
-		return
-	}
-	if insp_tab == 2 { // ---- VELOCIDADE ----
-		if c.is_img { txt("(imagem: sem velocidade)", x, y, 13, MUTED); return }
-		if sg.speed <= 0 do sg.speed = 1
-		old_speed := sg.speed
-		changed := false
-		txt("Velocidade", x, y, 13, TEXT)
-		txt(rl.TextFormat("%.2fx", f64(sg.speed)), vx - 6, y, 13, ACCENT); y += 20
-		if ui_slider(9, { x, y, cw - 2*pad, 16 }, &sg.speed, 0.25, 4) {
-			if abs(sg.speed - 1) < 0.08 do sg.speed = 1 // gruda em 1x
-			changed = true
-		}
-		y += 28
-		// presets rápidos
-		bw := (cw - 2*pad - 2*6) / 3
-		presets := [3]f32{ 0.5, 1, 2 }
-		labels  := [3]cstring{ "0.5x", "1x", "2x" }
-		for k in 0 ..< 3 {
-			br := rl.Rectangle{ x + f32(k)*(bw+6), y, bw, 26 }
-			if ui_btn(br, labels[k], abs(sg.speed - presets[k]) < 0.001) { sg.speed = presets[k]; changed = true }
-		}
-		y += 36
-		// aplica: preserva o trecho da fonte (dur*speed), recalcula a duração na
-		// timeline e desliza o resto da trilha (ripple). Sem o ripple, um corte
-		// à direita virava parede e voltar a 1x não devolvia a parte acelerada.
-		// o fade é reajustado quando o arrasto assentar (fades_settle)
-		if changed {
-			nsp := sg.speed
-			sg.speed = old_speed // o slider já gravou o valor novo; apply lê a velocidade ATUAL como a antiga
-			apply_seg_speed(selected, nsp)
-		}
-		txt("Duração", x, y, 13, TEXT); txt(timecode(sg.dur), vx - 10, y, 13, MUTED); y += 24
-		txt("Muda o tom do áudio.", x, y, 11, MUTED)
-		return
-	}
-	if !c.has_audio { // aba Áudio
-		txt("(clipe sem áudio)", x, y, 13, MUTED)
-		return
-	}
-	// volume
-	txt("Volume", x, y, 13, TEXT)
-	txt(rl.TextFormat("%d%%", i32(sg.vol * 100 + 0.5)), vx, y, 13, ACCENT); y += 20
-	if ui_slider(1, { x, y, cw - 2*pad, 16 }, &sg.vol, 0, VOL_MAX) {
-		if abs(sg.vol - 1) < 0.06 * VOL_MAX do sg.vol = 1 // gruda em 100%
-	}
-	y += 30
-	// mudo + resetar
-	if ui_btn({ x, y, 112, 26 }, sg.muted ? "Reativar som" : "Mudo", sg.muted) do sg.muted = !sg.muted
-	if ui_btn({ x + 120, y, cw - 2*pad - 120, 26 }, "Resetar", false) {
-		sg.vol = 1; sg.muted = false; sg.fade_in = 0; sg.fade_out = 0
-	}
-	y += 40
-	fmax := max(f32(0.1), min(f32(5), sg.dur * 0.5)) // fade até metade do clipe (máx 5s)
-	// fade in
-	txt("Fade in", x, y, 13, TEXT)
-	txt(rl.TextFormat("%.1fs", f64(sg.fade_in)), vx, y, 13, ACCENT); y += 20
-	ui_slider(2, { x, y, cw - 2*pad, 16 }, &sg.fade_in, 0, fmax); y += 30
-	// fade out
-	txt("Fade out", x, y, 13, TEXT)
-	txt(rl.TextFormat("%.1fs", f64(sg.fade_out)), vx, y, 13, ACCENT); y += 20
-	ui_slider(3, { x, y, cw - 2*pad, 16 }, &sg.fade_out, 0, fmax)
-}
-
-
 draw_preview :: proc(r: rl.Rectangle) {
 	pt := prof_beg(.Preview); defer prof_end(.Preview, pt)
+	// Desenha por último para alças e overlays da prévia ficarem atrás do painel.
+	defer draw_seg_inspector(g_insp_card)
 	transport_h: f32 = 66 // barra de progresso (topo) + linha de botões
 	video := rl.Rectangle{ r.x, r.y, r.width, r.height - transport_h }
 	rl.DrawRectangleRec(video, PV_BACK) // sobra do painel: cinza, NÃO entra no export
@@ -2901,8 +2751,6 @@ draw_preview :: proc(r: rl.Rectangle) {
 	}
 	} // fim do !tight (proporção)
 
-	g_insp_card = {} // repovoado por draw_seg_inspector se houver seleção
-	if !crop_mode do draw_seg_inspector(video) // no modo recorte o cartão fica oculto (tapava o Concluir)
 
 	// ALÇA do CENTRO da distorção: na aba Efeitos, com o efeito ativo, desenha um alvo
 	// arrastável (+ anel do raio) sobre o preview p/ posicionar o centro sem os sliders.
@@ -2930,7 +2778,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		rl.DrawLineEx({hx-16, hy}, {hx-4, hy}, 2, col); rl.DrawLineEx({hx+4, hy}, {hx+16, hy}, 2, col)
 		rl.DrawLineEx({hx, hy-16}, {hx, hy-4}, 2, col); rl.DrawLineEx({hx, hy+4}, {hx, hy+16}, 2, col)
 		rl.DrawCircleV({hx, hy}, 3, col)
-		if near_h && rl.CheckCollisionPointRec(m, video) && !hovered(g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
+		if near_h && rl.CheckCollisionPointRec(m, video) && !rl.CheckCollisionPointRec(m, g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
 		   rl.IsMouseButtonPressed(.LEFT) && !ctx_open && !ctx_ate {
 			st.drag = .FxCenter; drag_clip = selected
 		}
@@ -2970,7 +2818,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		rl.DrawLineEx({ccx, ccy-16}, {ccx, ccy-4}, 2, col); rl.DrawLineEx({ccx, ccy+4}, {ccx, ccy+16}, 2, col)
 		rl.DrawCircleV({ccx, ccy}, 3, col)
 		rl.EndScissorMode()
-		if near && rl.CheckCollisionPointRec(m, video) && !hovered(g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
+		if near && rl.CheckCollisionPointRec(m, video) && !rl.CheckCollisionPointRec(m, g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
 		   rl.IsMouseButtonPressed(.LEFT) && !ctx_open && !ctx_ate {
 			st.drag = .FxCtr
 		}
@@ -2992,7 +2840,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		ccy := g_frame.y + g_frame.height/2 + sg.py*g_frame.height
 		hw := g_frame.width*s/2; hh := g_frame.height*s/2
 		inside := abs(m.x-ccx) <= hw && abs(m.y-ccy) <= hh
-		if inside && rl.CheckCollisionPointRec(m, video) && !hovered(g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
+		if inside && rl.CheckCollisionPointRec(m, video) && !rl.CheckCollisionPointRec(m, g_insp_card) && st.drag == .None && ui_slider_active == -1 &&
 		   rl.IsMouseButtonPressed(.LEFT) && !ctx_open && !ctx_ate && !md_split_drag && !tl_split_drag {
 			st.drag = .PreviewMove; drag_clip = selected; prev_grab = { m.x-ccx, m.y-ccy }
 		}
