@@ -2255,19 +2255,20 @@ txt_tab :: proc(s: string, x, y, size: f32, col: rl.Color, draw := true) -> f32 
 	return cx - x
 }
 
-// botão de ícone do transporte (28x28 centrado em cx,cy): fundo no hover + dica acima.
-// Retorna a cor do ícone e se foi clicado; o ícone é desenhado pelo chamador.
+// botão de ícone do transporte (32x32 centrado em cx,cy): fundo no hover + dica acima.
+// Retorna a cor do ícone e se foi clicado; o ícone é desenhado pelo chamador. São os
+// controles principais do player: ficam CLAROS em repouso (não apagados como os da barra).
 transport_btn :: proc(cx, cy: f32, tip: cstring) -> (rl.Color, bool) {
-	r := rl.Rectangle{ cx - 14, cy - 14, 28, 28 }
+	r := rl.Rectangle{ cx - 16, cy - 16, 32, 32 }
 	hot := hovered(r)
 	if hot {
 		rl.DrawRectangleRounded(r, 0.3, 6, HOVER)
 		tw := txt_w(tip, FS_SM) + 14
-		tr := rl.Rectangle{ cx - tw/2, cy - 44, tw, 22 }
+		tr := rl.Rectangle{ cx - tw/2, cy - 48, tw, 22 }
 		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
 		txt_c(tip, cx, tr.y + 4, FS_SM, TEXT)
 	}
-	return hot ? TEXT : MUTED, clicked(r)
+	return hot ? rl.WHITE : TEXT, clicked(r)
 }
 
 // fundo dos ícones do cluster direito do transporte (mesmo padrão do transport_btn)
@@ -2683,44 +2684,35 @@ draw_preview :: proc(r: rl.Rectangle) {
 	rclust := tb.x + tb.width - 96 - (tight ? 0 : 144)
 	cl := tb.x + 16 + tcw + 12
 	cy := tb.y + 42 // linha de botões abaixo da barra de progresso
-	cx := clamp((cl + rclust) / 2, cl + 92, max(cl + 92, rclust - 104))
+	cx := clamp((cl + rclust) / 2, cl + 102, max(cl + 102, rclust - 104))
 
 	// passo de 1 quadro: mesmo fps das setas do teclado (clipe sob o playhead / clipe da prévia de origem)
 	fstep := f32(1) / DEC_FPS
 	if src_preview >= 0 && src_preview < nclips do fstep = 1 / cfps_of(&clips[src_preview])
 	else if vs := view_seg(); vs >= 0 do fstep = 1 / cfps_of(seg_src(vs))
-	{ c, hit := transport_btn(cx - 78, cy, "Início (Home)")
-		draw_tri2({cx - 78 - 1, cy}, {cx - 78 + 6, cy - 6}, {cx - 78 + 6, cy + 6}, c)
-		draw_tri2({cx - 78 - 7, cy}, {cx - 78, cy - 6}, {cx - 78, cy + 6}, c)
-		rl.DrawRectangleRec({cx - 78 - 9, cy - 6, 2, 12}, c)
+	{ c, hit := transport_btn(cx - 84, cy, "Início (Home)")
+		draw_icon(.SkipBack, cx - 84, cy, 24, c)
 		if hit do transport_seek(0)
 	}
-	{ c, hit := transport_btn(cx - 44, cy, "Voltar 1 quadro")
-		draw_tri2({cx - 44 - 5, cy}, {cx - 44 + 3, cy - 6}, {cx - 44 + 3, cy + 6}, c)
-		rl.DrawRectangleRec({cx - 44 + 4, cy - 6, 2, 12}, c)
+	{ c, hit := transport_btn(cx - 48, cy, "Voltar 1 quadro")
+		draw_icon(.StepBack, cx - 48, cy, 24, c)
 		if hit do transport_seek(pos - fstep)
 	}
-	{ c, hit := transport_btn(cx + 44, cy, "Avançar 1 quadro")
-		rl.DrawRectangleRec({cx + 44 - 6, cy - 6, 2, 12}, c)
-		draw_tri2({cx + 44 - 3, cy - 6}, {cx + 44 - 3, cy + 6}, {cx + 44 + 5, cy}, c)
+	{ c, hit := transport_btn(cx + 48, cy, "Avançar 1 quadro")
+		draw_icon(.StepForward, cx + 48, cy, 24, c)
 		if hit do transport_seek(pos + fstep)
 	}
-	{ c, hit := transport_btn(cx + 78, cy, "Fim (End)")
-		draw_tri2({cx + 78 - 6, cy - 6}, {cx + 78 - 6, cy + 6}, {cx + 78 + 1, cy}, c)
-		draw_tri2({cx + 78, cy - 6}, {cx + 78, cy + 6}, {cx + 78 + 7, cy}, c)
-		rl.DrawRectangleRec({cx + 78 + 7, cy - 6, 2, 12}, c)
+	{ c, hit := transport_btn(cx + 84, cy, "Fim (End)")
+		draw_icon(.SkipForward, cx + 84, cy, 24, c)
 		if hit do transport_seek(total)
 	}
 
-	pr := rl.Rectangle{ cx - 16, cy - 16, 32, 32 }
-	rl.DrawCircleV({cx, cy}, 16, hovered(pr) ? ACCENT : ACCENT_D)
+	pr := rl.Rectangle{ cx - 19, cy - 19, 38, 38 }
+	rl.DrawCircleV({cx, cy}, 19, hovered(pr) ? ACCENT : ACCENT_D)
 	if clicked(pr) do toggle_play()
-	if st.playing {
-		rl.DrawRectangleRec({cx - 6, cy - 7, 4, 14}, rl.WHITE)
-		rl.DrawRectangleRec({cx + 2, cy - 7, 4, 14}, rl.WHITE)
-	} else {
-		draw_tri2({cx - 5, cy - 8}, {cx - 5, cy + 8}, {cx + 8, cy}, rl.WHITE)
-	}
+	// play compensa 1px p/ a direita: o centro ótico do triângulo fica à esquerda do geométrico
+	if st.playing do draw_icon(.Pause, cx, cy, 22, rl.WHITE)
+	else do draw_icon(.Play, cx + 1, cy, 22, rl.WHITE)
 
 	// timecode à esquerda: posição atual (e a duração total quando há espaço)
 	tx := tb.x + 16 + txt_tab(tc_pos, tb.x + 16, cy - 8, FS_LG, TEXT)

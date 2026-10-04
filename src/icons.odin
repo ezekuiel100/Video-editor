@@ -13,6 +13,7 @@ import "core:math"
 Icon :: enum {
 	Undo, Redo, Trash, Scissors, Crop, Silence, Captions, CloseGap, Magnet,
 	Volume, VolumeMute, Camera, Fullscreen, ExitFullscreen,
+	Play, Pause, SkipBack, SkipForward, StepBack, StepForward,
 }
 
 // caneta: origem do quadro 24×24 na tela, escala e espessura do traço
@@ -47,6 +48,14 @@ arc :: proc(p: Pen, cx, cy, r, a0, a1: f32) {
 circle :: proc(p: Pen, cx, cy, r: f32) {
 	rr := r * p.k
 	rl.DrawRing(pt(p, cx, cy), rr - p.w/2, rr + p.w/2, 0, 360, 36, p.col)
+}
+
+// triângulo CHEIO com cantos arredondados (preenche e contorna com o mesmo traço):
+// os controles de reprodução leem melhor sólidos, sem sair da grade/traço do conjunto
+@(private="file")
+tri :: proc(p: Pen, x0, y0, x1, y1, x2, y2: f32) {
+	draw_tri2(pt(p, x0, y0), pt(p, x1, y1), pt(p, x2, y2), p.col)
+	line(p, x0, y0, x1, y1, x2, y2, x0, y0)
 }
 
 // cor do ícone pelo estado do botão (mesmo critério em toda a interface)
@@ -130,6 +139,26 @@ draw_icon :: proc(kind: Icon, cx, cy, size: f32, col: rl.Color) {
 		line(p, 16, 3, 21, 3, 21, 8)
 		line(p, 3, 16, 3, 21, 8, 21)
 		line(p, 21, 16, 21, 21, 16, 21)
+	case .Play:
+		tri(p, 7, 4.5, 19.5, 12, 7, 19.5)
+	case .Pause: // duas barras grossas
+		b := p; b.w = 4.5 * k
+		line(b, 8, 6, 8, 18)
+		line(b, 16, 6, 16, 18)
+	case .SkipBack: // |◀◀ (início)
+		line(p, 4, 6, 4, 18)
+		tri(p, 12.5, 6.5, 7, 12, 12.5, 17.5)
+		tri(p, 20, 6.5, 14.5, 12, 20, 17.5)
+	case .SkipForward: // ▶▶| (fim)
+		line(p, 20, 6, 20, 18)
+		tri(p, 11.5, 6.5, 17, 12, 11.5, 17.5)
+		tri(p, 4, 6.5, 9.5, 12, 4, 17.5)
+	case .StepBack: // ◀| (1 quadro p/ trás)
+		tri(p, 15, 6.5, 8, 12, 15, 17.5)
+		line(p, 18.5, 6, 18.5, 18)
+	case .StepForward: // |▶ (1 quadro p/ frente)
+		line(p, 5.5, 6, 5.5, 18)
+		tri(p, 9, 6.5, 16, 12, 9, 17.5)
 	case .ExitFullscreen: // cantos virados p/ dentro
 		line(p, 3, 8, 8, 8, 8, 3)
 		line(p, 16, 3, 16, 8, 21, 8)
