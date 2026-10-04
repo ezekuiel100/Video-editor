@@ -239,13 +239,13 @@ draw_sil_wave :: proc(r: rl.Rectangle, si: int, thresh: f32, hits: []Silence, nh
 		u1 := clamp((hits[k].t1 - sg.start) / sg.dur, 0, 1)
 		if u1 <= u0 do continue
 		xr := rl.Rectangle{ r.x + u0 * r.width, r.y + 1, max(f32(1), (u1 - u0) * r.width), r.height - 2 }
-		rl.DrawRectangleRec(xr, rl.Color{ 220, 170, 50, 60 })
+		rl.DrawRectangleRec(xr, alpha(WARN, 60))
 	}
 	STEP :: f32(2)
 	base := r.y + r.height - 2
 	amp := r.height - 4
-	wcol := rl.Color{ 95, 180, 150, 235 }
-	pcol := rl.Color{ 95, 180, 150, 90 }
+	wcol := alpha(WAVE, 235)
+	pcol := alpha(WAVE, 90)
 	spd := seg_speed(si)
 	for wx := r.x; wx < r.x + r.width; wx += STEP {
 		u0 := (wx - r.x) / r.width
@@ -254,7 +254,7 @@ draw_sil_wave :: proc(r: rl.Rectangle, si: int, thresh: f32, hits: []Silence, nh
 		tb := sg.in_off + u1 * sg.dur * spd
 		p := wave_peak(c, ta, tb)
 		if p < 0 {
-			rl.DrawRectangleRec({ wx, base - 2, STEP, 2 }, rl.Color{ 70, 100, 92, 130 })
+			rl.DrawRectangleRec({ wx, base - 2, STEP, 2 }, alpha(WAVE_BASE, 130))
 		} else {
 			hp := max(f32(1), clamp(p, 0, 1) * amp)
 			rl.DrawRectangleRec({ wx, base - hp, STEP, hp }, pcol)
@@ -266,7 +266,7 @@ draw_sil_wave :: proc(r: rl.Rectangle, si: int, thresh: f32, hits: []Silence, nh
 	}
 	// limiar na MESMA escala visual do corpo RMS (ganho de exibição)
 	thy := base - clamp(thresh * WAVE_RMS_GAIN, 0, 1) * amp
-	rl.DrawLineEx({ r.x + 1, thy }, { r.x + r.width - 1, thy }, 1.6, rl.Color{ 236, 72, 60, 220 })
+	rl.DrawLineEx({ r.x + 1, thy }, { r.x + r.width - 1, thy }, 1.6, alpha(PLAYHEAD, 220))
 	// marca do tempo atual do preview (fonte → posição no segmento)
 	if c.dur > 0 {
 		src_t := sil_play && sil_done && sil_nk > 0 ? sil_src_at(sil_play_t) : sil_wave_t
@@ -280,7 +280,7 @@ draw_sil_wave :: proc(r: rl.Rectangle, si: int, thresh: f32, hits: []Silence, nh
 		sil_wave_t = sg.in_off + u * sg.dur * spd
 		sil_play = false
 	}
-	if !overlay do txt("limiar", r.x + 6, r.y + 3, 10, rl.Color{ 236, 100, 90, 200 })
+	if !overlay do txt("limiar", r.x + 6, r.y + 3, FS_XS, rl.Color{ 236, 100, 90, 200 })
 }
 
 // onda de um intervalo da FONTE (pedaço do resultado empacotado)
@@ -289,15 +289,15 @@ draw_wave_src :: proc(r: rl.Rectangle, c: ^Clip, src0, src1: f32) {
 	STEP :: f32(2)
 	base := r.y + r.height - 1
 	amp := max(f32(2), r.height - 2)
-	wcol := rl.Color{ 95, 180, 150, 235 }
-	pcol := rl.Color{ 95, 180, 150, 80 }
+	wcol := alpha(WAVE, 235)
+	pcol := alpha(WAVE, 80)
 	span := src1 - src0
 	for wx := r.x; wx < r.x + r.width; wx += STEP {
 		u0 := (wx - r.x) / r.width
 		u1 := (wx + STEP - r.x) / r.width
 		p := wave_peak(c, src0 + u0 * span, src0 + u1 * span)
 		if p < 0 {
-			rl.DrawRectangleRec({ wx, base - 2, STEP, 2 }, rl.Color{ 70, 100, 92, 120 })
+			rl.DrawRectangleRec({ wx, base - 2, STEP, 2 }, alpha(WAVE_BASE, 120))
 		} else {
 			hp := max(f32(1), clamp(p, 0, 1) * amp)
 			rl.DrawRectangleRec({ wx, base - hp, STEP, hp }, pcol)
@@ -386,13 +386,13 @@ draw_silence_modal :: proc(sw, sh: f32) {
 		if sil_keep_total <= 0 || sil_play_t >= sil_keep_total { sil_play_t = 0; sil_play = false }
 	}
 
-	rl.DrawRectangleRec({0, 0, sw, sh}, rl.Color{0, 0, 0, 150})
+	rl.DrawRectangleRec({0, 0, sw, sh}, SCRIM)
 	cw: f32 = 680; ch: f32 = 460
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
-	rl.DrawRectangleRounded(card, 0.03, 8, rl.Color{ 30, 33, 40, 255 })
+	rl.DrawRectangleRounded(card, 0.03, 8, SURFACE)
 	rl.DrawRectangleRoundedLinesEx(card, 0.03, 8, 1, LINE)
-	txt("Detecção de silêncio", cx + 20, cy + 14, 16, TEXT)
+	txt("Detecção de silêncio", cx + 20, cy + 14, FS_LG, TEXT)
 	xr := rl.Rectangle{ cx + cw - 36, cy + 12, 22, 22 }
 	if clicked(xr) do sil_close()
 	rl.DrawLineEx({xr.x+5, xr.y+5}, {xr.x+15, xr.y+15}, 1.8, hovered(xr) ? TEXT : MUTED)
@@ -401,22 +401,22 @@ draw_silence_modal :: proc(sw, sh: f32) {
 	// esquerda: sliders
 	x := cx + 20; y := cy + 48; w := f32(230)
 	old_pct, old_min, old_pad := sil_pct, sil_min, sil_pad
-	txt("Limite de volume", x, y, 12, TEXT)
-	txt(rl.TextFormat("%.0f %% da fala", f64(sil_pct)), x + w - 48, y, 12, ACCENT); y += 18
+	txt("Limite de volume", x, y, FS_SM, TEXT)
+	txt(rl.TextFormat("%.0f %% da fala", f64(sil_pct)), x + w - 48, y, FS_SM, ACCENT); y += 18
 	ui_slider(50, { x, y, w, 14 }, &sil_pct, 5, 80); y += 30
-	txt("Duração mínima", x, y, 12, TEXT)
-	txt(rl.TextFormat("%.2f s", f64(sil_min)), x + w - 4, y, 12, ACCENT); y += 18
+	txt("Duração mínima", x, y, FS_SM, TEXT)
+	txt(rl.TextFormat("%.2f s", f64(sil_min)), x + w - 4, y, FS_SM, ACCENT); y += 18
 	ui_slider(51, { x, y, w, 14 }, &sil_min, 0.10, 2.00); y += 30
-	txt("Buffer de suavização", x, y, 12, TEXT)
-	txt(rl.TextFormat("%.2f s", f64(sil_pad)), x + w - 4, y, 12, ACCENT); y += 18
+	txt("Buffer de suavização", x, y, FS_SM, TEXT)
+	txt(rl.TextFormat("%.2f s", f64(sil_pad)), x + w - 4, y, FS_SM, ACCENT); y += 18
 	ui_slider(52, { x, y, w, 14 }, &sil_pad, 0, 0.40); y += 28
 	if sil_pct != old_pct || sil_min != old_min || sil_pad != old_pad do sil_dirty = sil_done
 	if ui_btn({ x, y, 120, 28 }, "Começar", true) do sil_run()
 	y += 36
-	if sil_dirty do txt("Começar de novo p/ atualizar.", x, y, 11, rl.Color{ 220, 180, 90, 255 })
-	else if !sil_done do txt("Começar mostra o corte, sem aplicar.", x, y, 11, MUTED)
-	else if sil_n == 0 do txt("Nenhum silêncio nesse limiar.", x, y, 11, MUTED)
-	else do txt(rl.TextFormat("%d vão(s)  ·  −%.1f s", i32(sil_n), f64(sg.dur - sil_keep_total)), x, y, 12, ACCENT)
+	if sil_dirty do txt("Começar de novo p/ atualizar.", x, y, FS_XS, WARN)
+	else if !sil_done do txt("Começar mostra o corte, sem aplicar.", x, y, FS_XS, MUTED)
+	else if sil_n == 0 do txt("Nenhum silêncio nesse limiar.", x, y, FS_XS, MUTED)
+	else do txt(rl.TextFormat("%d vão(s)  ·  −%.1f s", i32(sil_n), f64(sg.dur - sil_keep_total)), x, y, FS_SM, ACCENT)
 
 	// direita: só o quadro (a onda vai na faixa de resultado, como na timeline)
 	live: [SIL_MAX]Silence
@@ -426,7 +426,7 @@ draw_silence_modal :: proc(sw, sh: f32) {
 		rem: f32 = 0
 		for k in 0 ..< live_n do rem += live[k].t1 - live[k].t0
 		txt(rl.TextFormat("âmbar = silêncio  ·  %d vão(s)  ·  −%.1f s", i32(live_n), f64(rem)),
-			x, y, 11, ACCENT)
+			x, y, FS_XS, ACCENT)
 	}
 
 	pv := rl.Rectangle{ cx + 268, cy + 48, cw - 288, 168 }
@@ -455,14 +455,14 @@ draw_silence_modal :: proc(sw, sh: f32) {
 
 	// resultado = clipe da timeline: filmstrip + onda no rodapé (limiar e âmbar na onda)
 	lane := rl.Rectangle{ cx + 20, cy + 236, cw - 40, 148 }
-	txt("Resultado (ainda não na timeline)", lane.x, lane.y - 16, 11, MUTED)
+	txt("Resultado (ainda não na timeline)", lane.x, lane.y - 16, FS_XS, MUTED)
 	rl.DrawRectangleRec(lane, rl.Color{ 36, 42, 78, 255 })
 	if !sil_done {
 		// antes de Começar: onda do original + limiar, para acertar o corte
 		draw_sil_wave({ lane.x + 4, lane.y + 4, lane.width - 8, lane.height - 8 },
 			sil_si, live_thr, live[:], live_n)
 	} else if sil_nk == 0 {
-		txt_c("Tudo silêncio — nada restaria.", lane.x + lane.width/2, lane.y + 64, 12, MUTED)
+		txt_c("Tudo silêncio — nada restaria.", lane.x + lane.width/2, lane.y + 64, FS_SM, MUTED)
 	} else {
 		gap: f32 = 3
 		total_w := lane.width - gap * f32(sil_nk + 1)
@@ -485,11 +485,11 @@ draw_silence_modal :: proc(sw, sh: f32) {
 						{ kr.x + 2, kr.y + 3, tw, th }, {0, 0}, 0, rl.WHITE)
 				}
 				wr := rl.Rectangle{ kr.x + 2, kr.y + th + 4, kr.width - 4, kr.height - th - 6 }
-				rl.DrawRectangleRec(wr, rl.Color{ 24, 46, 40, 220 })
+				rl.DrawRectangleRec(wr, alpha(WAVE_BG, 220))
 				draw_wave_src(wr, c, sil_keep[k].src0, sil_keep[k].src1)
 			} else {
 				wr := rl.Rectangle{ kr.x + 2, kr.y + 4, kr.width - 4, kr.height - 8 }
-				rl.DrawRectangleRec(wr, rl.Color{ 24, 46, 40, 220 })
+				rl.DrawRectangleRec(wr, alpha(WAVE_BG, 220))
 				draw_wave_src(wr, c, sil_keep[k].src0, sil_keep[k].src1)
 			}
 			if clicked(kr) { sil_play_t = acc; sil_play = false; sil_wave_t = sil_keep[k].src0 }
@@ -517,11 +517,11 @@ draw_silence_modal :: proc(sw, sh: f32) {
 	ar := rl.Rectangle{ cx + cw - 230, cy + ch - 48, 210, 32 }
 	if can_apply {
 		rl.DrawRectangleRounded(ar, 0.4, 8, hovered(ar) ? ACCENT : ACCENT_D)
-		txt_c("Aplicar na timeline", ar.x + ar.width/2, ar.y + 8, 13, rl.WHITE)
+		txt_c("Aplicar na timeline", ar.x + ar.width/2, ar.y + 8, FS_MD, rl.WHITE)
 		if clicked(ar) do silence_apply_selection()
 	} else {
-		rl.DrawRectangleRounded(ar, 0.4, 8, rl.Color{ 50, 54, 62, 255 })
-		txt_c("Aplicar na timeline", ar.x + ar.width/2, ar.y + 8, 13, MUTED)
+		rl.DrawRectangleRounded(ar, 0.4, 8, TRACK_BG)
+		txt_c("Aplicar na timeline", ar.x + ar.width/2, ar.y + 8, FS_MD, MUTED)
 	}
 }
 

@@ -79,14 +79,18 @@ tl_fit :: proc(view_w: f32) {
 }
 cs :: proc(s: string) -> cstring { return fmt.ctprintf("%s", s) } // string -> cstring (temp)
 
-// trunca `s` com "..." para caber em `max_w` pixels (fonte não tem o glifo "…")
+// trunca `s` com "…" para caber em `max_w` pixels. Recua por RUNA, não por byte: cortar
+// no meio de um caractere multibyte ("ã", "ç") desenhava glifo-lixo antes das reticências.
 elide :: proc(s: string, size, max_w: f32) -> cstring {
 	if txt_w(cs(s), size) <= max_w do return cs(s)
-	for n := len(s) - 1; n > 0; n -= 1 {
-		cand := fmt.ctprintf("%s...", s[:n])
+	n := len(s)
+	for n > 0 {
+		_, w := utf8.decode_last_rune_in_string(s[:n])
+		n -= w
+		cand := fmt.ctprintf("%s…", strings.trim_right_space(s[:n]))
 		if txt_w(cand, size) <= max_w do return cand
 	}
-	return "..."
+	return "…"
 }
 
 base_name :: proc(path: string) -> string {
@@ -124,8 +128,7 @@ load_sdf_font :: proc(path: cstring, cp: []rune, sz: i32) -> (rl.Font, bool) {
 // thread: estágio de CPU das fontes de texto (ver comentário em tf_cpu). Preenche os slots
 // em ordem compacta (fonte que falha é pulada) e marca ready um a um — a main sobe conforme.
 text_fonts_worker :: proc() {
-	cp: [FONT_CP_N]rune
-	for i in 0 ..< len(cp) do cp[i] = rune(32 + i)
+	cp := font_codepoints()
 	NAMES := []cstring{ "Arial", "Arial Black", "Impact", "Times New Roman", "Georgia", "Verdana", "Comic Sans", "Consolas", "Trebuchet" }
 	PATHS := []cstring{
 		"C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/ariblk.ttf", "C:/Windows/Fonts/impact.ttf", "C:/Windows/Fonts/times.ttf",
@@ -312,13 +315,13 @@ open_projset_modal :: proc() {
 // modal estilo NLE: chips de proporção (preenchem L×A) + campos de resolução + razão
 // irredutível ao lado. OK grava proj_w/proj_h (usados no export e derivam proj_ar do preview).
 draw_projset_modal :: proc(sw, sh: f32) {
-	rl.DrawRectangleRec({0,0,sw,sh}, rl.Color{0,0,0,150}) // backdrop
+	rl.DrawRectangleRec({0,0,sw,sh}, SCRIM) // backdrop
 	cw: f32 = 560; ch: f32 = 316
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
-	rl.DrawRectangleRounded(card, 0.04, 8, rl.Color{ 32, 35, 42, 255 })
+	rl.DrawRectangleRounded(card, 0.04, 8, SURFACE)
 	rl.DrawRectangleRoundedLinesEx(card, 0.04, 8, 1, LINE)
-	txt("Configurações do Projeto", cx + 24, cy + 18, 18, TEXT)
+	txt("Configurações do Projeto", cx + 24, cy + 18, FS_XL, TEXT)
 	xr := rl.Rectangle{ cx + cw - 38, cy + 16, 24, 24 }
 	if clicked(xr) do modal = .None
 	rl.DrawLineEx({xr.x+6,xr.y+6},{xr.x+16,xr.y+16}, 1.8, hovered(xr) ? TEXT : MUTED)
@@ -331,7 +334,7 @@ draw_projset_modal :: proc(sw, sh: f32) {
 	cur_ar := (cwv > 0 && chv > 0) ? f32(cwv)/f32(chv) : proj_ar
 
 	// --- Proporção da Tela: chips de preset (preenchem L×A, lado menor = 1080) ---
-	txt("Proporção da Tela:", lx, cy + 66, 14, TEXT)
+	txt("Proporção da Tela:", lx, cy + 66, FS_MD, TEXT)
 	chx := lx + 158; chy := cy + 62
 	for p, i in AR_PRESETS {
 		bw := f32(54)
@@ -354,19 +357,19 @@ draw_projset_modal :: proc(sw, sh: f32) {
 
 	// --- Resolução: L × A + razão irredutível ---
 	ry := cy + 156
-	txt("Resolução:", lx, ry + 5, 14, TEXT)
+	txt("Resolução:", lx, ry + 5, FS_MD, TEXT)
 	wr := rl.Rectangle{ lx + 158, ry, 84, 28 }
 	hr := rl.Rectangle{ wr.x + wr.width + 24, ry, 84, 28 }
 	rl.DrawRectangleRounded(wr, 0.2, 4, PANEL2); rl.DrawRectangleRoundedLinesEx(wr, 0.2, 4, 1, ps_wf ? ACCENT : LINE)
 	rl.DrawRectangleRounded(hr, 0.2, 4, PANEL2); rl.DrawRectangleRoundedLinesEx(hr, 0.2, 4, 1, ps_hf ? ACCENT : LINE)
 	tf_field(&tf_pw, wr, &ps_wf, true)
 	tf_field(&tf_ph, hr, &ps_hf, true)
-	txt("×", wr.x + wr.width + 8, ry + 5, 16, MUTED)
-	if cwv > 0 && chv > 0 do txt(rl.TextFormat("Proporção %s", ratio_label(cwv, chv)), hr.x + hr.width + 16, ry + 6, 13, MUTED)
+	txt("×", wr.x + wr.width + 8, ry + 5, FS_LG, MUTED)
+	if cwv > 0 && chv > 0 do txt(rl.TextFormat("Proporção %s", ratio_label(cwv, chv)), hr.x + hr.width + 16, ry + 6, FS_MD, MUTED)
 
 	// --- Taxa de Frames (fixa neste editor) ---
-	txt("Taxa de Frames:", lx, ry + 50, 14, TEXT)
-	txt("30 fps  (fixo)", lx + 158, ry + 50, 14, MUTED)
+	txt("Taxa de Frames:", lx, ry + 50, FS_MD, TEXT)
+	txt("30 fps  (fixo)", lx + 158, ry + 50, FS_MD, MUTED)
 
 	// OK / Cancelar
 	if ui_btn({ cx + cw - 234, cy + ch - 52, 100, 36 }, "Cancelar", false) do modal = .None
@@ -381,7 +384,7 @@ draw_projset_modal :: proc(sw, sh: f32) {
 }
 
 // linha "Rótulo: valor" do painel de infos do modal de exportar.
-mrow :: proc(x, y: f32, k, v: cstring) { txt(k, x, y, 13, MUTED); txt(v, x + 150, y, 13, TEXT) }
+mrow :: proc(x, y: f32, k, v: cstring) { txt(k, x, y, FS_MD, MUTED); txt(v, x + 150, y, FS_MD, TEXT) }
 
 // tamanho ESTIMADO do arquivo (MB) p/ o modal. Aproximação (CRF = bitrate variável, por isso
 // exibido com "~"): bitrate nominal por qualidade, escalado pela resolução; HEVC/VP9 ~40%
@@ -414,23 +417,23 @@ draw_modal :: proc(sw, sh: f32) {
 	if modal == .Silence { draw_silence_modal(sw, sh); return }
 	if modal == .STT { draw_stt_modal(sw, sh); return }
 	if modal == .Caps { draw_caps_modal(sw, sh); return }
-	rl.DrawRectangleRec({0,0,sw,sh}, rl.Color{0,0,0,150}) // backdrop escuro
+	rl.DrawRectangleRec({0,0,sw,sh}, SCRIM) // backdrop escuro
 	cw: f32 = modal == .Export ? 700 : 540
 	ch: f32 = modal == .Done ? 210 : (modal == .Confirm ? 190 : (modal == .Shot ? 250 : (modal == .Export ? 430 : 430)))
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
-	rl.DrawRectangleRounded(card, 0.04, 8, rl.Color{ 32, 35, 42, 255 })
+	rl.DrawRectangleRounded(card, 0.04, 8, SURFACE)
 	rl.DrawRectangleRoundedLinesEx(card, 0.04, 8, 1, LINE)
 	title: cstring = modal == .Export ? "Exportar" : (modal == .Shot ? "Salvar screenshot" : (modal == .Confirm ? "Salvar alterações?" : "Exportação concluída"))
-	txt(title, cx + 24, cy + 18, 18, TEXT)
+	txt(title, cx + 24, cy + 18, FS_XL, TEXT)
 	xr := rl.Rectangle{ cx + cw - 38, cy + 16, 24, 24 }
 	if clicked(xr) { modal = .None; pending_action = .None } // fechar no X = cancelar a ação pendente
 	rl.DrawLineEx({xr.x+6,xr.y+6},{xr.x+16,xr.y+16}, 1.8, hovered(xr) ? TEXT : MUTED)
 	rl.DrawLineEx({xr.x+16,xr.y+6},{xr.x+6,xr.y+16}, 1.8, hovered(xr) ? TEXT : MUTED)
 
 	if modal == .Confirm {
-		txt("Há alterações não salvas na timeline.", cx + 24, cy + 62, 14, TEXT)
-		txt("O que deseja fazer?", cx + 24, cy + 86, 14, MUTED)
+		txt("Há alterações não salvas na timeline.", cx + 24, cy + 62, FS_MD, TEXT)
+		txt("O que deseja fazer?", cx + 24, cy + 86, FS_MD, MUTED)
 		if ui_btn({ cx + 24, cy + ch - 52, 150, 36 }, "Salvar", true) {
 			modal = .None
 			if save_now() do do_pending() // grava AGORA (já tem caminho, ou pede o nome)
@@ -442,9 +445,9 @@ draw_modal :: proc(sw, sh: f32) {
 	}
 
 	if modal == .Done {
-		txt("Arquivo salvo em:", cx + 24, cy + 64, 14, MUTED)
+		txt("Arquivo salvo em:", cx + 24, cy + 64, FS_MD, MUTED)
 		dd := done_path; if len(dd) > 60 do dd = fmt.tprintf("...%s", dd[len(dd)-57:])
-		txt(cs(dd), cx + 24, cy + 88, 13, TEXT)
+		txt(cs(dd), cx + 24, cy + 88, FS_MD, TEXT)
 		if ui_btn({ cx + 24, cy + ch - 52, 170, 36 }, "Reproduzir prévia", true) {
 			preview_pending = import_media(done_path, false); modal = .None
 		}
@@ -463,11 +466,11 @@ draw_modal :: proc(sw, sh: f32) {
 		for f in ExportFmt {
 			rr := rl.Rectangle{ sbx, sby + f32(fi)*rowh, sbw, rowh - 6 }
 			sel := export_fmt == f
-			if sel        do rl.DrawRectangleRounded(rr, 0.18, 4, rl.Color{ 44, 48, 58, 255 })
+			if sel        do rl.DrawRectangleRounded(rr, 0.18, 4, CONTROL)
 			else if hovered(rr) do rl.DrawRectangleRounded(rr, 0.18, 4, PANEL)
 			if sel do rl.DrawRectangleRec({ rr.x, rr.y + 6, 3, rr.height - 12 }, ACCENT)
-			txt(FMT_LABELS[f], rr.x + 14, rr.y + 6, 15, TEXT)
-			txt(FMT_DESC[f],   rr.x + 14, rr.y + 26, 10, MUTED)
+			txt(FMT_LABELS[f], rr.x + 14, rr.y + 6, FS_LG, TEXT)
+			txt(FMT_DESC[f],   rr.x + 14, rr.y + 26, FS_XS, MUTED)
 			if clicked(rr) do export_fmt = f
 			fi += 1
 		}
@@ -475,20 +478,20 @@ draw_modal :: proc(sw, sh: f32) {
 
 		// painel à direita
 		px := sbx + sbw + 32; pw := cx + cw - 24 - px; py := cy + 58
-		txt("Exportar para arquivo e salvar no computador", px, py, 12, MUTED); py += 28
+		txt("Exportar para arquivo e salvar no computador", px, py, FS_SM, MUTED); py += 28
 		// Nome
-		txt("Nome:", px, py + 6, 14, TEXT)
+		txt("Nome:", px, py + 6, FS_MD, TEXT)
 		nf := rl.Rectangle{ px + 84, py, pw - 84, 28 }
 		rl.DrawRectangleRounded(nf, 0.2, 4, PANEL2)
 		tf_field(&tf_name, nf, &name_focus, false)
 		rl.DrawRectangleRoundedLinesEx(nf, 0.2, 4, 1, ACCENT)
 		py += 40
 		// Salvar em
-		txt("Salvar em:", px, py + 6, 14, TEXT)
+		txt("Salvar em:", px, py + 6, FS_MD, TEXT)
 		df := rl.Rectangle{ px + 84, py, pw - 84 - 36, 28 }
 		rl.DrawRectangleRounded(df, 0.2, 4, PANEL2)
 		dds := save_dir; if len(dds) > 40 do dds = fmt.tprintf("...%s", dds[len(dds)-37:])
-		txt(cs(dds), df.x + 8, df.y + 6, 12, MUTED)
+		txt(cs(dds), df.x + 8, df.y + 6, FS_SM, MUTED)
 		if ui_btn({ df.x + df.width + 6, py, 30, 28 }, "...", false) {
 			if p, ok := save_dialog(name_str()); ok {
 				if d := dir_of(p); d != "" { if save_dir != "" do delete(save_dir); save_dir = strings.clone(d) }
@@ -499,7 +502,7 @@ draw_modal :: proc(sw, sh: f32) {
 		}
 		py += 42
 		// Predefinição (qualidade)
-		txt("Qualidade:", px, py + 3, 14, TEXT)
+		txt("Qualidade:", px, py + 3, FS_MD, TEXT)
 		QLABELS := [ExportQual]cstring{ .High = "Alta", .Medium = "Média", .Low = "Baixa", .Auto = "Auto" }
 		qx := px + 84
 		for q in ExportQual {
@@ -508,7 +511,7 @@ draw_modal :: proc(sw, sh: f32) {
 		}
 		py += 36
 		// modo de renderização
-		txt("Renderizar:", px, py + 3, 14, TEXT)
+		txt("Renderizar:", px, py + 3, FS_MD, TEXT)
 		if ui_btn({ px + 84, py - 2, 106, 26 }, "Vídeo único", !export_individual) do export_individual = false
 		if ui_btn({ px + 196, py - 2, 132, 26 }, "Separados", export_individual) do export_individual = true
 		py += 36
@@ -537,14 +540,14 @@ draw_modal :: proc(sw, sh: f32) {
 				if clicked(chk) do export_gpu = !export_gpu
 				rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, export_gpu ? ACCENT : MUTED)
 				if export_gpu do rl.DrawRectangleRec({ chk.x + 4, chk.y + 4, 10, 10 }, ACCENT)
-				txt("GPU (NVENC) — bem mais rápido", px + 26, py + 2, 13, TEXT)
+				txt("GPU (NVENC) — bem mais rápido", px + 26, py + 2, FS_MD, TEXT)
 			} else {
 				rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, MUTED)
-				txt("GPU (NVENC) indisponível — usa CPU", px + 26, py + 2, 13, MUTED)
+				txt("GPU (NVENC) indisponível — usa CPU", px + 26, py + 2, FS_MD, MUTED)
 			}
 			py += 26
 		} else if export_fmt == .WEBM {
-			txt("VP9 codifica por CPU — export mais lento.", px, py + 2, 12, MUTED)
+			txt("VP9 codifica por CPU — export mais lento.", px, py + 2, FS_SM, MUTED)
 			py += 26
 		}
 		// botões
@@ -567,17 +570,17 @@ draw_modal :: proc(sw, sh: f32) {
 
 	// campo de NOME (cursor + seleção; foco automático enquanto o modal está aberto)
 	lx := cx + 24; fy := cy + 62
-	txt("Nome:", lx, fy + 6, 14, TEXT)
+	txt("Nome:", lx, fy + 6, FS_MD, TEXT)
 	nf := rl.Rectangle{ lx + 90, fy, cw - 90 - 48, 28 }
 	rl.DrawRectangleRounded(nf, 0.2, 4, PANEL2)
 	tf_field(&tf_name, nf, &name_focus, false) // allow_unfocus=false: o nome segue focado no modal
 	rl.DrawRectangleRoundedLinesEx(nf, 0.2, 4, 1, ACCENT)
 	fy += 42
-	txt("Salvar em:", lx, fy + 6, 14, TEXT)
+	txt("Salvar em:", lx, fy + 6, FS_MD, TEXT)
 	df := rl.Rectangle{ lx + 90, fy, cw - 90 - 48 - 36, 28 }
 	rl.DrawRectangleRounded(df, 0.2, 4, PANEL2)
 	dd := save_dir; if len(dd) > 44 do dd = fmt.tprintf("...%s", dd[len(dd)-41:])
-	txt(cs(dd), df.x + 8, df.y + 6, 13, MUTED)
+	txt(cs(dd), df.x + 8, df.y + 6, FS_MD, MUTED)
 	if ui_btn({ df.x + df.width + 6, fy, 30, 28 }, "...", false) { // procurar pasta (diálogo salvar)
 		if p, ok := save_dialog(name_str()); ok {
 			if d := dir_of(p); d != "" { if save_dir != "" do delete(save_dir); save_dir = strings.clone(d) }
@@ -588,7 +591,7 @@ draw_modal :: proc(sw, sh: f32) {
 	}
 	fy += 46
 	// modal SCREENSHOT (o Export tem seu próprio bloco acima e retorna antes daqui)
-	txt("Formato:", lx, fy + 2, 14, MUTED)
+	txt("Formato:", lx, fy + 2, FS_MD, MUTED)
 	if ui_btn({ lx + 90, fy - 3, 60, 26 }, "PNG", shot_ext == 0) do shot_ext = 0
 	if ui_btn({ lx + 156, fy - 3, 60, 26 }, "JPG", shot_ext == 1) do shot_ext = 1
 	if ui_btn({ cx + cw - 234, cy + ch - 52, 100, 36 }, "Cancelar", false) do modal = .None
@@ -657,10 +660,10 @@ prof_hud :: proc() {
 	rl.DrawRectangleLinesEx({ x - 6, y - 6, 268, 330 }, 1, rl.Color{ 70, 80, 100, 255 })
 	line :: proc(x, y: f32, label: cstring, ms: f64, warn: bool, indent := false) {
 		c := warn ? rl.Color{ 250, 170, 90, 255 } : rl.Color{ 210, 218, 230, 255 }
-		txt(label, x + (indent ? 12 : 0), y, 13, indent ? rl.Color{ 150, 165, 185, 255 } : c)
-		txt(rl.TextFormat("%.2f ms", ms), x + 150, y, 13, c)
+		txt(label, x + (indent ? 12 : 0), y, FS_MD, indent ? rl.Color{ 150, 165, 185, 255 } : c)
+		txt(rl.TextFormat("%.2f ms", ms), x + 150, y, FS_MD, c)
 	}
-	txt(rl.TextFormat("PROFILER  F3   %d fps", rl.GetFPS()), x, y, 13, rl.Color{ 120, 200, 250, 255 }); y += 20
+	txt(rl.TextFormat("PROFILER  F3   %d fps", rl.GetFPS()), x, y, FS_MD, rl.Color{ 120, 200, 250, 255 }); y += 20
 	line(x, y, "update",    prof_avg[.Update],   prof_avg[.Update] > 8);  y += 17
 	line(x, y, "video",     prof_avg[.Video],    prof_avg[.Video]  > 6, true); y += 17
 	line(x, y, "audio",     prof_avg[.Audio],    prof_avg[.Audio]  > 3, true); y += 17
@@ -670,12 +673,12 @@ prof_hud :: proc() {
 	line(x, y, "wave",      prof_avg[.Tl_Wave],  prof_avg[.Tl_Wave] > 4, true); y += 17
 	line(x, y, "thumbs",    prof_avg[.Tl_Thumb], prof_avg[.Tl_Thumb] > 4, true); y += 17
 	line(x, y, "TOTAL",     total,               total > 16.6);          y += 20
-	txt(rl.TextFormat("%d video sob playhead (%d streaming)  hw-off:%d", nvid, nstream, nhwoff), x, y, 12,
+	txt(rl.TextFormat("%d video sob playhead (%d streaming)  hw-off:%d", nvid, nstream, nhwoff), x, y, FS_SM,
 		nhwoff > 0 ? rl.Color{ 250, 170, 90, 255 } : rl.Color{ 150, 165, 185, 255 }); y += 16
 	// latência do decode assíncrono de scrub (thread própria — NÃO entra no total da main)
 	if scrub_last_ms > 0 {
 		shw := false; if vs := view_seg(); vs >= 0 do shw = seg_src(vs).scrub_hw
-		txt(rl.TextFormat("scrub: %.0f ms/frame (%s) (ult. decode)", scrub_last_ms, shw ? cstring("HW") : cstring("SW")), x, y, 12,
+		txt(rl.TextFormat("scrub: %.0f ms/frame (%s) (ult. decode)", scrub_last_ms, shw ? cstring("HW") : cstring("SW")), x, y, FS_SM,
 			shw ? rl.Color{ 130, 210, 140, 255 } : rl.Color{ 150, 165, 185, 255 })
 	}
 	y += 16
@@ -689,25 +692,25 @@ prof_hud :: proc() {
 		txt(rl.TextFormat("live:%s%s  rsp:%s  no_hw:%s  eof=%.0f",
 			c.live_on ? cstring("S") : cstring("N"), c.live_on ? (c.live_hw ? cstring("(hw)") : cstring("(sw)")) : cstring(""),
 			rsp ? rl.TextFormat("%.1fs", rt) : cstring("nao"),
-			c.no_hw ? cstring("SIM") : cstring("nao"), c.eof_at), x, y, 12,
+			c.no_hw ? cstring("SIM") : cstring("nao"), c.eof_at), x, y, FS_SM,
 			(rsp && rt > 2) ? rl.Color{ 250, 170, 90, 255 } : gray); y += 16
 		thumbing := abs(lt - c.tex_t) > SCRUB_SHARP_S
 		txt(rl.TextFormat("gap=%.2fs  tex_dt=%.2fs  MINIATURA:%s",
 			lt - live_now(c), lt - c.tex_t,
-			thumbing ? cstring("SIM") : cstring("nao")), x, y, 12,
+			thumbing ? cstring("SIM") : cstring("nao")), x, y, FS_SM,
 			thumbing ? rl.Color{ 250, 170, 90, 255 } : gray); y += 15
 		// números CRUS: qual está insano — o playhead, o tempo-fonte, ou o decoder?
-		txt(rl.TextFormat("ph=%.1f lt=%.1f  lbase=%.1f lframe=%d", st.playhead, lt, c.live_base, c.live_frame), x, y, 12, gray); y += 15
-		txt(rl.TextFormat("tex_t=%.1f  gmtp=%.1f base=%.1f", c.tex_t, rl.GetMusicTimePlayed(c.music), c.music_base), x, y, 12, gray); y += 15
+		txt(rl.TextFormat("ph=%.1f lt=%.1f  lbase=%.1f lframe=%d", st.playhead, lt, c.live_base, c.live_frame), x, y, FS_SM, gray); y += 15
+		txt(rl.TextFormat("tex_t=%.1f  gmtp=%.1f base=%.1f", c.tex_t, rl.GetMusicTimePlayed(c.music), c.music_base), x, y, FS_SM, gray); y += 15
 		// último respawn: alvo pedido vs playhead no instante — quem manda o decoder longe?
 		bad := abs(dbg_rsp_t - dbg_rsp_ph) > 3.0
-		txt(rl.TextFormat("respawn #%d -> t=%.1f (ph era %.1f)", dbg_rsp_n, dbg_rsp_t, dbg_rsp_ph), x, y, 12,
+		txt(rl.TextFormat("respawn #%d -> t=%.1f (ph era %.1f)", dbg_rsp_n, dbg_rsp_t, dbg_rsp_ph), x, y, FS_SM,
 			bad ? rl.Color{ 250, 120, 120, 255 } : gray); y += 3
 		// SALTO do playhead capturado (bug "cursor pula sozinho"): quem mandou o pulo
 		if dbg_jmp_n > 0 {
-			txt(rl.TextFormat("SALTO #%d: %.1f -> %.1fs (+%.1fs)", dbg_jmp_n, dbg_jmp_from, dbg_jmp_to, dbg_jmp_to - dbg_jmp_from), x, y, 12, rl.Color{ 250, 120, 120, 255 }); y += 15
-			txt(rl.TextFormat("  gmtp=%.1f base=%.1f len=%.1f", dbg_jmp_gmtp, dbg_jmp_base, dbg_jmp_len), x, y, 12, rl.Color{ 250, 170, 90, 255 }); y += 15
-			txt(rl.TextFormat("  loc0=%.1f acq=%s pend=%s", dbg_jmp_loc0, dbg_jmp_acq ? cstring("S") : cstring("N"), dbg_jmp_pend ? cstring("S") : cstring("N")), x, y, 12, rl.Color{ 250, 170, 90, 255 })
+			txt(rl.TextFormat("SALTO #%d: %.1f -> %.1fs (+%.1fs)", dbg_jmp_n, dbg_jmp_from, dbg_jmp_to, dbg_jmp_to - dbg_jmp_from), x, y, FS_SM, rl.Color{ 250, 120, 120, 255 }); y += 15
+			txt(rl.TextFormat("  gmtp=%.1f base=%.1f len=%.1f", dbg_jmp_gmtp, dbg_jmp_base, dbg_jmp_len), x, y, FS_SM, rl.Color{ 250, 170, 90, 255 }); y += 15
+			txt(rl.TextFormat("  loc0=%.1f acq=%s pend=%s", dbg_jmp_loc0, dbg_jmp_acq ? cstring("S") : cstring("N"), dbg_jmp_pend ? cstring("S") : cstring("N")), x, y, FS_SM, rl.Color{ 250, 170, 90, 255 })
 		}
 	}
 }
@@ -798,12 +801,12 @@ draw :: proc() {
 	split_hot := tl_split_drag || (hovered({ 0, tl_top - 6, sw, 9 }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !md_split_drag && modal == .None)
 	if split_hot {
 		rl.SetMouseCursor(.RESIZE_NS)
-		rl.DrawRectangleRec({ 0, tl_top - 1, sw, 2 }, rl.Color{ ACCENT.r, ACCENT.g, ACCENT.b, tl_split_drag ? 235 : 130 })
+		rl.DrawRectangleRec({ 0, tl_top - 1, sw, 2 }, alpha(ACCENT, tl_split_drag ? 235 : 130))
 	}
 	// pegador SEMPRE visível no centro (pílula + 3 pontinhos): mostra ONDE agarrar mesmo sem hover
 	gp := rl.Rectangle{ sw/2 - 26, tl_top - 4, 52, 8 }
-	rl.DrawRectangleRounded(gp, 1, 4, split_hot ? ACCENT : rl.Color{ 74, 80, 92, 255 })
-	dc := split_hot ? rl.Color{ 18, 22, 28, 255 } : rl.Color{ 165, 172, 184, 255 }
+	rl.DrawRectangleRounded(gp, 1, 4, split_hot ? ACCENT : GRIP)
+	dc := split_hot ? INK : MUTED
 	for i in 0 ..< 3 {
 		rl.DrawCircleV({ gp.x + gp.width/2 + f32(i - 1) * 9, gp.y + gp.height/2 }, 1.6, dc)
 	}
@@ -811,11 +814,11 @@ draw :: proc() {
 	md_hot := md_split_drag || (hovered({ media_w - 5, content_top, 8, tl_top - content_top }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !tl_split_drag && modal == .None)
 	if md_hot {
 		rl.SetMouseCursor(.RESIZE_EW)
-		rl.DrawRectangleRec({ media_w - 1, content_top, 2, tl_top - content_top }, rl.Color{ ACCENT.r, ACCENT.g, ACCENT.b, md_split_drag ? 235 : 130 })
+		rl.DrawRectangleRec({ media_w - 1, content_top, 2, tl_top - content_top }, alpha(ACCENT, md_split_drag ? 235 : 130))
 	}
 	mgp := rl.Rectangle{ media_w - 4, (content_top + tl_top)/2 - 26, 8, 52 }
-	rl.DrawRectangleRounded(mgp, 1, 4, md_hot ? ACCENT : rl.Color{ 74, 80, 92, 255 })
-	mdc := md_hot ? rl.Color{ 18, 22, 28, 255 } : rl.Color{ 165, 172, 184, 255 }
+	rl.DrawRectangleRounded(mgp, 1, 4, md_hot ? ACCENT : GRIP)
+	mdc := md_hot ? INK : MUTED
 	for i in 0 ..< 3 {
 		rl.DrawCircleV({ mgp.x + mgp.width/2, mgp.y + mgp.height/2 + f32(i - 1) * 9 }, 1.6, mdc)
 	}
@@ -831,14 +834,14 @@ draw :: proc() {
 				gh := min(bin_drop_zone.height - 8, th(bin_drop_tr) - 8)
 				fy := bin_drop_zone.y + (bin_drop_zone.height - gh)/2
 				fr := rl.Rectangle{ tl_x(bin_drop_start), fy, bin_drop_dur*pps(), gh }
-				rl.DrawRectangleRec(fr, rl.Color{ 90, 200, 120, 60 })
-				rl.DrawRectangleLinesEx(fr, 1.6, rl.Color{ 90, 200, 120, 235 })
-				txt(cs(c.name), fr.x + 6, fr.y + 4, 11, rl.WHITE)
+				rl.DrawRectangleRec(fr, alpha(SUCCESS, 60))
+				rl.DrawRectangleLinesEx(fr, 1.6, alpha(SUCCESS, 235))
+				txt(cs(c.name), fr.x + 6, fr.y + 4, FS_XS, rl.WHITE)
 			} else {
 				ok := !track_locked[bin_drop_tr] // trilha travada = não pode receber (vermelho)
 				fr := rl.Rectangle{ tl_x(bin_drop_start), track_y(bin_drop_tr) + 4, bin_drop_dur*pps(), th(bin_drop_tr) - 8 }
-				rl.DrawRectangleRec(fr, ok ? rl.Color{ 90, 200, 120, 60 } : rl.Color{ 200, 70, 70, 55 })
-				rl.DrawRectangleLinesEx(fr, 1.6, ok ? rl.Color{ 90, 200, 120, 235 } : rl.Color{ 200, 70, 70, 235 })
+				rl.DrawRectangleRec(fr, ok ? alpha(SUCCESS, 60) : alpha(DANGER, 55))
+				rl.DrawRectangleLinesEx(fr, 1.6, ok ? alpha(SUCCESS, 235) : alpha(DANGER, 235))
 			}
 		}
 		gr := rl.Rectangle{ m.x - 60, m.y - 20, 120, 40 }
@@ -847,11 +850,11 @@ draw :: proc() {
 		if nm > 1 { // badge com a quantidade sobre a pilha
 			br := rl.Rectangle{ gr.x + gr.width - 14, gr.y - 8, 26, 20 }
 			rl.DrawRectangleRounded(br, 0.5, 6, ACCENT)
-			txt_c(rl.TextFormat("%d", nm), br.x + br.width/2, br.y + 3, 12, rl.WHITE)
+			txt_c(rl.TextFormat("%d", nm), br.x + br.width/2, br.y + 3, FS_SM, rl.WHITE)
 		}
 		over := rl.CheckCollisionPointRec(m, g_vlane) // sobre uma trilha existente
 		lbl := over ? (nm > 1 ? rl.TextFormat("soltar %d aqui", nm) : cstring("soltar aqui")) : (nm > 1 ? rl.TextFormat("%d mídias", nm) : cs(c.name))
-		txt_c(lbl, gr.x + 60, gr.y + 44, 11, over ? ACCENT : MUTED)
+		txt_c(lbl, gr.x + 60, gr.y + 44, FS_XS, over ? ACCENT : MUTED)
 	}
 
 	// fantasma da TRANSIÇÃO sendo arrastada + guia no corte alvo
@@ -866,35 +869,35 @@ draw :: proc() {
 				if trans_panel_is_cut(trans_drag) && tl_t(m.x) > sg.start + sg.dur/2 do edge = sg.start + sg.dur
 				if trans_drag == 2 do edge = sg.start + sg.dur // fade saída
 				ex := tl_x(edge)
-				rl.DrawLineEx({ ex, g_vlane.y }, { ex, g_vlane.y + g_vlane.height }, 2.5, rl.Color{ 245, 200, 90, 235 })
+				rl.DrawLineEx({ ex, g_vlane.y }, { ex, g_vlane.y + g_vlane.height }, 2.5, alpha(WARN, 235))
 			}
 		}
 		name := trans_panel_name(trans_drag)
-		nw := max(f32(112), txt_w(name, 12) + 24)
+		nw := max(f32(112), txt_w(name, FS_SM) + 24)
 		gr := rl.Rectangle{ m.x - nw/2, m.y - 16, nw, 30 }
-		rl.DrawRectangleRounded(gr, 0.3, 6, rl.Color{ 40, 44, 54, 230 })
+		rl.DrawRectangleRounded(gr, 0.3, 6, alpha(CONTROL, 230))
 		rl.DrawRectangleRoundedLinesEx(gr, 0.3, 6, 1, over ? ACCENT : LINE)
-		txt_c(name, gr.x + nw/2, gr.y + 7, 12, over ? ACCENT : TEXT)
+		txt_c(name, gr.x + nw/2, gr.y + 7, FS_SM, over ? ACCENT : TEXT)
 	}
 
 	if save_flash_t > 0 {
 		label: cstring = save_flash_ok ? "Salvo" : "Salvando..."
-		w := txt_w(label, 16) + 40
+		w := txt_w(label, FS_LG) + 40
 		r := rl.Rectangle{ sw/2 - w/2, sh/2 - 28, w, 48 }
 		fade := save_flash_ok ? clamp(save_flash_t / 0.45, 0, 1) : 1 // Salvo some no fim; Salvando fica opaco
 		a := u8(fade * 235)
-		rl.DrawRectangleRounded(r, 0.25, 8, rl.Color{ 28, 32, 40, a })
-		rl.DrawRectangleRoundedLinesEx(r, 0.25, 8, 2, rl.Color{ ACCENT.r, ACCENT.g, ACCENT.b, a })
-		txt_c(label, sw/2, r.y + 14, 16, rl.Color{ 235, 238, 242, a })
+		rl.DrawRectangleRounded(r, 0.25, 8, alpha(SURFACE, a))
+		rl.DrawRectangleRoundedLinesEx(r, 0.25, 8, 2, alpha(ACCENT, a))
+		txt_c(label, sw/2, r.y + 14, FS_LG, alpha(TEXT, a))
 	}
 
 	if toast_t > 0 && save_flash_t <= 0 {
-		w := txt_w(toast_msg, 14) + 28
+		w := txt_w(toast_msg, FS_MD) + 28
 		r := rl.Rectangle{ sw/2 - w/2, 46, w, 30 }
 		a := u8(clamp(toast_t / 3 * 255, 0, 230))
-		rl.DrawRectangleRounded(r, 0.4, 8, rl.Color{ 40, 44, 54, a })
-		rl.DrawRectangleRoundedLinesEx(r, 0.4, 8, 1, rl.Color{ ACCENT.r, ACCENT.g, ACCENT.b, a })
-		txt_c(toast_msg, sw/2, 53, 14, rl.Color{ 235, 238, 242, a })
+		rl.DrawRectangleRounded(r, 0.4, 8, alpha(CONTROL, a))
+		rl.DrawRectangleRoundedLinesEx(r, 0.4, 8, 1, alpha(ACCENT, a))
+		txt_c(toast_msg, sw/2, 53, FS_MD, alpha(TEXT, a))
 	}
 
 	// overlay de progresso da exportação (centralizado) — com prévia ao vivo
@@ -912,29 +915,29 @@ draw :: proc() {
 		pw: f32 = 384; ph: f32 = 216 // prévia 16:9 (mesmo enquadramento com letterbox)
 		bw: f32 = pw + 48; bh: f32 = ph + 158
 		bx := sw/2 - bw/2; by := sh/2 - bh/2
-		rl.DrawRectangleRec({ 0, 0, sw, sh }, rl.Color{ 0, 0, 0, 120 }) // escurece o fundo
-		rl.DrawRectangleRounded({ bx, by, bw, bh }, 0.06, 8, rl.Color{ 30, 33, 40, 255 })
+		rl.DrawRectangleRec({ 0, 0, sw, sh }, alpha(SCRIM, 120)) // escurece o fundo
+		rl.DrawRectangleRounded({ bx, by, bw, bh }, 0.06, 8, SURFACE)
 		rl.DrawRectangleRoundedLinesEx({ bx, by, bw, bh }, 0.06, 8, 1, LINE)
-		txt(export_paused ? "Exportação pausada" : "Exportando vídeo...", bx + 24, by + 16, 15, export_paused ? rl.Color{ 235, 200, 90, 255 } : TEXT)
-		txt(rl.TextFormat("%d%%", i32(export_pct*100)), bx + bw - 60, by + 16, 15, ACCENT)
+		txt(export_paused ? "Exportação pausada" : "Exportando vídeo...", bx + 24, by + 16, FS_LG, export_paused ? WARN : TEXT)
+		txt(rl.TextFormat("%d%%", i32(export_pct*100)), bx + bw - 60, by + 16, FS_LG, ACCENT)
 		// prévia
 		pr := rl.Rectangle{ bx + 24, by + 42, pw, ph }
 		rl.DrawRectangleRec(pr, rl.BLACK)
 		if export_prev_tex_ok && intrinsics.atomic_load(&export_prev_seq) > 0 {
 			rl.DrawTexturePro(export_prev_tex, { 0, 0, f32(PREV_W), f32(PREV_H) }, pr, { 0, 0 }, 0, rl.WHITE)
 		} else {
-			txt_c("preparando…", pr.x + pr.width/2, pr.y + pr.height/2 - 8, 13, MUTED)
+			txt_c("preparando…", pr.x + pr.width/2, pr.y + pr.height/2 - 8, FS_MD, MUTED)
 		}
 		if export_paused { // véu + ícone de pause sobre a prévia congelada
-			rl.DrawRectangleRec(pr, rl.Color{ 0, 0, 0, 90 })
+			rl.DrawRectangleRec(pr, alpha(SCRIM, 90))
 			bxr := pr.x + pr.width/2; byr := pr.y + pr.height/2
-			rl.DrawRectangleRec({ bxr - 13, byr - 15, 8, 30 }, rl.Color{ 235, 238, 242, 230 })
-			rl.DrawRectangleRec({ bxr + 5,  byr - 15, 8, 30 }, rl.Color{ 235, 238, 242, 230 })
+			rl.DrawRectangleRec({ bxr - 13, byr - 15, 8, 30 }, alpha(TEXT, 230))
+			rl.DrawRectangleRec({ bxr + 5,  byr - 15, 8, 30 }, alpha(TEXT, 230))
 		}
 		rl.DrawRectangleLinesEx(pr, 1, LINE)
 		// barra de progresso
 		track := rl.Rectangle{ bx + 24, pr.y + ph + 16, bw - 48, 10 }
-		rl.DrawRectangleRounded(track, 1, 6, rl.Color{ 50, 54, 64, 255 })
+		rl.DrawRectangleRounded(track, 1, 6, TRACK_BG)
 		rl.DrawRectangleRounded({ track.x, track.y, track.width * clamp(export_pct, 0, 1), track.height }, 1, 6, ACCENT)
 		// botões: Pausar/Retomar + Cancelar (clique tratado no update; aqui só desenha)
 		bw2 := (bw - 48 - 12) / 2
@@ -942,7 +945,7 @@ draw :: proc() {
 		g_exp_pause_btn  = { bx + 24, byb, bw2, 34 }
 		g_exp_cancel_btn = { bx + 24 + bw2 + 12, byb, bw2, 34 }
 		draw_overlay_btn(g_exp_pause_btn, export_paused ? "Retomar" : "Pausar", ACCENT)
-		draw_overlay_btn(g_exp_cancel_btn, "Cancelar", rl.Color{ 210, 80, 72, 255 })
+		draw_overlay_btn(g_exp_cancel_btn, "Cancelar", DANGER)
 	}
 
 	draw_file_menu()   // dropdown do menu Arquivo (por cima da toolbar)
@@ -952,12 +955,12 @@ draw :: proc() {
 	if st.drag == .FxLib && fxlib_drag >= 0 {
 		m := rl.GetMousePosition()
 		nm := fxlib_name(fxlib_drag)
-		wpx := txt_w(nm, 13) + 24
+		wpx := txt_w(nm, FS_MD) + 24
 		box := rl.Rectangle{ m.x - wpx/2, m.y - 13, wpx, 26 } // CENTRADO no cursor (fica "em cima")
-		rl.DrawRectangleRounded(box, 0.4, 6, rl.Color{ 40, 44, 56, 240 })
+		rl.DrawRectangleRounded(box, 0.4, 6, alpha(CONTROL, 240))
 		rl.DrawRectangleRoundedLinesEx(box, 0.4, 6, 1.5, ACCENT)
 		rl.DrawCircleV({ box.x + 12, box.y + 13 }, 4, ACCENT) // "grão" do efeito
-		txt(nm, box.x + 22, box.y + 6, 13, TEXT)
+		txt(nm, box.x + 22, box.y + 6, FS_MD, TEXT)
 	}
 }
 
@@ -1103,15 +1106,15 @@ draw_ctx_menu :: proc() {
 	items: [14]CtxItem
 	n := ctx_items(&items)
 	r := ctx_rect(n)
-	rl.DrawRectangleRounded(r, 0.08, 6, rl.Color{ 30, 33, 40, 250 })
+	rl.DrawRectangleRounded(r, 0.08, 6, POPUP)
 	rl.DrawRectangleRoundedLinesEx(r, 0.08, 6, 1, LINE)
 	m := rl.GetMousePosition()
 	for k in 0 ..< n {
 		ir := rl.Rectangle{ r.x + 3, r.y + 4 + f32(k)*CTX_IH, r.width - 6, CTX_IH }
 		if items[k].on && rl.CheckCollisionPointRec(m, ir) do rl.DrawRectangleRounded(ir, 0.2, 4, HOVER)
 		col := items[k].on ? TEXT : MUTED
-		if items[k].id == 6 && items[k].on do col = rl.Color{ 225, 110, 100, 255 } // Excluir em vermelho
-		txt(items[k].label, ir.x + 12, ir.y + 7, 14, col)
+		if items[k].id == 6 && items[k].on do col = DANGER // Excluir em vermelho
+		txt(items[k].label, ir.x + 12, ir.y + 7, FS_MD, col)
 	}
 }
 
@@ -1123,12 +1126,12 @@ draw_file_menu :: proc() {
 	items := []cstring{ "Novo projeto", "Abrir projeto  (Ctrl+O)", "Salvar  (Ctrl+S)", "Salvar como  (Ctrl+Shift+S)" }
 	iw: f32 = 268; ih: f32 = 32
 	mr := rl.Rectangle{ g_file_menu_x, 34, iw, f32(len(items))*ih + 6 }
-	rl.DrawRectangleRounded(mr, 0.06, 6, rl.Color{ 30, 33, 40, 250 })
+	rl.DrawRectangleRounded(mr, 0.06, 6, POPUP)
 	rl.DrawRectangleRoundedLinesEx(mr, 0.06, 6, 1, LINE)
 	for it, ii in items {
 		ir := rl.Rectangle{ mr.x + 3, mr.y + 3 + f32(ii)*ih, iw - 6, ih }
 		if hovered(ir) do rl.DrawRectangleRounded(ir, 0.2, 4, HOVER)
-		txt(it, ir.x + 12, ir.y + 8, 14, TEXT)
+		txt(it, ir.x + 12, ir.y + 8, FS_MD, TEXT)
 		if clicked(ir) {
 			file_menu_open = false
 			switch ii {
@@ -1150,15 +1153,15 @@ draw_topbar :: proc(sw, h: f32) {
 	rl.DrawRectangleRec({0, 0, sw, h}, TOPBAR)
 	rl.DrawRectangle(0, i32(h) - 1, i32(sw), 1, LINE)
 	rl.DrawRectangleRounded({10, h/2 - 8, 16, 16}, 0.3, 6, ACCENT)
-	txt("Editor de Vídeo", 34, h/2 - 9, 15, TEXT)
+	txt("Editor de Vídeo", 34, h/2 - 9, FS_LG, TEXT)
 
 	menus := []cstring{ "Arquivo", "Editar", "Ferramentas", "Visualização", "Exportar", "Ajuda" }
 	x: f32 = 150
 	for mnu, mi in menus {
-		w := txt_w(mnu, 14) + 22
+		w := txt_w(mnu, FS_MD) + 22
 		r := rl.Rectangle{ x, 0, w, h }
 		if hovered(r) do rl.DrawRectangleRec(r, HOVER)
-		txt(mnu, x + 11, h/2 - 8, 14, (mi == 0 && file_menu_open) ? TEXT : MUTED)
+		txt(mnu, x + 11, h/2 - 8, FS_MD, (mi == 0 && file_menu_open) ? TEXT : MUTED)
 		if clicked(r) {
 			if mi == 0 { file_menu_open = !file_menu_open; g_file_menu_x = x }      // Arquivo
 			else if mi == 4 { open_export_modal(); file_menu_open = false }          // Exportar
@@ -1168,7 +1171,7 @@ draw_topbar :: proc(sw, h: f32) {
 	}
 	// nome do arquivo no centro da barra (com * se houver edição não salva)
 	pname := proj_path != "" ? file_name(proj_path) : "Sem título"
-	txt_c(rl.TextFormat(dirty ? "%s  •" : "%s", cs(pname)), sw/2, h/2 - 8, 14, MUTED)
+	txt_c(rl.TextFormat(dirty ? "%s  •" : "%s", cs(pname)), sw/2, h/2 - 8, FS_MD, MUTED)
 
 	bw: f32 = 34
 
@@ -1218,7 +1221,7 @@ draw_topbar :: proc(sw, h: f32) {
 	if clicked(cl) do request_close() // pergunta se quer salvar antes de sair
 	if hovered(mn) do rl.DrawRectangleRec(mn, HOVER)
 	if hovered(mx) do rl.DrawRectangleRec(mx, HOVER)
-	if hovered(cl) do rl.DrawRectangleRec(cl, rl.Color{200, 60, 55, 255})
+	if hovered(cl) do rl.DrawRectangleRec(cl, DANGER)
 	rl.DrawLineEx({mn.x + 12, h/2 + 4}, {mn.x + 22, h/2 + 4}, 1.4, MUTED)
 	if rl.IsWindowMaximized() { // ícone de "restaurar": dois quadros sobrepostos
 		rl.DrawRectangleLinesEx({mx.x + 11, h/2 - 3, 9, 9}, 1.4, MUTED)
@@ -1274,15 +1277,15 @@ draw_toolbar :: proc(sw, y, h: f32) {
 	}
 	x: f32 = 6
 	for tab, i in tabs {
-		w := txt_w(tab, 13) + 26
+		w := txt_w(tab, FS_MD) + 26
 		r := rl.Rectangle{ x, y, w, h }
 		active := i == st.active_tab
-		if active do rl.DrawRectangleRounded({ x + 4, y + 5, w - 8, h - 10 }, 0.18, 4, rl.Color{ 31, 50, 54, 255 })
+		if active do rl.DrawRectangleRounded({ x + 4, y + 5, w - 8, h - 10 }, 0.18, 4, ACCENT_BG)
 		else if hovered(r) do rl.DrawRectangleRec(r, HOVER)
 		if clicked(r) do st.active_tab = i
 		icol := active ? ACCENT : MUTED
 		draw_tab_icon(x + w/2, y + 20, i, icol)
-		txt_c(tab, x + w/2, y + 34, 13, active ? TEXT : MUTED)
+		txt_c(tab, x + w/2, y + 34, FS_MD, active ? TEXT : MUTED)
 		if active do rl.DrawRectangleRec({ x + 8, y + h - 3, w - 16, 3 }, ACCENT)
 		x += w
 	}
@@ -1291,9 +1294,9 @@ draw_toolbar :: proc(sw, y, h: f32) {
 	exporting := intrinsics.atomic_load(&export_run)
 	rl.DrawRectangleRounded(er, 0.5, 8, exporting ? PANEL2 : (hovered(er) ? ACCENT : ACCENT_D))
 	if exporting {
-		txt_c(rl.TextFormat("%d%%", i32(export_pct*100)), er.x + er.width/2, er.y + 7, 14, ACCENT)
+		txt_c(rl.TextFormat("%d%%", i32(export_pct*100)), er.x + er.width/2, er.y + 7, FS_MD, ACCENT)
 	} else {
-		txt_c("Exportar", er.x + er.width/2, er.y + 7, 14, rl.WHITE)
+		txt_c("Exportar", er.x + er.width/2, er.y + 7, FS_MD, rl.WHITE)
 		if clicked(er) do open_export_modal()
 	}
 }
@@ -1303,10 +1306,10 @@ draw_subbar :: proc(y, media_w, h: f32) {
 	rl.DrawRectangleRec({0, y, media_w, h}, PANEL)
 	rl.DrawRectangle(0, i32(y + h) - 1, i32(media_w), 1, LINE)
 	pill :: proc(label: cstring, x, y, h: f32) -> f32 {
-		w := txt_w(label, 13) + 40
+		w := txt_w(label, FS_MD) + 40
 		r := rl.Rectangle{ x, y + 5, w, h - 10 }
 		rl.DrawRectangleRounded(r, 0.35, 6, hovered(r) ? HOVER : PANEL2)
-		txt(label, x + 12, y + h/2 - 8, 13, TEXT)
+		txt(label, x + 12, y + h/2 - 8, FS_MD, TEXT)
 		cx := x + w - 16
 		rl.DrawTriangle({cx, y + h/2 - 2}, {cx + 8, y + h/2 - 2}, {cx + 4, y + h/2 + 3}, MUTED)
 		return w
@@ -1316,9 +1319,9 @@ draw_subbar :: proc(y, media_w, h: f32) {
 	if clicked({ x, y + 5, imp_w, h - 10 }) do want_import = true
 	x += imp_w + 8
 	// botão "Texto" (＋): adiciona um título/legenda na timeline
-	tb := rl.Rectangle{ x, y + 5, txt_w("+ Texto", 13) + 24, h - 10 }
+	tb := rl.Rectangle{ x, y + 5, txt_w("+ Texto", FS_MD) + 24, h - 10 }
 	rl.DrawRectangleRounded(tb, 0.35, 6, hovered(tb) ? HOVER : PANEL2)
-	txt("+ Texto", x + 12, y + h/2 - 8, 13, TEXT)
+	txt("+ Texto", x + 12, y + h/2 - 8, FS_MD, TEXT)
 	if clicked(tb) do add_text()
 	x += tb.width + 8
 	// --- busca de mídia (filtra o bin pelo nome; campo editável com cursor/seleção) ---
@@ -1330,7 +1333,7 @@ draw_subbar :: proc(y, media_w, h: f32) {
 	rl.DrawLineEx({sr.x + 18, sr.y + sr.height/2 + 3}, {sr.x + 22, sr.y + sr.height/2 + 7}, 1.5, MUTED)
 	// campo (depois da lupa; deixa espaço p/ o X de limpar à direita)
 	fld := rl.Rectangle{ sr.x + 22, sr.y, sr.width - 22 - 24, sr.height }
-	if tf_search.len == 0 && !search_focus do txt("Pesquisar mídia", fld.x + 4, sr.y + sr.height/2 - 8, 13, MUTED)
+	if tf_search.len == 0 && !search_focus do txt("Pesquisar mídia", fld.x + 4, sr.y + sr.height/2 - 8, FS_MD, MUTED)
 	tf_field(&tf_search, fld, &search_focus, true)
 	// X p/ limpar (só quando há texto)
 	if tf_search.len > 0 {
@@ -1714,9 +1717,9 @@ draw_fx_icon :: proc(box: rl.Rectangle, kind: int) {
 // estiver selecionado (duplo-clique na faixa), mostra as CONFIGURAÇÕES dele no lugar.
 draw_effects_panel :: proc(r: rl.Rectangle) {
 	if fx_sel >= 0 && fx_sel < nfx { draw_fx_settings(r); return }
-	txt("Efeitos", r.x + 14, r.y + 12, 15, TEXT)
-	txt("Arraste um efeito para a faixa de efeitos (topo da timeline).", r.x + 14, r.y + 36, 11, MUTED)
-	txt("Duplo-clique no clipe de efeito p/ ajustar.", r.x + 14, r.y + 52, 11, MUTED)
+	txt("Efeitos", r.x + 14, r.y + 12, FS_LG, TEXT)
+	txt("Arraste um efeito para a faixa de efeitos (topo da timeline).", r.x + 14, r.y + 36, FS_XS, MUTED)
+	txt("Duplo-clique no clipe de efeito p/ ajustar.", r.x + 14, r.y + 52, FS_XS, MUTED)
 
 	tw: f32 = 104; th: f32 = 66; gap: f32 = 12; lblh: f32 = 22
 	cols := max(1, int((r.width - gap) / (tw + gap)))
@@ -1738,7 +1741,7 @@ draw_effects_panel :: proc(r: rl.Rectangle) {
 		hot := hovered(box)
 		draw_fx_icon(box, it.kind)
 		rl.DrawRectangleRoundedLinesEx(box, 0.1, 6, hot ? 2 : 1, hot ? ACCENT : LINE)
-		txt_c(it.name, box.x + box.width/2, box.y + box.height + 4, 12, TEXT)
+		txt_c(it.name, box.x + box.width/2, box.y + box.height + 4, FS_SM, TEXT)
 		if rl.IsMouseButtonPressed(.LEFT) && hovered(box) && modal == .None { st.drag = .FxLib; fxlib_drag = it.kind }
 	}
 	rl.EndScissorMode()
@@ -1750,103 +1753,103 @@ draw_fx_settings :: proc(r: rl.Rectangle) {
 	f := &fxsegs[fx_sel]
 	x := r.x + 14; cw := r.width - 28; vx := r.x + r.width - 14 - 50
 	if ui_btn({ x, r.y + 8, 90, 22 }, "‹ Efeitos", false) { fx_sel = -1; return }
-	txt(fxlib_name(f.kind), x, r.y + 40, 15, TEXT)
-	txt(rl.TextFormat("Duração: %.1fs", f64(f.dur)), vx - 20, r.y + 44, 11, MUTED)
+	txt(fxlib_name(f.kind), x, r.y + 40, FS_LG, TEXT)
+	txt(rl.TextFormat("Duração: %.1fs", f64(f.dur)), vx - 20, r.y + 44, FS_XS, MUTED)
 	y := r.y + 68
 	switch f.kind {
 	case FX_DISTORT:
 		if f.radius <= 0 do f.radius = BULGE_R_DEF
-		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		txt("Intensidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, -1, 1); y += 28
-		txt("Raio", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, 13, ACCENT); y += 20
+		txt("Raio", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(41, { x, y, cw, 16 }, &f.radius, 0.1, 1); y += 28
-		txt("Centro X", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(f.cx*100)), vx, y, 13, ACCENT); y += 20
+		txt("Centro X", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d", i32(f.cx*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(42, { x, y, cw, 16 }, &f.cx, -0.5, 0.5); y += 28
-		txt("Centro Y", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(f.cy*100)), vx, y, 13, ACCENT); y += 20
+		txt("Centro Y", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d", i32(f.cy*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(43, { x, y, cw, 16 }, &f.cy, -0.5, 0.5); y += 28
-		txt("Tremor", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.wobble*100)), vx, y, 13, ACCENT); y += 20
+		txt("Tremor", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.wobble*100)), vx, y, FS_MD, ACCENT); y += 20
 		if ui_slider(44, { x, y, cw, 16 }, &f.wobble, 0, 1) { if f.wobble < 0.03 do f.wobble = 0 }
 		y += 28
 		if f.wobble > 0.001 {
 			if f.speed <= 0 do f.speed = WOBBLE_HZ_DEF
-			txt("Velocidade", x, y, 13, TEXT); txt(rl.TextFormat("%.1f Hz", f64(f.speed)), vx-8, y, 13, ACCENT); y += 20
+			txt("Velocidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%.1f Hz", f64(f.speed)), vx-8, y, FS_MD, ACCENT); y += 20
 			ui_slider(45, { x, y, cw, 16 }, &f.speed, 0.3, 8); y += 28
 		}
 	case FX_RGB:
-		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		txt("Intensidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
-		txt("Direção", x, y, 13, TEXT); txt(rl.TextFormat("%d°", i32(f.angle*360)), vx, y, 13, ACCENT); y += 20
+		txt("Direção", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d°", i32(f.angle*360)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(41, { x, y, cw, 16 }, &f.angle, 0, 1); y += 28
-		txt("0° = horizontal · 90° = cima-baixo.", x, y, 11, MUTED); y += 22
+		txt("0° = horizontal · 90° = cima-baixo.", x, y, FS_XS, MUTED); y += 22
 	case FX_PIXEL, FX_BLUR, FX_GRAIN, FX_SHARP, FX_POSTER:
-		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		txt("Intensidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
 	case FX_MIRROR:
-		txt("Direção", x, y, 13, MUTED); y += 22
+		txt("Direção", x, y, FS_MD, MUTED); y += 22
 		horz := f.angle < 0.5
 		if ui_btn({ x, y, (cw-8)/2, 26 }, "Horizontal", horz) do f.angle = 0
 		if ui_btn({ x + (cw-8)/2 + 8, y, (cw-8)/2, 26 }, "Vertical", !horz) do f.angle = 0.5
 		y += 36
-		txt("Dobra a metade do quadro sobre a outra.", x, y, 11, MUTED); y += 22
+		txt("Dobra a metade do quadro sobre a outra.", x, y, FS_XS, MUTED); y += 22
 	case FX_BLUR_PART:
 		if f.radius <= 0 do f.radius = 0.22
-		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		txt("Intensidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
-		txt("Tamanho", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, 13, ACCENT); y += 20
+		txt("Tamanho", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(41, { x, y, cw, 16 }, &f.radius, 0.08, 0.7); y += 28
-		txt("Centro X", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(f.cx*100)), vx, y, 13, ACCENT); y += 20
+		txt("Centro X", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d", i32(f.cx*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(42, { x, y, cw, 16 }, &f.cx, -0.5, 0.5); y += 28
-		txt("Centro Y", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(f.cy*100)), vx, y, 13, ACCENT); y += 20
+		txt("Centro Y", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d", i32(f.cy*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(43, { x, y, cw, 16 }, &f.cy, -0.5, 0.5); y += 28
-		txt("Forma", x, y, 13, MUTED); y += 22
+		txt("Forma", x, y, FS_MD, MUTED); y += 22
 		quad := f.angle < 0.5
 		if ui_btn({ x, y, (cw-8)/2, 26 }, "Quadrado", quad) do f.angle = 0
 		if ui_btn({ x + (cw-8)/2 + 8, y, (cw-8)/2, 26 }, "Círculo", !quad) do f.angle = 0.5
 		y += 36
-		txt("Arraste o alvo no preview para mover a região.", x, y, 11, MUTED); y += 22
+		txt("Arraste o alvo no preview para mover a região.", x, y, FS_XS, MUTED); y += 22
 	case FX_SPOT:
 		if f.radius <= 0 do f.radius = 0.45
-		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		txt("Intensidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
-		txt("Raio", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, 13, ACCENT); y += 20
+		txt("Raio", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(41, { x, y, cw, 16 }, &f.radius, 0.1, 1); y += 28
-		txt("Centro X", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(f.cx*100)), vx, y, 13, ACCENT); y += 20
+		txt("Centro X", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d", i32(f.cx*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(42, { x, y, cw, 16 }, &f.cx, -0.5, 0.5); y += 28
-		txt("Centro Y", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(f.cy*100)), vx, y, 13, ACCENT); y += 20
+		txt("Centro Y", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d", i32(f.cy*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(43, { x, y, cw, 16 }, &f.cy, -0.5, 0.5); y += 28
-		txt("Arraste o alvo no preview para mover o centro.", x, y, 11, MUTED); y += 22
+		txt("Arraste o alvo no preview para mover o centro.", x, y, FS_XS, MUTED); y += 22
 	case FX_SHAKE:
-		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		txt("Intensidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
 		if f.speed <= 0 do f.speed = 8
-		txt("Velocidade", x, y, 13, TEXT); txt(rl.TextFormat("%.1f Hz", f64(f.speed)), vx-8, y, 13, ACCENT); y += 20
+		txt("Velocidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%.1f Hz", f64(f.speed)), vx-8, y, FS_MD, ACCENT); y += 20
 		ui_slider(41, { x, y, cw, 16 }, &f.speed, 1, 16); y += 28
 	case FX_WAVE:
-		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		txt("Intensidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
 		if f.speed <= 0 do f.speed = 2
-		txt("Velocidade", x, y, 13, TEXT); txt(rl.TextFormat("%.1f Hz", f64(f.speed)), vx-8, y, 13, ACCENT); y += 20
+		txt("Velocidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%.1f Hz", f64(f.speed)), vx-8, y, FS_MD, ACCENT); y += 20
 		ui_slider(41, { x, y, cw, 16 }, &f.speed, 0.3, 8); y += 28
 	case FX_HUE:
-		txt("Matiz", x, y, 13, TEXT); txt(rl.TextFormat("%d°", i32(f.amount*360)), vx, y, 13, ACCENT); y += 20
+		txt("Matiz", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d°", i32(f.amount*360)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
-		txt("Gira as cores do quadro (0–360°).", x, y, 11, MUTED); y += 22
+		txt("Gira as cores do quadro (0–360°).", x, y, FS_XS, MUTED); y += 22
 	case FX_INVERT, FX_GLOW, FX_KALEIDO, FX_SCAN, FX_EDGE:
-		txt("Intensidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		txt("Intensidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0, 1); y += 28
 	case FX_CHROMA:
 		if f.radius <= 0 do f.radius = 0.25
-		txt("Cor-chave", x, y, 13, MUTED); y += 22
+		txt("Cor-chave", x, y, FS_MD, MUTED); y += 22
 		green := f.angle < 0.5
 		if ui_btn({ x, y, (cw-8)/2, 26 }, "Verde", green) do f.angle = 0
 		if ui_btn({ x + (cw-8)/2 + 8, y, (cw-8)/2, 26 }, "Azul", !green) do f.angle = 0.5
 		y += 36
-		txt("Similaridade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, 13, ACCENT); y += 20
+		txt("Similaridade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.amount*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(40, { x, y, cw, 16 }, &f.amount, 0.05, 1); y += 28
-		txt("Suavidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, 13, ACCENT); y += 20
+		txt("Suavidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(f.radius*100)), vx, y, FS_MD, ACCENT); y += 20
 		ui_slider(41, { x, y, cw, 16 }, &f.radius, 0, 1); y += 28
-		txt("V1 = fundo · V2 = green screen · solte o Chroma key numa", x, y, 11, MUTED); y += 16
-		txt("trilha ACIMA do green screen (não pode cobrir o clipe).", x, y, 11, MUTED); y += 22
+		txt("V1 = fundo · V2 = green screen · solte o Chroma key numa", x, y, FS_XS, MUTED); y += 16
+		txt("trilha ACIMA do green screen (não pode cobrir o clipe).", x, y, FS_XS, MUTED); y += 22
 	}
 	y += 8
 	// rodapé estilo NLE: REDEFINIR (contorno) à esquerda, OK (preenchido) à direita.
@@ -1859,18 +1862,18 @@ draw_fx_settings :: proc(r: rl.Rectangle) {
 // visual (P&B/sépia/inverter) + ajustes (brilho/contraste/saturação/vinheta). Edita os
 // campos fx_* do segmento; 0 = neutro em todos.
 draw_color_panel :: proc(r: rl.Rectangle) {
-	txt("Cor", r.x + 14, r.y + 12, 15, TEXT)
+	txt("Cor", r.x + 14, r.y + 12, FS_LG, TEXT)
 	valid := selected >= 0 && selected < nsegs && seg_ready(selected) && !seg_audio_like(selected) && !seg_src(selected).is_text
 	if !valid {
-		txt("Selecione um clipe de vídeo na timeline", r.x + 14, r.y + 40, 12, MUTED)
-		txt("para ajustar a cor.", r.x + 14, r.y + 56, 12, MUTED)
+		txt("Selecione um clipe de vídeo na timeline", r.x + 14, r.y + 40, FS_SM, MUTED)
+		txt("para ajustar a cor.", r.x + 14, r.y + 56, FS_SM, MUTED)
 		return
 	}
 	sg := &segs[selected]
 	x := r.x + 14; cw := r.width - 28; vx := r.x + r.width - 14 - 50
 	y := r.y + 44
 
-	txt("Visual", x, y, 13, MUTED); y += 22
+	txt("Visual", x, y, FS_MD, MUTED); y += 22
 	lk := int(sg.fx_look + 0.5)
 	presets := []struct{ name: cstring, v: int }{ {"Normal",0}, {"P&B",1}, {"Sépia",2}, {"Inverter",3} }
 	bw := (cw - 3*6) / 4
@@ -1879,20 +1882,20 @@ draw_color_panel :: proc(r: rl.Rectangle) {
 		if ui_btn({ bx, y, bw, 24 }, p.name, lk == p.v) do sg.fx_look = f32(p.v)
 	}
 	y += 34
-	txt("Ajustes", x, y, 13, MUTED); y += 22
-	txt("Brilho", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(sg.fx_bright*100)), vx, y, 13, ACCENT); y += 20
+	txt("Ajustes", x, y, FS_MD, MUTED); y += 22
+	txt("Brilho", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d", i32(sg.fx_bright*100)), vx, y, FS_MD, ACCENT); y += 20
 	if ui_slider(30, { x, y, cw, 16 }, &sg.fx_bright, -1, 1) { if abs(sg.fx_bright) < 0.04 do sg.fx_bright = 0 }
 	y += 26
-	txt("Contraste", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32((1+sg.fx_contrast)*100)), vx, y, 13, ACCENT); y += 20
+	txt("Contraste", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32((1+sg.fx_contrast)*100)), vx, y, FS_MD, ACCENT); y += 20
 	if ui_slider(31, { x, y, cw, 16 }, &sg.fx_contrast, -1, 1) { if abs(sg.fx_contrast) < 0.04 do sg.fx_contrast = 0 }
 	y += 26
-	txt("Saturação", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32((1+sg.fx_satur)*100)), vx, y, 13, ACCENT); y += 20
+	txt("Saturação", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32((1+sg.fx_satur)*100)), vx, y, FS_MD, ACCENT); y += 20
 	if ui_slider(32, { x, y, cw, 16 }, &sg.fx_satur, -1, 1) { if abs(sg.fx_satur) < 0.04 do sg.fx_satur = 0 }
 	y += 26
-	txt("Temperatura", x, y, 13, TEXT); txt(rl.TextFormat("%d", i32(sg.fx_temp*100)), vx, y, 13, ACCENT); y += 20
+	txt("Temperatura", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d", i32(sg.fx_temp*100)), vx, y, FS_MD, ACCENT); y += 20
 	if ui_slider(34, { x, y, cw, 16 }, &sg.fx_temp, -1, 1) { if abs(sg.fx_temp) < 0.04 do sg.fx_temp = 0 }
 	y += 26
-	txt("Vinheta", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(sg.fx_vignette*100)), vx, y, 13, ACCENT); y += 20
+	txt("Vinheta", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(sg.fx_vignette*100)), vx, y, FS_MD, ACCENT); y += 20
 	if ui_slider(33, { x, y, cw, 16 }, &sg.fx_vignette, 0, 1) { if sg.fx_vignette < 0.03 do sg.fx_vignette = 0 }
 	y += 30
 	// rodapé estilo NLE: REDEFINIR (contorno) à esquerda, OK (preenchido) à direita.
@@ -1904,9 +1907,9 @@ draw_color_panel :: proc(r: rl.Rectangle) {
 }
 
 draw_transitions_panel :: proc(r: rl.Rectangle) {
-	txt("Transições", r.x + 14, r.y + 12, 15, TEXT)
+	txt("Transições", r.x + 14, r.y + 12, FS_LG, TEXT)
 	txt("Arraste para o corte entre dois clipes na mesma trilha.",
-		r.x + 14, r.y + 36, 12, MUTED)
+		r.x + 14, r.y + 36, FS_SM, MUTED)
 	items := []struct{ name: cstring, kind: int }{
 		{"Dissolver", 0}, {"Fade de entrada", 1}, {"Fade de saída", 2}, {"Dissolve orgânico", 3},
 		{"Wipe esquerda", 4}, {"Wipe direita", 5}, {"Wipe cima", 6}, {"Wipe baixo", 7},
@@ -1935,17 +1938,17 @@ draw_transitions_panel :: proc(r: rl.Rectangle) {
 		box := rl.Rectangle{ x0 + f32(col)*(tw+gap), y0 + f32(row)*(th+gap+lblh), tw, th }
 		if box.y + box.height < area.y || box.y > area.y + area.height { continue }
 		hot := hovered(box)
-		rl.DrawRectangleRounded(box, 0.08, 6, hot ? rl.Color{ 48, 52, 64, 255 } : PANEL2)
+		rl.DrawRectangleRounded(box, 0.08, 6, hot ? HOVER : PANEL2)
 		rl.DrawRectangleRoundedLinesEx(box, 0.08, 6, 1, hot ? ACCENT : LINE)
 		draw_trans_icon(box, it.kind)
-		txt_c(it.name, box.x + box.width/2, box.y + box.height + 3, 11, TEXT)
+		txt_c(it.name, box.x + box.width/2, box.y + box.height + 3, FS_XS, TEXT)
 		// arrastar até a timeline (soltar entre os clipes); clique = aplica ao selecionado
 		if rl.IsMouseButtonPressed(.LEFT) && hovered(box) && modal == .None {
 			st.drag = .Trans; trans_drag = it.kind
 		}
 	}
 	rl.EndScissorMode()
-	txt("Ajuste a duração na pastilha do corte (alças).", r.x + 14, r.y + r.height - 26, 11, MUTED)
+	txt("Ajuste a duração na pastilha do corte (alças).", r.x + 14, r.y + r.height - 26, FS_XS, MUTED)
 }
 
 // ícone de um layout de tela dividida: desenha as células (mesma tabela de split_cells)
@@ -1966,9 +1969,9 @@ draw_split_icon :: proc(box: rl.Rectangle, kind: int) {
 
 // aba "Tela Dividida": tiles clicáveis que arrumam os clipes sobrepostos no playhead.
 draw_split_panel :: proc(r: rl.Rectangle) {
-	txt("Tela Dividida", r.x + 14, r.y + 12, 15, TEXT)
-	txt("Ponha os clipes em trilhas separadas (V1/V2/V3),", r.x + 14, r.y + 38, 12, MUTED)
-	txt("sobrepostos no playhead, e clique um layout.", r.x + 14, r.y + 54, 12, MUTED)
+	txt("Tela Dividida", r.x + 14, r.y + 12, FS_LG, TEXT)
+	txt("Ponha os clipes em trilhas separadas (V1/V2/V3),", r.x + 14, r.y + 38, FS_SM, MUTED)
+	txt("sobrepostos no playhead, e clique um layout.", r.x + 14, r.y + 54, FS_SM, MUTED)
 	items := []struct{ name: cstring, kind: int }{ {"2 lado a lado", 0}, {"2 empilhado", 1}, {"3 colunas", 2}, {"PiP (canto)", 3} }
 	tw: f32 = 132; th: f32 = 74; gap: f32 = 12
 	cols := max(1, int((r.width - gap) / (tw + gap)))
@@ -1977,13 +1980,13 @@ draw_split_panel :: proc(r: rl.Rectangle) {
 		col := idx % cols; row := idx / cols
 		box := rl.Rectangle{ x0 + f32(col)*(tw+gap), y0 + f32(row)*(th+28), tw, th }
 		hot := hovered(box)
-		rl.DrawRectangleRounded(box, 0.08, 6, hot ? rl.Color{ 48, 52, 64, 255 } : PANEL2)
+		rl.DrawRectangleRounded(box, 0.08, 6, hot ? HOVER : PANEL2)
 		rl.DrawRectangleRoundedLinesEx(box, 0.08, 6, 1, hot ? ACCENT : LINE)
 		draw_split_icon(box, it.kind)
-		txt_c(it.name, box.x + box.width/2, box.y + box.height + 4, 11, TEXT)
+		txt_c(it.name, box.x + box.width/2, box.y + box.height + 4, FS_XS, TEXT)
 		if clicked(box) do apply_split(it.kind)
 	}
-	txt("Ajuste posição/escala de cada clipe na aba \"Vídeo\".", r.x + 14, r.y + r.height - 30, 11, MUTED)
+	txt("Ajuste posição/escala de cada clipe na aba \"Vídeo\".", r.x + 14, r.y + r.height - 30, FS_XS, MUTED)
 }
 
 // seleção múltipla do bin: contagem e limpeza
@@ -2009,7 +2012,7 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		cy := r.y + r.height*0.5
 		hov := hovered(r)
 		box := rl.Rectangle{ cx - 34, cy - 34, 68, 68 }
-		rl.DrawRectangleRounded(box, 0.3, 8, rl.Color{ 38, 42, 54, 255 })
+		rl.DrawRectangleRounded(box, 0.3, 8, CONTROL)
 		// borda azul->ciano (aprox. do gradiente); brilha no hover
 		rl.DrawRectangleRoundedLinesEx(box, 0.3, 8, 2, hov ? rl.Color{ 96, 214, 236, 255 } : rl.Color{ 68, 160, 214, 255 })
 		blue := rl.Color{ 92, 152, 242, 255 } // topo (haste)
@@ -2022,7 +2025,7 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		rl.DrawLineEx({ cx - 14, cy + 9 }, { cx - 14, cy + 16 }, 3.5, cyan)
 		rl.DrawLineEx({ cx + 14, cy + 9 }, { cx + 14, cy + 16 }, 3.5, cyan)
 		rl.DrawLineEx({ cx - 15.5, cy + 16 }, { cx + 15.5, cy + 16 }, 3.5, cyan)
-		txt_c("Clique aqui para importar (ou solte vídeos)", cx, cy + 52, 14, hov ? TEXT : MUTED)
+		txt_c("Clique aqui para importar (ou solte vídeos)", cx, cy + 52, FS_MD, hov ? TEXT : MUTED)
 			// bin vazio: 1 clique importa — MENOS nas faixas de 24px encostadas nas divisórias
 		// (agarre perdido do redimensionar caía aqui e abria o diálogo) e nunca durante arrasto
 		mi := rl.GetMousePosition()
@@ -2033,7 +2036,7 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		return
 	}
 	if nmatch == 0 { // há mídia, mas nada casa com a busca
-		txt_c(rl.TextFormat("Nenhuma mídia com \"%s\"", cs(string(tf_search.buf[:tf_search.len]))), r.x + r.width/2, r.y + r.height*0.5, 14, MUTED)
+		txt_c(rl.TextFormat("Nenhuma mídia com \"%s\"", cs(string(tf_search.buf[:tf_search.len]))), r.x + r.width/2, r.y + r.height*0.5, FS_MD, MUTED)
 		return
 	}
 
@@ -2070,10 +2073,10 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 
 		if intrinsics.atomic_load(&c.probed) {
 			if c.is_text { // clipe de texto: "T" grande + prévia do conteúdo
-				rl.DrawRectangleRec(box, rl.Color{ 44, 38, 60, 255 })
-				txt_c(c.is_caps ? "Cc" : "T", tx + tw/2, ty + th/2 - 20, 30, rl.Color{ 200, 186, 232, 255 })
+				rl.DrawRectangleRec(box, TEXTCLIP)
+				txt_c(c.is_caps ? "Cc" : "T", tx + tw/2, ty + th/2 - 20, 30, TEXTCLIP_INK)
 				prev := c.is_caps ? (len(c.caps) > 0 ? c.caps[0].text : "Legendas") : c.text
-				txt_c(elide(prev, 12, tw - 12), tx + tw/2, ty + th - 22, 11, rl.Color{ 170, 160, 190, 235 })
+				txt_c(elide(prev, FS_SM, tw - 12), tx + tw/2, ty + th - 22, FS_XS, rl.Color{ 170, 160, 190, 235 })
 			} else if c.is_audio { // sem vídeo: ícone de nota musical
 				mcx := tx + tw/2; mcy := ty + th/2 - 2
 				mc := rl.Color{ 120, 200, 170, 255 }
@@ -2086,10 +2089,10 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 				if c.tex_ok do rl.DrawTexturePro(c.tex, {0,0,f32(cdw(c)),f32(cdh(c))}, box, {0,0}, 0, rl.WHITE)
 			}
 			// imagem/texto não têm duração de fonte — o 00:00:05:00 (IMG_DUR) parecia um vídeo
-			if !c.is_img && !c.is_text do txt(timecode(c.dur), tx + tw - 62, ty + th - 15, 11, rl.WHITE)
-			if c.streaming do txt("streaming", tx + 4, ty + 3, 10, rl.Color{120,190,230,220})
+			if !c.is_img && !c.is_text do txt(timecode(c.dur), tx + tw - 62, ty + th - 15, FS_XS, rl.WHITE)
+			if c.streaming do txt("streaming", tx + 4, ty + 3, FS_XS, alpha(INFO, 220))
 		} else {
-			txt_c("importando...", tx + tw/2, ty + th/2 - 6, 12, rl.Color{200,200,90,230})
+			txt_c("importando...", tx + tw/2, ty + th/2 - 6, FS_SM, alpha(WARN, 230))
 		}
 
 		// seleção por retângulo: marca a miniatura que ele toca (probed = arrastável)
@@ -2102,8 +2105,8 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		hot := i == view_src()
 		border := sel ? rl.WHITE : (hot ? ACCENT : (placed ? ACCENT_D : LINE))
 		rl.DrawRectangleLinesEx(box, (sel || hot) ? 2 : 1, border)
-		if c.name_el == nil do c.name_el = strings.clone_to_cstring(string(elide(c.name, 11, tw)))
-		txt(c.name_el, tx, ty + th + 3, 11, MUTED)
+		if c.name_el == nil do c.name_el = strings.clone_to_cstring(string(elide(c.name, FS_XS, tw)))
+		txt(c.name_el, tx, ty + th + 3, FS_XS, MUTED)
 
 		// --- badge do canto inferior direito (estilo NLE) ---
 		// JÁ na timeline: "✓" fixo (dispensa o rótulo "na timeline", que roubava o canto).
@@ -2114,13 +2117,13 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		if media_ready(i) {
 			br := badge_r
 			if placed {
-				rl.DrawRectangleRounded(br, 0.3, 4, rl.Color{ 40, 150, 130, 235 })
+				rl.DrawRectangleRounded(br, 0.3, 4, alpha(ACCENT_D, 235))
 				// tique: perna curta descendo + perna longa subindo
 				rl.DrawLineEx({ br.x + 4, br.y + 9 }, { br.x + 8, br.y + 13 }, 2, rl.WHITE)
 				rl.DrawLineEx({ br.x + 8, br.y + 13 }, { br.x + 14, br.y + 5 }, 2, rl.WHITE)
 			} else if hovered(box) {
 				bhot := hovered(br)
-				rl.DrawRectangleRounded(br, 0.3, 4, bhot ? ACCENT : rl.Color{ 40, 150, 130, 235 })
+				rl.DrawRectangleRounded(br, 0.3, 4, bhot ? ACCENT : alpha(ACCENT_D, 235))
 				rl.DrawRectangleRec({ br.x + 8, br.y + 4, 2, 10 }, rl.WHITE)
 				rl.DrawRectangleRec({ br.x + 4, br.y + 8, 10, 2 }, rl.WHITE)
 				if clicked(br) { bin_add_to_timeline(i); handled = true; break } // segs mudou: redesenha no próximo frame
@@ -2130,7 +2133,7 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		// botão remover (X) no canto — aparece ao passar o mouse sobre a miniatura
 		if hovered(box) {
 			xr := rl.Rectangle{ box.x + box.width - 20, box.y + 4, 16, 16 }
-			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : rl.Color{ 40, 44, 54, 225 })
+			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : alpha(CONTROL, 225))
 			rl.DrawLineEx({ xr.x + 5, xr.y + 5 }, { xr.x + 11, xr.y + 11 }, 1.8, rl.WHITE)
 			rl.DrawLineEx({ xr.x + 11, xr.y + 5 }, { xr.x + 5, xr.y + 11 }, 1.8, rl.WHITE)
 			if clicked(xr) { remove_media(i); handled = true; break } // slot mudou: redesenha no próximo frame
@@ -2177,8 +2180,8 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 	}
 	// desenhar o retângulo em curso
 	if bin_marquee && bin_marquee_moved {
-		rl.DrawRectangleRec(mq, rl.Color{ 120, 170, 240, 45 })
-		rl.DrawRectangleLinesEx(mq, 1, rl.Color{ 150, 190, 245, 220 })
+		rl.DrawRectangleRec(mq, alpha(SELECT, 45))
+		rl.DrawRectangleLinesEx(mq, 1, alpha(SELECT, 220))
 	}
 	// soltar: encerra o marquee. Se não moveu (clique seco em área vazia) = desmarca tudo.
 	if bin_marquee && rl.IsMouseButtonReleased(.LEFT) {
@@ -2205,7 +2208,7 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 	for k in 0 ..< nclips do if !intrinsics.atomic_load(&clips[k].failed) && !clips[k].closed { have_media = true; break }
 	hint: cstring = bin_marks_count() > 1 ? "arraste p/ a timeline (várias selecionadas)" :
 	                (!have_media ? "clique aqui para importar mídia" : "duplo-clique para importar · arraste p/ selecionar")
-	txt(hint, r.x + 12, r.y + r.height - 22, 12, MUTED)
+	txt(hint, r.x + 12, r.y + r.height - 22, FS_SM, MUTED)
 }
 
 // ---------- preview + transporte ----------
@@ -2214,13 +2217,13 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 ui_slider :: proc(id: int, r: rl.Rectangle, val: ^f32, lo, hi: f32) -> bool {
 	cy := r.y + r.height/2
 	// trilho com contraste visível sobre o PANEL; knob com anel escuro p/ destacar do preenchimento
-	rl.DrawRectangleRounded({r.x, cy - 2, r.width, 4}, 1, 4, rl.Color{62, 70, 86, 255})
+	rl.DrawRectangleRounded({r.x, cy - 2, r.width, 4}, 1, 4, LINE)
 	frac := clamp((val^ - lo) / (hi - lo), 0, 1)
 	kx := r.x + frac * r.width
 	if kx > r.x + 1 do rl.DrawRectangleRounded({r.x, cy - 2, kx - r.x, 4}, 1, 4, ACCENT)
 	hot := ui_slider_active == id || hovered(r)
-	rl.DrawCircleV({kx, cy}, hot ? 8 : 7, hot ? ACCENT : rl.Color{20, 23, 29, 255})
-	rl.DrawCircleV({kx, cy}, hot ? 6 : 5.5, hot ? rl.WHITE : rl.Color{225, 230, 238, 255})
+	rl.DrawCircleV({kx, cy}, hot ? 8 : 7, hot ? ACCENT : SUNK)
+	rl.DrawCircleV({kx, cy}, hot ? 6 : 5.5, hot ? rl.WHITE : KNOB)
 	if rl.IsMouseButtonPressed(.LEFT) && hovered(r) && (modal == .None || g_modal_draw) do ui_slider_active = id
 	if ui_slider_active == id {
 		// !Down (não só Released): se o slider sumir no frame do soltar (fade que
@@ -2259,10 +2262,10 @@ transport_btn :: proc(cx, cy: f32, tip: cstring) -> (rl.Color, bool) {
 	hot := hovered(r)
 	if hot {
 		rl.DrawRectangleRounded(r, 0.3, 6, HOVER)
-		tw := txt_w(tip, 12) + 14
+		tw := txt_w(tip, FS_SM) + 14
 		tr := rl.Rectangle{ cx - tw/2, cy - 44, tw, 22 }
-		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 12, 14, 18, 235 })
-		txt_c(tip, cx, tr.y + 4, 12, TEXT)
+		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
+		txt_c(tip, cx, tr.y + 4, FS_SM, TEXT)
 	}
 	return hot ? TEXT : MUTED, clicked(r)
 }
@@ -2286,12 +2289,12 @@ transport_seek :: proc(t: f32) {
 // slider VERTICAL (topo = hi, base = lo). Mesmo id/estado do ui_slider (ui_slider_active).
 ui_vslider :: proc(id: int, r: rl.Rectangle, val: ^f32, lo, hi: f32) -> bool {
 	cx := r.x + r.width/2
-	rl.DrawRectangleRounded({cx - 2, r.y, 4, r.height}, 1, 4, rl.Color{50, 54, 64, 255})
+	rl.DrawRectangleRounded({cx - 2, r.y, 4, r.height}, 1, 4, TRACK_BG)
 	frac := clamp((val^ - lo) / (hi - lo), 0, 1)
 	ky := r.y + (1 - frac) * r.height // topo = cheio
 	rl.DrawRectangleRounded({cx - 2, ky, 4, (r.y + r.height) - ky}, 1, 4, ACCENT) // preenche do knob p/ baixo
 	hot := ui_slider_active == id || hovered(r)
-	rl.DrawCircleV({cx, ky}, hot ? 7 : 6, hot ? rl.WHITE : rl.Color{205, 210, 220, 255})
+	rl.DrawCircleV({cx, ky}, hot ? 7 : 6, hot ? rl.WHITE : KNOB)
 	if rl.IsMouseButtonPressed(.LEFT) && hovered(r) && (modal == .None || g_modal_draw) do ui_slider_active = id
 	if ui_slider_active == id {
 		if !rl.IsMouseButtonDown(.LEFT) { ui_slider_active = -1 }
@@ -2308,7 +2311,7 @@ ui_btn :: proc(r: rl.Rectangle, label: cstring, active: bool) -> bool {
 	col := active ? ACCENT_D : PANEL2
 	if hovered(r) do col = active ? ACCENT : HOVER
 	rl.DrawRectangleRounded(r, 0.3, 6, col)
-	txt_c(label, r.x + r.width/2, r.y + r.height/2 - 8, 13, active ? rl.WHITE : TEXT)
+	txt_c(label, r.x + r.width/2, r.y + r.height/2 - 8, FS_MD, active ? rl.WHITE : TEXT)
 	return clicked(r)
 }
 
@@ -2319,11 +2322,11 @@ ui_pill :: proc(r: rl.Rectangle, label: cstring, filled: bool) -> bool {
 	hot := hovered(r)
 	if filled {
 		rl.DrawRectangleRounded(r, 1, 8, hot ? ACCENT : ACCENT_D)
-		txt_c(label, r.x + r.width/2, r.y + r.height/2 - 8, 13, rl.WHITE)
+		txt_c(label, r.x + r.width/2, r.y + r.height/2 - 8, FS_MD, rl.WHITE)
 	} else {
 		if hot do rl.DrawRectangleRounded(r, 1, 8, fa(ACCENT, 0.15))
 		rl.DrawRectangleRoundedLinesEx(r, 1, 8, 1.5, hot ? ACCENT : ACCENT_D)
-		txt_c(label, r.x + r.width/2, r.y + r.height/2 - 8, 13, hot ? ACCENT : ACCENT_D)
+		txt_c(label, r.x + r.width/2, r.y + r.height/2 - 8, FS_MD, hot ? ACCENT : ACCENT_D)
 	}
 	return clicked(r)
 }
@@ -2332,15 +2335,15 @@ ui_pill :: proc(r: rl.Rectangle, label: cstring, filled: bool) -> bool {
 // com destaque no hover). `col` = cor de destaque (ACCENT p/ pausar, vermelho p/ cancelar).
 draw_overlay_btn :: proc(r: rl.Rectangle, label: cstring, col: rl.Color) {
 	hot := hovered(r)
-	rl.DrawRectangleRounded(r, 0.25, 6, hot ? col : rl.Color{ 44, 48, 58, 255 })
+	rl.DrawRectangleRounded(r, 0.25, 6, hot ? col : CONTROL)
 	rl.DrawRectangleRoundedLinesEx(r, 0.25, 6, 1, col)
-	txt_c(label, r.x + r.width/2, r.y + r.height/2 - 8, 14, hot ? rl.Color{ 20, 22, 27, 255 } : col)
+	txt_c(label, r.x + r.width/2, r.y + r.height/2 - 8, FS_MD, hot ? INK : col)
 }
 
 TEXT_COLORS := []rl.Color{ {255,255,255,255}, {20,20,24,255}, {245,205,90,255}, {230,80,72,255}, {90,200,120,255}, {80,150,235,255}, {40,200,182,255} }
 
 // --- campo de texto reutilizável: cursor + seleção (índices em BYTES no UTF-8) ---
-tf_prefix_w  :: proc(t: ^TField, n: int) -> f32 { return n <= 0 ? 0 : txt_w(cs(string(t.buf[:n])), 14) } // largura de buf[:n]
+tf_prefix_w  :: proc(t: ^TField, n: int) -> f32 { return n <= 0 ? 0 : txt_w(cs(string(t.buf[:n])), FS_MD) } // largura de buf[:n]
 tf_rune_next :: proc(t: ^TField, i: int) -> int { j := i + 1; for j < t.len && (t.buf[j] & 0xC0) == 0x80 do j += 1; return min(j, t.len) }
 tf_rune_prev :: proc(t: ^TField, i: int) -> int { j := i - 1; for j > 0 && (t.buf[j] & 0xC0) == 0x80 do j -= 1; return max(0, j) }
 tf_lo :: proc(t: ^TField) -> int { return min(t.caret, t.sel) }
@@ -2439,7 +2442,7 @@ tf_field :: proc(t: ^TField, r: rl.Rectangle, focused: ^bool, allow_unfocus: boo
 		xa := tx0 + tf_prefix_w(t, tf_lo(t)); xb := tx0 + tf_prefix_w(t, tf_hi(t))
 		rl.DrawRectangleRec({ xa, r.y + 5, xb - xa, r.height - 10 }, rl.Color{ 58, 108, 170, 150 })
 	}
-	txt(cs(string(t.buf[:t.len])), tx0, r.y + 7, 14, TEXT)
+	txt(cs(string(t.buf[:t.len])), tx0, r.y + 7, FS_MD, TEXT)
 	if focused^ && t.sel == t.caret && (int(rl.GetTime()*2)) % 2 == 0 {
 		rl.DrawRectangleRec({ tx0 + tf_prefix_w(t, t.caret), r.y + 6, 1.5, 18 }, TEXT)
 	}
@@ -2457,7 +2460,7 @@ draw_text_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	vx := card.x + cw - pad - 46
 	// --- campo de texto: clique posiciona o cursor, arrastar seleciona, duplo-clique
 	//     seleciona tudo; digitar/Backspace/Delete substituem a seleção; Ctrl+A/C/V/X ---
-	txt("Conteúdo", x, y, 13, TEXT); y += 20
+	txt("Conteúdo", x, y, FS_MD, TEXT); y += 20
 	fr := rl.Rectangle{ x, y, cw - 2*pad, 30 }
 	rl.DrawRectangleRounded(fr, 0.2, 4, PANEL2)
 	if !txt_edit do tf_set(&tf_text, c.text) // fora de edição: espelha o conteúdo atual do clipe
@@ -2467,7 +2470,7 @@ draw_text_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	y += 42
 	// --- fonte (seletor ◀ nome ▶) ---
 	if len(text_fonts) > 1 {
-		txt("Fonte", x, y, 13, TEXT); y += 20
+		txt("Fonte", x, y, FS_MD, TEXT); y += 20
 		fbx := rl.Rectangle{ x, y, cw - 2*pad, 28 }
 		rl.DrawRectangleRounded(fbx, 0.2, 4, PANEL2)
 		rl.DrawRectangleRoundedLinesEx(fbx, 0.2, 4, 1, LINE)
@@ -2476,20 +2479,20 @@ draw_text_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 		if text_fonts_settled() && (c.text_font < 0 || c.text_font >= len(text_fonts)) do c.text_font = 0
 		di := c.text_font; if di < 0 || di >= len(text_fonts) do di = 0 // exibição segura durante a carga
 		la := rl.Rectangle{ fbx.x, fbx.y, 28, 28 }; ra := rl.Rectangle{ fbx.x + fbx.width - 28, fbx.y, 28, 28 }
-		txt_c("<", la.x + 14, la.y + 6, 15, hovered(la) ? TEXT : MUTED)
-		txt_c(">", ra.x + 14, ra.y + 6, 15, hovered(ra) ? TEXT : MUTED)
-		txt_c(text_fonts[di].name, fbx.x + fbx.width/2, fbx.y + 6, 13, TEXT)
+		txt_c("<", la.x + 14, la.y + 6, FS_LG, hovered(la) ? TEXT : MUTED)
+		txt_c(">", ra.x + 14, ra.y + 6, FS_LG, hovered(ra) ? TEXT : MUTED)
+		txt_c(text_fonts[di].name, fbx.x + fbx.width/2, fbx.y + 6, FS_MD, TEXT)
 		n := len(text_fonts)
 		if clicked(la) { c.text_font = (di - 1 + n) % n; dirty = true }
 		if clicked(ra) || clicked({ fbx.x + 28, fbx.y, fbx.width - 56, 28 }) { c.text_font = (di + 1) % n; dirty = true }
 		y += 36
 	}
 	// --- tamanho ---
-	txt("Tamanho", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(c.text_size*100 + 0.5)), vx, y, 13, ACCENT); y += 20
+	txt("Tamanho", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(c.text_size*100 + 0.5)), vx, y, FS_MD, ACCENT); y += 20
 	if ui_slider(11, { x, y, cw - 2*pad, 16 }, &c.text_size, 0.03, 0.4) do dirty = true
 	y += 30
 	// --- cor (swatches) ---
-	txt("Cor", x, y, 13, TEXT); y += 20
+	txt("Cor", x, y, FS_MD, TEXT); y += 20
 	n := len(TEXT_COLORS)
 	sw := (cw - 2*pad - f32(n-1)*6) / f32(n)
 	for col, ci in TEXT_COLORS {
@@ -2501,10 +2504,10 @@ draw_text_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	}
 	y += 34
 	// --- opacidade ---
-	txt("Opacidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(sg.opacity*100 + 0.5)), vx, y, 13, ACCENT); y += 20
+	txt("Opacidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(sg.opacity*100 + 0.5)), vx, y, FS_MD, ACCENT); y += 20
 	ui_slider(12, { x, y, cw - 2*pad, 16 }, &sg.opacity, 0, 1)
 	y += 26
-	txt("Arraste no preview para mover.", x, y, 11, MUTED)
+	txt("Arraste no preview para mover.", x, y, FS_XS, MUTED)
 }
 
 // inspector da faixa de legendas: estilo + botão para editar fala a fala.
@@ -2513,17 +2516,17 @@ draw_caps_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	if sg.opacity <= 0 do sg.opacity = 1
 	if c.text_size <= 0 do c.text_size = 0.05
 	vx := card.x + cw - pad - 46
-	txt(rl.TextFormat("%d fala(s) transcritas", i32(len(c.caps))), x, y, 13, ACCENT); y += 22
+	txt(rl.TextFormat("%d fala(s) transcritas", i32(len(c.caps))), x, y, FS_MD, ACCENT); y += 22
 	if ui_btn({ x, y, cw - 2*pad, 28 }, "Editar falas", true) do open_caps_editor()
 	y += 36
-	txt("Estilo", x, y, 13, TEXT); y += 18
+	txt("Estilo", x, y, FS_MD, TEXT); y += 18
 	presets := [4]CapPreset{ .YouTube, .CapCut, .Marker, .Shadow }
 	pw := (cw - 2*pad - 18) / 4
 	for p, pi in presets {
 		r := rl.Rectangle{ x + f32(pi)*(pw + 6), y, pw, 26 }
 		on := c.cap_preset == p
 		rl.DrawRectangleRounded(r, 0.25, 4, on ? ACCENT_D : (hovered(r) ? HOVER : PANEL2))
-		txt_c(CAP_PRESET_NAME[p], r.x + r.width/2, r.y + 6, 11, on ? rl.WHITE : TEXT)
+		txt_c(CAP_PRESET_NAME[p], r.x + r.width/2, r.y + 6, FS_XS, on ? rl.WHITE : TEXT)
 		if clicked(r) do cap_apply_preset(c, p)
 	}
 	y += 32
@@ -2531,29 +2534,29 @@ draw_caps_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	if clicked({ x, y, cw - 2*pad, 18 }) { c.cap_upper = !c.cap_upper; dirty = true }
 	rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, c.cap_upper ? ACCENT : MUTED)
 	if c.cap_upper do rl.DrawRectangleRec({ chk.x + 3, chk.y + 3, 10, 10 }, ACCENT)
-	txt("MAIÚSCULAS", x + 22, y + 1, 12, TEXT)
+	txt("MAIÚSCULAS", x + 22, y + 1, FS_SM, TEXT)
 	y += 26
-	txt("Tamanho, cor e posição valem para todas.", x, y, 11, MUTED); y += 20
+	txt("Tamanho, cor e posição valem para todas.", x, y, FS_XS, MUTED); y += 20
 	if len(text_fonts) > 1 {
-		txt("Fonte", x, y, 13, TEXT); y += 20
+		txt("Fonte", x, y, FS_MD, TEXT); y += 20
 		fbx := rl.Rectangle{ x, y, cw - 2*pad, 28 }
 		rl.DrawRectangleRounded(fbx, 0.2, 4, PANEL2)
 		rl.DrawRectangleRoundedLinesEx(fbx, 0.2, 4, 1, LINE)
 		if text_fonts_settled() && (c.text_font < 0 || c.text_font >= len(text_fonts)) do c.text_font = 0
 		di := c.text_font; if di < 0 || di >= len(text_fonts) do di = 0
 		la := rl.Rectangle{ fbx.x, fbx.y, 28, 28 }; ra := rl.Rectangle{ fbx.x + fbx.width - 28, fbx.y, 28, 28 }
-		txt_c("<", la.x + 14, la.y + 6, 15, hovered(la) ? TEXT : MUTED)
-		txt_c(">", ra.x + 14, ra.y + 6, 15, hovered(ra) ? TEXT : MUTED)
-		txt_c(text_fonts[di].name, fbx.x + fbx.width/2, fbx.y + 6, 13, TEXT)
+		txt_c("<", la.x + 14, la.y + 6, FS_LG, hovered(la) ? TEXT : MUTED)
+		txt_c(">", ra.x + 14, ra.y + 6, FS_LG, hovered(ra) ? TEXT : MUTED)
+		txt_c(text_fonts[di].name, fbx.x + fbx.width/2, fbx.y + 6, FS_MD, TEXT)
 		n := len(text_fonts)
 		if clicked(la) { c.text_font = (di - 1 + n) % n; dirty = true }
 		if clicked(ra) || clicked({ fbx.x + 28, fbx.y, fbx.width - 56, 28 }) { c.text_font = (di + 1) % n; dirty = true }
 		y += 36
 	}
-	txt("Tamanho", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(c.text_size*100 + 0.5)), vx, y, 13, ACCENT); y += 20
+	txt("Tamanho", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(c.text_size*100 + 0.5)), vx, y, FS_MD, ACCENT); y += 20
 	if ui_slider(11, { x, y, cw - 2*pad, 16 }, &c.text_size, 0.03, 0.4) do dirty = true
 	y += 30
-	txt("Cor", x, y, 13, TEXT); y += 20
+	txt("Cor", x, y, FS_MD, TEXT); y += 20
 	n := len(TEXT_COLORS)
 	sw := (cw - 2*pad - f32(n-1)*6) / f32(n)
 	for col, ci in TEXT_COLORS {
@@ -2564,10 +2567,10 @@ draw_caps_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 		if clicked(sr) { c.text_color = col; dirty = true }
 	}
 	y += 34
-	txt("Opacidade", x, y, 13, TEXT); txt(rl.TextFormat("%d%%", i32(sg.opacity*100 + 0.5)), vx, y, 13, ACCENT); y += 20
+	txt("Opacidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(sg.opacity*100 + 0.5)), vx, y, FS_MD, ACCENT); y += 20
 	ui_slider(12, { x, y, cw - 2*pad, 16 }, &sg.opacity, 0, 1)
 	y += 26
-	txt("Arraste no preview para mover.", x, y, 11, MUTED)
+	txt("Arraste no preview para mover.", x, y, FS_XS, MUTED)
 }
 
 draw_preview :: proc(r: rl.Rectangle) {
@@ -2592,8 +2595,8 @@ draw_preview :: proc(r: rl.Rectangle) {
 		c := &clips[src_preview]
 		ensure_tex(c)
 		if c.tex_ok do rl.DrawTexturePro(c.tex, dec_content_rect(c), g_frame, {0,0}, 0, rl.WHITE)
-		txt(rl.TextFormat("Prévia: %s  (clique na timeline p/ sair)", cs(c.name)), video.x + 10, video.y + 8, 12, rl.Color{245,205,90,235})
-		txt(rl.TextFormat("Prévia: %s  (clique na timeline p/ sair)", cs(c.name)), video.x + 10, video.y + 8, 12, rl.Color{245,205,90,235})
+		txt(rl.TextFormat("Prévia: %s  (clique na timeline p/ sair)", cs(c.name)), video.x + 10, video.y + 8, FS_SM, alpha(WARN, 235))
+		txt(rl.TextFormat("Prévia: %s  (clique na timeline p/ sair)", cs(c.name)), video.x + 10, video.y + 8, FS_SM, alpha(WARN, 235))
 	} else if crop_mode && modal == .None && selected >= 0 && selected < nsegs && seg_ready(selected) && !seg_audio_like(selected) && !seg_src(selected).is_text {
 		// MODO RECORTE: mostra o quadro completo do clipe + moldura de recorte com alças.
 		// `modal == .None` porque o editor lê rl.IsMouseButtonPressed CRU (não passa pelo
@@ -2603,12 +2606,12 @@ draw_preview :: proc(r: rl.Rectangle) {
 	} else {
 		// COMPOSITING das trilhas de vídeo com transform (mesma função da tela cheia)
 		if !composite_video(fx, fy, fw, fh, true) {
-			txt_c("Preview", video.x + video.width/2, video.y + video.height/2 - 10, 16, rl.Color{60,64,72,255})
+			txt_c("Preview", video.x + video.width/2, video.y + video.height/2 - 10, FS_LG, LINE)
 		}
 	}
 	// guias de alinhamento (centro/bordas do canvas) ao mover um clipe no preview
 	if st.drag == .PreviewMove {
-		gc := rl.Color{ 40, 220, 200, 235 }
+		gc := alpha(ACCENT, 235)
 		if g_pv_x >= 0 do rl.DrawLineEx({ g_pv_x, g_frame.y }, { g_pv_x, g_frame.y + g_frame.height }, 1.2, gc)
 		if g_ph_y >= 0 do rl.DrawLineEx({ g_frame.x, g_ph_y }, { g_frame.x + g_frame.width, g_ph_y }, 1.2, gc)
 	}
@@ -2621,8 +2624,8 @@ draw_preview :: proc(r: rl.Rectangle) {
 			set_crop_mode(false) // seleção inválida p/ recorte
 		} else {
 			// faixa escura no topo p/ leitura + instrução
-			rl.DrawRectangleRec({ video.x, video.y, video.width, 44 }, rl.Color{ 0,0,0,140 })
-			txt("Recorte: arraste as alças para escolher a área", video.x + 14, video.y + 15, 14, rl.Color{245,205,90,245})
+			rl.DrawRectangleRec({ video.x, video.y, video.width, 44 }, alpha(SCRIM, 140))
+			txt("Recorte: arraste as alças para escolher a área", video.x + 14, video.y + 15, FS_MD, alpha(WARN, 245))
 			// botão CONCLUIR bem visível (preenchido, com um check desenhado)
 			bw2: f32 = 176; bh2: f32 = 30
 			cb := rl.Rectangle{ video.x + video.width - bw2 - 12, video.y + 7, bw2, bh2 }
@@ -2631,7 +2634,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 			ck := rl.Vector2{ cb.x + 24, cb.y + bh2/2 } // marca de "check"
 			rl.DrawLineEx({ck.x-7, ck.y+1}, {ck.x-2, ck.y+6}, 2.6, rl.WHITE)
 			rl.DrawLineEx({ck.x-2, ck.y+6}, {ck.x+8, ck.y-6}, 2.6, rl.WHITE)
-			txt("Concluir recorte", cb.x + 42, cb.y + bh2/2 - 8, 14, rl.WHITE)
+			txt("Concluir recorte", cb.x + 42, cb.y + bh2/2 - 8, FS_MD, rl.WHITE)
 			if clicked(cb) do set_crop_mode(false)
 		}
 	}
@@ -2647,7 +2650,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	player_seek_bar = pbar
 	pbar_hit := rl.Rectangle{ pbar.x - 4, tb.y + 5, pbar.width + 8, 18 }
 	frac := total > 0 ? clamp(pos / total, 0, 1) : 0
-	rl.DrawRectangleRounded(pbar, 1, 4, rl.Color{ 50, 54, 64, 255 })
+	rl.DrawRectangleRounded(pbar, 1, 4, TRACK_BG)
 	rl.DrawRectangleRounded({ pbar.x, pbar.y, frac * pbar.width, pbar.height }, 1, 4, ACCENT)
 	pkx := pbar.x + frac * pbar.width
 	rl.DrawCircleV({ pkx, pbar.y + pbar.height/2 }, (player_seek_drag || hovered(pbar_hit)) ? 7 : 5, rl.WHITE)
@@ -2675,7 +2678,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// timecode com dígitos de largura fixa (não "dança" durante a reprodução): atual claro, total apagado
 	tc_pos := string(timecode(pos))
 	tc_tot := narrow ? "" : fmt.tprintf(" / %s", timecode(total))
-	tcw := txt_tab(tc_pos, 0, 0, 15, TEXT, false) + txt_tab(tc_tot, 0, 0, 15, MUTED, false)
+	tcw := txt_tab(tc_pos, 0, 0, FS_LG, TEXT, false) + txt_tab(tc_tot, 0, 0, FS_LG, MUTED, false)
 	// direita: fullscreen(‑30) + câmera(‑32) + alto-falante(‑30) => spr.x = fim‑92; proporção fica 150 antes
 	rclust := tb.x + tb.width - 92 - (tight ? 0 : 150)
 	cl := tb.x + 16 + tcw + 12
@@ -2720,8 +2723,8 @@ draw_preview :: proc(r: rl.Rectangle) {
 	}
 
 	// timecode à esquerda: posição atual (e a duração total quando há espaço)
-	tx := tb.x + 16 + txt_tab(tc_pos, tb.x + 16, cy - 8, 15, TEXT)
-	txt_tab(tc_tot, tx, cy - 8, 15, MUTED)
+	tx := tb.x + 16 + txt_tab(tc_pos, tb.x + 16, cy - 8, FS_LG, TEXT)
+	txt_tab(tc_tot, tx, cy - 8, FS_LG, MUTED)
 
 	// --- cluster à direita: volume do player | screenshot | tela cheia ---
 	// tela cheia (canto): 4 cantoneiras
@@ -2752,7 +2755,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	if clicked(spr) do vol_popup = !vol_popup
 	icon_hover_bg(spr, vol_popup)
 	{
-		sc := player_vol < 0.01 ? rl.Color{ 210, 100, 100, 255 } : ((hovered(spr) || vol_popup) ? ACCENT : TEXT)
+		sc := player_vol < 0.01 ? DANGER : ((hovered(spr) || vol_popup) ? ACCENT : TEXT)
 		bx := spr.x + 3; bcy := spr.y + spr.height/2
 		rl.DrawRectangleRec({bx, bcy - 3, 3.5, 6}, sc)                               // corpo (ímã)
 		rl.DrawTriangle({bx + 3.5, bcy - 6}, {bx + 3.5, bcy + 6}, {bx + 9, bcy}, sc) // cone
@@ -2768,20 +2771,20 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// (nítido, ~4x os bytes/frame). Estilo dropdown "Total/1/2/..." de NLEs, aqui binário.
 	if !tight {
 		qlabel: cstring = stream_hi ? "Alta" : "Baixa"
-		qw := txt_w(qlabel, 12) + 22
+		qw := txt_w(qlabel, FS_SM) + 22
 		qr := rl.Rectangle{ spr.x - 14 - qw, cy - 11, qw, 22 }
 		rl.DrawRectangleRounded(qr, 0.35, 6, hovered(qr) ? HOVER : PANEL2)
 		rl.DrawRectangleRoundedLinesEx(qr, 0.35, 6, 1, stream_hi ? ACCENT : LINE)
-		txt_c(qlabel, qr.x + qr.width/2, qr.y + 4, 12, stream_hi ? ACCENT : TEXT)
+		txt_c(qlabel, qr.x + qr.width/2, qr.y + 4, FS_SM, stream_hi ? ACCENT : TEXT)
 		if clicked(qr) { set_stream_quality(!stream_hi); dirty = true } // escolha vai no .ovp
 	}
 	if vol_popup { // painel com slider VERTICAL acima do alto-falante
 		pw := f32(34); ph := f32(108)
 		vpr := rl.Rectangle{ spr.x + spr.width/2 - pw/2, cy - 14 - ph, pw, ph } // `vpr`: o `pr` de fora é o botão de play
-		rl.DrawRectangleRounded(vpr, 0.2, 8, rl.Color{ 28, 31, 38, 250 })
+		rl.DrawRectangleRounded(vpr, 0.2, 8, POPUP)
 		rl.DrawRectangleRoundedLinesEx(vpr, 0.2, 8, 1, LINE)
 		ui_vslider(10, { vpr.x + pw/2 - 8, vpr.y + 12, 16, ph - 42 }, &player_vol, 0, 1)
-		txt_c(rl.TextFormat("%d", i32(player_vol*100 + 0.5)), vpr.x + pw/2, vpr.y + ph - 22, 12, TEXT)
+		txt_c(rl.TextFormat("%d", i32(player_vol*100 + 0.5)), vpr.x + pw/2, vpr.y + ph - 22, FS_SM, TEXT)
 		// clicar fora (sem ser no botão nem arrastando o slider) fecha
 		if rl.IsMouseButtonPressed(.LEFT) && !hovered(vpr) && !hovered(spr) && ui_slider_active != 10 do vol_popup = false
 	}
@@ -2793,26 +2796,26 @@ draw_preview :: proc(r: rl.Rectangle) {
 	arb := rl.Rectangle{ spr.x - 150, cy - 11, 64, 22 }
 	if clicked(arb) do ar_menu_open = !ar_menu_open
 	rl.DrawRectangleRounded(arb, 0.3, 4, (ar_menu_open || hovered(arb)) ? HOVER : PANEL2)
-	txt(ar_label(proj_ar), arb.x + 8, arb.y + 4, 12, TEXT)
+	txt(ar_label(proj_ar), arb.x + 8, arb.y + 4, FS_SM, TEXT)
 	draw_tri2({ arb.x + arb.width - 14, arb.y + 9 }, { arb.x + arb.width - 6, arb.y + 9 }, { arb.x + arb.width - 10, arb.y + 14 }, MUTED)
 	if ar_menu_open {
 		ih := f32(26); mw := f32(130); mh := f32(len(AR_PRESETS) + 1) * ih + 8
 		mr := rl.Rectangle{ arb.x, arb.y - mh - 4, mw, mh }
-		rl.DrawRectangleRounded(mr, 0.08, 6, rl.Color{ 28, 31, 38, 248 })
+		rl.DrawRectangleRounded(mr, 0.08, 6, POPUP)
 		rl.DrawRectangleRoundedLinesEx(mr, 0.08, 6, 1, LINE)
 		for p, idx in AR_PRESETS {
 			ir := rl.Rectangle{ mr.x + 4, mr.y + 4 + f32(idx)*ih, mw - 8, ih }
 			sel := abs(proj_ar - p.ar) < 0.001
 			if hovered(ir) do rl.DrawRectangleRounded(ir, 0.3, 4, HOVER)
 			if sel do rl.DrawCircleV({ ir.x + ir.width - 14, ir.y + ih/2 }, 3, ACCENT) // marca o ativo
-			txt(p.label, ir.x + 12, ir.y + 5, 13, sel ? ACCENT : TEXT)
+			txt(p.label, ir.x + 12, ir.y + 5, FS_MD, sel ? ACCENT : TEXT)
 			if clicked(ir) { set_proj_ar(p.ar); ar_menu_open = false; ar_auto = false } // preset rápido (lado menor = 1080)
 		}
 		// "Personalizar…" -> abre o modal completo (resolução exata)
 		cpr := rl.Rectangle{ mr.x + 4, mr.y + 4 + f32(len(AR_PRESETS))*ih, mw - 8, ih }
 		rl.DrawLineEx({ mr.x + 8, cpr.y - 1 }, { mr.x + mw - 8, cpr.y - 1 }, 1, LINE)
 		if hovered(cpr) do rl.DrawRectangleRounded(cpr, 0.3, 4, HOVER)
-		txt("Personalizar…", cpr.x + 12, cpr.y + 5, 13, TEXT)
+		txt("Personalizar…", cpr.x + 12, cpr.y + 5, FS_MD, TEXT)
 		if clicked(cpr) { ar_menu_open = false; open_projset_modal() }
 		if rl.IsMouseButtonPressed(.LEFT) && !hovered(mr) && !hovered(arb) do ar_menu_open = false // clique fora fecha
 	}
@@ -2836,11 +2839,11 @@ draw_preview :: proc(r: rl.Rectangle) {
 		// anel do raio: no shader dist usa aspect=rw/rh, então a fronteira é um círculo de
 		// raio (bulge_r * altura) em pixels de tela (independe da largura).
 		rr := (sg.bulge_r <= 0 ? BULGE_R_DEF : sg.bulge_r) * rh
-		rl.DrawCircleLines(i32(hx), i32(hy), rr, rl.Color{ 245, 205, 90, 150 })
+		rl.DrawCircleLines(i32(hx), i32(hy), rr, alpha(WARN, 150))
 		// alvo (crosshair + círculo)
 		near_h := abs(m.x-hx) < 14 && abs(m.y-hy) < 14
 		hot := st.drag == .FxCenter || near_h
-		col := hot ? ACCENT : rl.Color{ 245, 205, 90, 235 }
+		col := hot ? ACCENT : alpha(WARN, 235)
 		rl.DrawCircleLines(i32(hx), i32(hy), 11, col)
 		rl.DrawLineEx({hx-16, hy}, {hx-4, hy}, 2, col); rl.DrawLineEx({hx+4, hy}, {hx+16, hy}, 2, col)
 		rl.DrawLineEx({hx, hy-16}, {hx, hy-4}, 2, col); rl.DrawLineEx({hx, hy+4}, {hx, hy+16}, 2, col)
@@ -2863,7 +2866,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		rr := (f.radius <= 0 ? (f.kind == FX_BLUR_PART ? f32(0.22) : BULGE_R_DEF) : f.radius) * g_frame.height
 		// recorta ao quadro do vídeo p/ o anel não vazar pra fora do preview
 		rl.BeginScissorMode(i32(g_frame.x), i32(g_frame.y), i32(g_frame.width), i32(g_frame.height))
-		ringcol := rl.Color{ 245, 205, 90, 150 }
+		ringcol := alpha(WARN, 150)
 		if f.kind == FX_BLUR_PART && f.angle < 0.5 {
 			rl.DrawRectangleLinesEx({ ccx - rr, ccy - rr, rr*2, rr*2 }, 1.5, ringcol)
 		} else {
@@ -2879,7 +2882,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 		}
 		near := abs(m.x-ccx) < 14 && abs(m.y-ccy) < 14
 		hot := st.drag == .FxCtr || near
-		col := hot ? ACCENT : rl.Color{ 245, 205, 90, 235 }
+		col := hot ? ACCENT : alpha(WARN, 235)
 		rl.DrawCircleLines(i32(ccx), i32(ccy), 11, col)
 		rl.DrawLineEx({ccx-16, ccy}, {ccx-4, ccy}, 2, col); rl.DrawLineEx({ccx+4, ccy}, {ccx+16, ccy}, 2, col)
 		rl.DrawLineEx({ccx, ccy-16}, {ccx, ccy-4}, 2, col); rl.DrawLineEx({ccx, ccy+4}, {ccx, ccy+16}, 2, col)
@@ -2949,11 +2952,11 @@ draw_fx_on_tracks :: proc(clip: rl.Rectangle) {
 		rl.DrawRectangleRec({ bar.x + 2, bar.y + 2, bar.width - 4, 3 }, rl.Color{ 220, 190, 90, 220 })
 		has_x := sel && bar.width > 46
 		nx := has_x ? bar.x + 20 : bar.x + 8 // nome desloca p/ dar espaço ao × (à ESQUERDA)
-		txt(fxlib_name(f.kind), nx, bar.y + 5, 11, rl.Color{ 248, 240, 210, 255 })
+		txt(fxlib_name(f.kind), nx, bar.y + 5, FS_XS, rl.Color{ 248, 240, 210, 255 })
 		xr := rl.Rectangle{ bar.x + 2, bar.y + 2, 16, 16 } // × à ESQUERDA (não colide com a alça de aparo)
 		over_x := has_x && rl.CheckCollisionPointRec(m, xr)
 		if has_x {
-			txt_c("×", xr.x + xr.width/2, xr.y + 1, 15, rl.Color{ 245, 220, 205, 255 })
+			txt_c("×", xr.x + xr.width/2, xr.y + 1, FS_LG, rl.Color{ 245, 220, 205, 255 })
 			if clicked(xr) { remove_fxseg(i); continue } // não incrementa i (o próximo desceu p/ cá)
 		}
 		// ALÇA DE APARO na borda direita (redimensionar a duração do efeito)

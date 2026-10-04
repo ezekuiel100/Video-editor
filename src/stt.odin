@@ -749,7 +749,7 @@ cue_commit_active :: proc() {
 // lista de falas editável (prévia do Whisper e modal da faixa).
 draw_cue_list :: proc(lane: rl.Rectangle, cues: ^[dynamic]CapCue, owner: ^Clip, scroll: ^f32, eat: bool) {
 	if len(cues^) == 0 {
-		txt_c("Nenhuma fala. Adicione uma ou transcreva de novo.", lane.x + lane.width/2, lane.y + 40, 12, MUTED)
+		txt_c("Nenhuma fala. Adicione uma ou transcreva de novo.", lane.x + lane.width/2, lane.y + 40, FS_SM, MUTED)
 		return
 	}
 	row_h: f32 = 32
@@ -764,13 +764,13 @@ draw_cue_list :: proc(lane: rl.Rectangle, cues: ^[dynamic]CapCue, owner: ^Clip, 
 		if yy + row_h < lane.y || yy > lane.y + lane.height { i += 1; continue }
 		row := rl.Rectangle{ lane.x + 2, yy, lane.width - 4, row_h - 4 }
 		on := cue_edit == i
-		if on do rl.DrawRectangleRounded(row, 0.15, 4, rl.Color{ 40, 48, 62, 255 })
+		if on do rl.DrawRectangleRounded(row, 0.15, 4, SEL_BG)
 		else if !eat && hovered(row) do rl.DrawRectangleRounded(row, 0.15, 4, HOVER)
 		tc := rl.TextFormat("%s–%s", timecode(cues^[i].t0), timecode(cues^[i].t1))
-		txt(tc, lane.x + 8, yy + 6, 11, MUTED)
+		txt(tc, lane.x + 8, yy + 6, FS_XS, MUTED)
 		xr := rl.Rectangle{ lane.x + lane.width - 30, yy + 4, 20, 20 }
 		xh := !eat && hovered(xr)
-		txt_c("×", xr.x + 10, xr.y + 2, 14, xh ? rl.Color{ 220, 120, 110, 255 } : MUTED)
+		txt_c("×", xr.x + 10, xr.y + 2, FS_MD, xh ? DANGER : MUTED)
 		if !eat && clicked(xr) {
 			if cue_edit == i { cue_edit_reset() }
 			else if cue_edit > i { cue_edit -= 1 }
@@ -798,7 +798,7 @@ draw_cue_list :: proc(lane: rl.Rectangle, cues: ^[dynamic]CapCue, owner: ^Clip, 
 				continue
 			}
 		} else {
-			txt(elide(cues^[i].text, 12, fr.width), fr.x + 4, yy + 6, 12, TEXT)
+			txt(elide(cues^[i].text, FS_SM, fr.width), fr.x + 4, yy + 6, FS_SM, TEXT)
 			if !eat && (clicked(fr) || (clicked(row) && !hovered(xr))) {
 				cue_begin(cues, owner, i)
 			}
@@ -852,22 +852,22 @@ draw_caps_modal :: proc(sw, sh: f32) {
 	c := seg_src(caps_edit_si)
 	if !c.is_caps { caps_close(); return }
 
-	rl.DrawRectangleRec({0, 0, sw, sh}, rl.Color{0, 0, 0, 150})
+	rl.DrawRectangleRec({0, 0, sw, sh}, SCRIM)
 	cw: f32 = 680; ch: f32 = 520
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
-	rl.DrawRectangleRounded(card, 0.03, 8, rl.Color{ 30, 33, 40, 255 })
+	rl.DrawRectangleRounded(card, 0.03, 8, SURFACE)
 	rl.DrawRectangleRoundedLinesEx(card, 0.03, 8, 1, LINE)
-	txt("Editar falas", cx + 20, cy + 14, 16, TEXT)
+	txt("Editar falas", cx + 20, cy + 14, FS_LG, TEXT)
 	txt(rl.TextFormat("%d fala(s)  ·  clique o texto para corrigir  ·  × apaga", i32(len(c.caps))),
-		cx + 20, cy + 38, 12, MUTED)
+		cx + 20, cy + 38, FS_SM, MUTED)
 	xr := rl.Rectangle{ cx + cw - 36, cy + 12, 22, 22 }
 	if clicked(xr) && !caps_eat do caps_close()
 	rl.DrawLineEx({xr.x+5, xr.y+5}, {xr.x+15, xr.y+15}, 1.8, hovered(xr) ? TEXT : MUTED)
 	rl.DrawLineEx({xr.x+15, xr.y+5}, {xr.x+5, xr.y+15}, 1.8, hovered(xr) ? TEXT : MUTED)
 
 	lane := rl.Rectangle{ cx + 20, cy + 64, cw - 40, ch - 128 }
-	rl.DrawRectangleRec(lane, rl.Color{ 24, 26, 32, 255 })
+	rl.DrawRectangleRec(lane, SUNK)
 	rl.DrawRectangleLinesEx(lane, 1, LINE)
 	draw_cue_list(lane, &c.caps, c, &caps_scroll, caps_eat)
 
@@ -900,27 +900,27 @@ draw_stt_modal :: proc(sw, sh: f32) {
 	ph := intrinsics.atomic_load(&stt_phase)
 	if ph == .Done && len(stt_cues) == 0 && stt_srt != "" do stt_adopt_srt()
 
-	rl.DrawRectangleRec({0, 0, sw, sh}, rl.Color{0, 0, 0, 150})
+	rl.DrawRectangleRec({0, 0, sw, sh}, SCRIM)
 	cw: f32 = 640; ch: f32 = 500
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
-	rl.DrawRectangleRounded(card, 0.03, 8, rl.Color{ 30, 33, 40, 255 })
+	rl.DrawRectangleRounded(card, 0.03, 8, SURFACE)
 	rl.DrawRectangleRoundedLinesEx(card, 0.03, 8, 1, LINE)
-	txt("Voz para texto", cx + 20, cy + 14, 16, TEXT)
+	txt("Voz para texto", cx + 20, cy + 14, FS_LG, TEXT)
 	xr := rl.Rectangle{ cx + cw - 36, cy + 12, 22, 22 }
 	if clicked(xr) && !stt_eat do stt_close()
 	rl.DrawLineEx({xr.x+5, xr.y+5}, {xr.x+15, xr.y+15}, 1.8, hovered(xr) ? TEXT : MUTED)
 	rl.DrawLineEx({xr.x+15, xr.y+5}, {xr.x+5, xr.y+15}, 1.8, hovered(xr) ? TEXT : MUTED)
 
 	x := cx + 20; y := cy + 48
-	txt("Idioma da fala", x, y, 12, TEXT); y += 22
+	txt("Idioma da fala", x, y, FS_SM, TEXT); y += 22
 	bw := (cw - 48) / f32(len(STT_LANGS))
 	busy := stt_busy()
 	for lab, i in STT_LANGS {
 		r := rl.Rectangle{ x + f32(i)*bw, y, bw - 8, 26 }
 		on := i == stt_lang
 		rl.DrawRectangleRounded(r, 0.3, 6, on ? ACCENT_D : (hovered(r) && !busy ? HOVER : PANEL2))
-		txt_c(lab, r.x + r.width/2, r.y + 6, 12, on ? rl.WHITE : TEXT)
+		txt_c(lab, r.x + r.width/2, r.y + 6, FS_SM, on ? rl.WHITE : TEXT)
 		if !busy && !stt_eat && clicked(r) do stt_lang = i
 	}
 	y += 36
@@ -932,10 +932,10 @@ draw_stt_modal :: proc(sw, sh: f32) {
 		}
 		rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, stt_gpu ? ACCENT : MUTED)
 		if stt_gpu do rl.DrawRectangleRec({ chk.x + 4, chk.y + 4, 10, 10 }, ACCENT)
-		txt("GPU NVIDIA (bem mais rápido)", x + 26, y + 2, 12, TEXT)
+		txt("GPU NVIDIA (bem mais rápido)", x + 26, y + 2, FS_SM, TEXT)
 		y += 26
 	}
-	txt("Modelo Máximo. Vem em stt\\ com o editor; GPU baixa na primeira vez.", x, y, 11, MUTED)
+	txt("Modelo Máximo. Vem em stt\\ com o editor; GPU baixa na primeira vez.", x, y, FS_XS, MUTED)
 	y += 20
 	if ui_btn({ x, y, 160, 30 }, busy ? "Cancelar" : "Transcrever", !busy) {
 		if !stt_eat {
@@ -948,16 +948,16 @@ draw_stt_modal :: proc(sw, sh: f32) {
 	switch ph {
 	case .Fail:
 		msg := stt_err != "" ? cs(stt_err) : "Falha na transcrição"
-		txt(msg, x, y, 12, rl.Color{ 220, 120, 110, 255 })
+		txt(msg, x, y, FS_SM, DANGER)
 	case .Done:
 		txt(rl.TextFormat("%d fala(s)  ·  clique para editar  ·  × apaga  ·  Aplicar cria a faixa", i32(len(stt_cues))),
-			x, y, 12, ACCENT)
+			x, y, FS_SM, ACCENT)
 	case .Idle:
-		txt(stt_phase_label(ph), x, y, 12, MUTED)
+		txt(stt_phase_label(ph), x, y, FS_SM, MUTED)
 	case .Prep, .FetchBin, .FetchModel, .Extract, .Talk:
 		pct := stt_pct()
-		txt(stt_phase_label(ph), x, y, 12, ACCENT)
-		txt(rl.TextFormat("%d%%", i32(pct*100 + 0.5)), x + cw - 72, y, 12, ACCENT)
+		txt(stt_phase_label(ph), x, y, FS_SM, ACCENT)
+		txt(rl.TextFormat("%d%%", i32(pct*100 + 0.5)), x + cw - 72, y, FS_SM, ACCENT)
 		bar := rl.Rectangle{ x, y + 22, cw - 40, 8 }
 		rl.DrawRectangleRounded(bar, 1, 4, LINE)
 		fill := max(f32(2), pct * bar.width)
@@ -966,14 +966,14 @@ draw_stt_modal :: proc(sw, sh: f32) {
 	y += 40
 
 	lane := rl.Rectangle{ x, y, cw - 40, ch - (y - cy) - 64 }
-	rl.DrawRectangleRec(lane, rl.Color{ 24, 26, 32, 255 })
+	rl.DrawRectangleRec(lane, SUNK)
 	rl.DrawRectangleLinesEx(lane, 1, LINE)
 	if ph == .Done && len(stt_cues) == 0 {
-		txt_c("Nenhuma fala encontrada nesse trecho.", lane.x + lane.width/2, lane.y + 40, 12, MUTED)
+		txt_c("Nenhuma fala encontrada nesse trecho.", lane.x + lane.width/2, lane.y + 40, FS_SM, MUTED)
 	} else if len(stt_cues) > 0 {
 		draw_cue_list(lane, &stt_cues, nil, &stt_scroll, stt_eat || stt_busy())
 	} else if ph == .Idle {
-		txt_c("As falas aparecem aqui depois de Transcrever.", lane.x + lane.width/2, lane.y + 40, 12, MUTED)
+		txt_c("As falas aparecem aqui depois de Transcrever.", lane.x + lane.width/2, lane.y + 40, FS_SM, MUTED)
 	}
 
 	if ui_btn({ cx + 20, cy + ch - 48, 110, 32 }, "Fechar", false) && !stt_eat do stt_close()
@@ -981,10 +981,10 @@ draw_stt_modal :: proc(sw, sh: f32) {
 	ar := rl.Rectangle{ cx + cw - 230, cy + ch - 48, 210, 32 }
 	if can {
 		rl.DrawRectangleRounded(ar, 0.4, 8, hovered(ar) ? ACCENT : ACCENT_D)
-		txt_c("Aplicar na timeline", ar.x + ar.width/2, ar.y + 8, 13, rl.WHITE)
+		txt_c("Aplicar na timeline", ar.x + ar.width/2, ar.y + 8, FS_MD, rl.WHITE)
 		if clicked(ar) && !stt_eat do stt_apply_and_close()
 	} else {
-		rl.DrawRectangleRounded(ar, 0.4, 8, rl.Color{ 50, 54, 62, 255 })
-		txt_c("Aplicar na timeline", ar.x + ar.width/2, ar.y + 8, 13, MUTED)
+		rl.DrawRectangleRounded(ar, 0.4, 8, TRACK_BG)
+		txt_c("Aplicar na timeline", ar.x + ar.width/2, ar.y + 8, FS_MD, MUTED)
 	}
 }

@@ -561,7 +561,7 @@ draw_fullscreen_video :: proc(sw, sh: f32) {
 	if interactive && clicked(pr) do toggle_play()
 
 	// timecode: posição ATUAL / duração TOTAL
-	txt(rl.TextFormat("%s / %s", timecode(pos), timecode(total)), pr.x + 52, cy - 9, 16, fa(TEXT, a))
+	txt(rl.TextFormat("%s / %s", timecode(pos), timecode(total)), pr.x + 52, cy - 9, FS_LG, fa(TEXT, a))
 
 	// --- sair da tela cheia (canto inferior direito): 4 cantoneiras p/ DENTRO ---
 	fsr := rl.Rectangle{ sw - 44, cy - 12, 24, 24 }
@@ -599,7 +599,7 @@ draw_fullscreen_video :: proc(sw, sh: f32) {
 	if fs_vol_drag do player_vol = clamp((m.x - vtr.x) / vtr.width, 0, 1)
 
 	// dica curta (some junto com os controles)
-	txt("Esc: sair  ·  Espaço: play/pause", 26, bar_y + 4, 13, fa({ 210, 210, 215, 190 }, a))
+	txt("Esc: sair  ·  Espaço: play/pause", 26, bar_y + 4, FS_MD, fa({ 210, 210, 215, 190 }, a))
 }
 
 // playback da prévia de origem (chamado no update quando src_preview >= 0)
@@ -1209,7 +1209,7 @@ draw_crop_editor :: proc(fx, fy, fw, fh: f32) {
 	crx, cry, crw, crh := seg_crop(selected)
 	CR := rl.Rectangle{ frx+crx*fdw, fry+cry*fdh, crw*fdw, crh*fdh }
 	// escurece fora do recorte (4 faixas em volta da região mantida)
-	dim := rl.Color{ 0,0,0,150 }
+	dim := SCRIM
 	rl.DrawRectangleRec({frx, fry, fdw, CR.y-fry}, dim)
 	rl.DrawRectangleRec({frx, CR.y+CR.height, fdw, (fry+fdh)-(CR.y+CR.height)}, dim)
 	rl.DrawRectangleRec({frx, CR.y, CR.x-frx, CR.height}, dim)
@@ -1363,7 +1363,7 @@ crop_rect_editor :: proc(qx, qy, qw, qh: ^f32, frx, fry, fdw, fdh: f32, lock: bo
 	crw := qw^ <= 0 ? f32(1) : qw^
 	crh := qh^ <= 0 ? f32(1) : qh^
 	CR := rl.Rectangle{ frx+crx*fdw, fry+cry*fdh, crw*fdw, crh*fdh }
-	dim := rl.Color{ 0,0,0,150 }
+	dim := SCRIM
 	rl.DrawRectangleRec({frx, fry, fdw, CR.y-fry}, dim)
 	rl.DrawRectangleRec({frx, CR.y+CR.height, fdw, (fry+fdh)-(CR.y+CR.height)}, dim)
 	rl.DrawRectangleRec({frx, CR.y, CR.x-frx, CR.height}, dim)
@@ -1436,7 +1436,7 @@ crop_rect_editor :: proc(qx, qy, qw, qh: ^f32, frx, fry, fdw, fdh: f32, lock: bo
 	if crop_drag>=0 && rl.IsMouseButtonReleased(.LEFT) do crop_drag = -1
 }
 
-CROP_START_COL :: rl.Color{ 90, 200, 120, 255 } // quadro Início (verde)
+CROP_START_COL :: SUCCESS // quadro Início (verde)
 CROP_END_COL   :: rl.Color{ 235, 95, 82, 255 }   // quadro Fim (vermelho)
 
 // modal em si (chamado por draw_modal). Frame + retângulo(s) + abas + animação + rodapé.
@@ -1449,14 +1449,14 @@ draw_crop_modal :: proc(sw, sh: f32) {
 	sg := &segs[crop_bk_seg]
 	c := seg_src(crop_bk_seg)
 
-	rl.DrawRectangleRec({0,0,sw,sh}, rl.Color{ 0,0,0,180 })
+	rl.DrawRectangleRec({0,0,sw,sh}, alpha(SCRIM, 180))
 	cw: f32 = 640; chh: f32 = 552
 	cx := sw/2 - cw/2; cy := sh/2 - chh/2
 	card := rl.Rectangle{ cx, cy, cw, chh }
-	rl.DrawRectangleRounded(card, 0.03, 8, rl.Color{ 30, 33, 40, 255 })
+	rl.DrawRectangleRounded(card, 0.03, 8, SURFACE)
 	rl.DrawRectangleRoundedLinesEx(card, 0.03, 8, 1, LINE)
 
-	txt("Cortar e Ampliar", cx + 22, cy + 16, 18, TEXT)
+	txt("Cortar e Ampliar", cx + 22, cy + 16, FS_XL, TEXT)
 	xr := rl.Rectangle{ cx + cw - 38, cy + 16, 24, 24 }
 	if clicked(xr) { crop_modal_cancel(); return }
 	rl.DrawLineEx({xr.x+6,xr.y+6},{xr.x+16,xr.y+16}, 1.8, hovered(xr) ? TEXT : MUTED)
@@ -1476,7 +1476,7 @@ draw_crop_modal :: proc(sw, sh: f32) {
 			crop_tab = i
 			crop_drag = -1
 		}
-		txt_c(tab, tr.x + tws[i]/2, tr.y + 6, 13, i == crop_tab ? TEXT : MUTED)
+		txt_c(tab, tr.x + tws[i]/2, tr.y + 6, FS_MD, i == crop_tab ? TEXT : MUTED)
 		if i == crop_tab do rl.DrawRectangleRec({ tr.x + 8, tr.y + 24, tws[i] - 16, 2 }, ACCENT)
 		tx += tws[i] + 6
 	}
@@ -1489,7 +1489,7 @@ draw_crop_modal :: proc(sw, sh: f32) {
 		if clicked(chk) do crop_animate = !crop_animate
 		rl.DrawRectangleRoundedLinesEx(chk, 0.2, 4, 1.5, crop_animate ? ACCENT : MUTED)
 		if crop_animate do rl.DrawRectangleRec({ chk.x+4, chk.y+4, 10, 10 }, ACCENT)
-		txt("Animar zoom (Início → Fim)", chk.x + 26, ctrl_y + 2, 13, TEXT)
+		txt("Animar zoom (Início → Fim)", chk.x + 26, ctrl_y + 2, FS_MD, TEXT)
 		if crop_animate { // seletor de qual quadro editar
 			bi := rl.Rectangle{ cx + cw - 22 - 180, ctrl_y - 3, 86, 24 }
 			bf := rl.Rectangle{ cx + cw - 22 - 88,  ctrl_y - 3, 86, 24 }
@@ -1497,8 +1497,8 @@ draw_crop_modal :: proc(sw, sh: f32) {
 			if clicked(bf) do crop_edit_end = true
 			rl.DrawRectangleRounded(bi, 0.3, 5, !crop_edit_end ? rl.Color{40,78,52,255} : PANEL2)
 			rl.DrawRectangleRounded(bf, 0.3, 5,  crop_edit_end ? rl.Color{92,42,38,255} : PANEL2)
-			txt_c("Início", bi.x + bi.width/2, bi.y + 5, 12, CROP_START_COL)
-			txt_c("Fim",    bf.x + bf.width/2, bf.y + 5, 12, CROP_END_COL)
+			txt_c("Início", bi.x + bi.width/2, bi.y + 5, FS_SM, CROP_START_COL)
+			txt_c("Fim",    bf.x + bf.width/2, bf.y + 5, FS_SM, CROP_END_COL)
 		}
 	}
 
@@ -1576,7 +1576,7 @@ draw_crop_modal :: proc(sw, sh: f32) {
 	kf := clamp(crop_play_t/dur, 0, 1)
 	rl.DrawRectangleRounded({ sb.x, sb.y, kf*sb.width, sb.height }, 1, 4, ACCENT)
 	rl.DrawCircleV({ sb.x + kf*sb.width, sb.y + 2 }, 6, ACCENT)
-	txt(rl.TextFormat("%s / %s", tc(crop_play_t), tc(dur)), sb.x + sb.width + 12, tp_y + 4, 12, MUTED)
+	txt(rl.TextFormat("%s / %s", tc(crop_play_t), tc(dur)), sb.x + sb.width + 12, tp_y + 4, FS_SM, MUTED)
 
 	// rodapé
 	if ui_btn({ cx + 22, cy + chh - 46, 116, 32 }, "Redefinir", false) {

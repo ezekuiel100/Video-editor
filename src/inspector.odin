@@ -51,13 +51,11 @@ inspector_layout :: proc(area: rl.Rectangle) -> rl.Rectangle {
 }
 
 inspector_section :: proc(label: cstring, x, y, w: f32) {
-	txt(label, x, y + 3, 13, TEXT)
-	lw := txt_w(label, 13)
+	txt(label, x, y + 3, FS_MD, TEXT)
+	lw := txt_w(label, FS_MD)
 	rl.DrawLineEx({ x + lw + 12, y + 11 }, { x + w, y + 11 }, 1, LINE)
 }
 
-INSP_HDR     :: rl.Color{ 42, 48, 59, 255 } // um degrau acima do PANEL: cabeçalho destacado sem borda
-INSP_HDR_HOT :: rl.Color{ 49, 56, 69, 255 }
 
 // chevron desenhado (a fonte não garante ▾/▸): aberto aponta p/ baixo, fechado p/ a direita
 inspector_chevron :: proc(cx, cy: f32, open: bool, col: rl.Color) {
@@ -93,13 +91,13 @@ inspector_group :: proc(label: cstring, x, y, w: f32, open: ^bool, dirty: bool) 
 		inspector_clear_focus()
 	}
 	inspector_chevron(x + 14, y + 16, open^, hovered(toggle) ? TEXT : MUTED)
-	txt(label, x + 28, y + 8, 14, TEXT)
+	txt(label, x + 28, y + 8, FS_MD, TEXT)
 	if !dirty do return false
 	hot := hovered(reset)
 	if hot {
 		rl.DrawRectangleRounded(reset, 0.3, 4, HOVER)
-		lw := txt_w("Redefinir", 12)
-		txt("Redefinir", reset.x - lw - 6, y + 9, 12, ACCENT)
+		lw := txt_w("Redefinir", FS_SM)
+		txt("Redefinir", reset.x - lw - 6, y + 9, FS_SM, ACCENT)
 	}
 	inspector_reset_icon(reset.x + 12, reset.y + 12, hot ? ACCENT : MUTED)
 	return clicked(reset)
@@ -132,14 +130,14 @@ inspector_value :: proc(id: int, box: rl.Rectangle, value: ^f32, lo, hi, factor:
 			insp_num_id = -1
 		}
 	} else {
-		txt_c(rl.TextFormat("%.2f%s", value^ * factor, unit), box.x + box.width/2, box.y + 7, 12, ACCENT)
+		txt_c(rl.TextFormat("%.2f%s", value^ * factor, unit), box.x + box.width/2, box.y + 7, FS_SM, ACCENT)
 	}
 	rl.DrawRectangleRoundedLinesEx(box, 0.2, 4, 1, on ? ACCENT : LINE)
 	return changed
 }
 
 inspector_row :: proc(id: int, label: cstring, x, y, w: f32, value: ^f32, lo, hi: f32, factor: f32 = 1, unit: cstring = "") -> bool {
-	txt(label, x, y + 7, 13, TEXT)
+	txt(label, x, y + 7, FS_MD, TEXT)
 	changed := inspector_value(id, { x + w - 88, y, 88, 28 }, value, lo, hi, factor, unit)
 	if ui_slider(id, { x, y + 32, w, 16 }, value, lo, hi) do changed = true
 	return changed
@@ -161,7 +159,7 @@ inspector_controls :: proc(body: rl.Rectangle) -> f32 {
 	}
 	if insp_tab == 0 {
 		if c.is_audio || sg.aonly {
-			txt("Este clipe não contém vídeo.", x, y, 13, MUTED)
+			txt("Este clipe não contém vídeo.", x, y, FS_MD, MUTED)
 			return 48
 		}
 		if inspector_group("Transformação", x, y, w, &insp_transform_open, sg.scale != 1 || sg.px != 0 || sg.py != 0 || sg.rot != 0) {
@@ -175,12 +173,12 @@ inspector_controls :: proc(body: rl.Rectangle) -> f32 {
 		if insp_transform_open {
 			inspector_row(4, "Escala", x, y, w, &sg.scale, 0.1, 3, 100, "%")
 			y += 58
-			txt("Posição", x, y, 13, TEXT)
+			txt("Posição", x, y, FS_MD, TEXT)
 			y += 24
 			half := (w - 12)/2
-			txt("X", x, y + 8, 13, MUTED)
+			txt("X", x, y + 8, FS_MD, MUTED)
 			inspector_value(5, { x + 20, y, half - 20, 28 }, &sg.px, -1, 1, 100, "%")
-			txt("Y", x + half + 12, y + 8, 13, MUTED)
+			txt("Y", x + half + 12, y + 8, FS_MD, MUTED)
 			inspector_value(6, { x + half + 32, y, half - 20, 28 }, &sg.py, -1, 1, 100, "%")
 			ui_slider(5, { x, y + 32, half, 16 }, &sg.px, -1, 1)
 			ui_slider(6, { x + half + 12, y + 32, half, 16 }, &sg.py, -1, 1)
@@ -197,7 +195,7 @@ inspector_controls :: proc(body: rl.Rectangle) -> f32 {
 		}
 		y += 42
 		if insp_crop_open {
-			txt(seg_cropped(selected) ? "Recorte personalizado" : "Quadro completo", x, y, 13, MUTED)
+			txt(seg_cropped(selected) ? "Recorte personalizado" : "Quadro completo", x, y, FS_MD, MUTED)
 			y += 24
 			if ui_btn({ x, y, w, 32 }, seg_cropped(selected) ? "Editar recorte na prévia" : "Recortar na prévia", seg_cropped(selected)) {
 				set_crop_mode(true)
@@ -232,7 +230,7 @@ inspector_controls :: proc(body: rl.Rectangle) -> f32 {
 		}
 	} else if insp_tab == 2 {
 		if c.is_img {
-			txt("Imagem não possui velocidade.", x, y, 13, MUTED)
+			txt("Imagem não possui velocidade.", x, y, FS_MD, MUTED)
 			return 48
 		}
 		inspector_section("Velocidade", x, y, w)
@@ -251,14 +249,14 @@ inspector_controls :: proc(body: rl.Rectangle) -> f32 {
 		}
 		if changed do apply_seg_speed(selected, speed)
 		y += 40
-		txt("Duração", x, y, 13, TEXT)
-		txt(timecode(sg.dur), x + w - 92, y, 13, MUTED)
+		txt("Duração", x, y, FS_MD, TEXT)
+		txt(timecode(sg.dur), x + w - 92, y, FS_MD, MUTED)
 		y += 28
-		txt("Muda o tom do áudio.", x, y, 12, MUTED)
+		txt("Muda o tom do áudio.", x, y, FS_SM, MUTED)
 		y += 24
 	} else {
 		if !c.has_audio {
-			txt("Este clipe não contém áudio.", x, y, 13, MUTED)
+			txt("Este clipe não contém áudio.", x, y, FS_MD, MUTED)
 			return 48
 		}
 		inspector_section("Áudio", x, y, w)
@@ -295,9 +293,9 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	if !valid || src_preview >= 0 || crop_mode {
 		inspector_clear_focus()
 		insp_last_seg = -1
-		txt("Inspetor", area.x + 14, area.y + 14, 15, TEXT)
+		txt("Inspetor", area.x + 14, area.y + 14, FS_LG, TEXT)
 		msg: cstring = crop_mode ? "Conclua o recorte na prévia." : "Selecione um clipe na timeline."
-		txt(msg, area.x + 14, area.y + 50, 13, MUTED)
+		txt(msg, area.x + 14, area.y + 50, FS_MD, MUTED)
 		return
 	}
 	if insp_last_seg != selected || insp_last_tab != insp_tab {
@@ -310,11 +308,11 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	c := seg_src(selected)
 	if !c.is_text || c.is_caps do txt_edit = false
 	rl.DrawRectangleRec({ area.x + 1, area.y + 1, area.width - 2, 86 }, PANEL2)
-	txt("Inspetor", area.x + 14, area.y + 12, 16, TEXT)
+	txt("Inspetor", area.x + 14, area.y + 12, FS_LG, TEXT)
 	kind: cstring = c.is_text ? (c.is_caps ? "LEGENDAS" : "TEXTO") : ((c.is_audio || segs[selected].aonly) ? "ÁUDIO" : (c.is_img ? "IMAGEM" : "VÍDEO"))
-	txt(kind, area.x + area.width - 84, area.y + 15, 11, ACCENT)
-	txt(elide(c.name, 14, area.width - 28), area.x + 14, area.y + 39, 14, TEXT)
-	txt("Clipe selecionado", area.x + 14, area.y + 62, 12, MUTED)
+	txt(kind, area.x + area.width - 84, area.y + 15, FS_XS, ACCENT)
+	txt(elide(c.name, FS_MD, area.width - 28), area.x + 14, area.y + 39, FS_MD, TEXT)
+	txt("Clipe selecionado", area.x + 14, area.y + 62, FS_SM, MUTED)
 	body := rl.Rectangle{ area.x + 1, area.y + 94, area.width - 2, max(f32(1), area.height - 102) }
 	if !c.is_text {
 		tabs := [3]cstring{ "Vídeo", "Áudio", "Velocidade" }
@@ -323,7 +321,7 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 			r := rl.Rectangle{ area.x + 8 + f32(i)*tw, area.y + 92, tw, 34 }
 			active := insp_tab == i
 			if active || hovered(r) do rl.DrawRectangleRounded(r, 0.15, 4, PANEL2)
-			txt_c(tab, r.x + tw/2, r.y + 9, 14, active ? TEXT : MUTED)
+			txt_c(tab, r.x + tw/2, r.y + 9, FS_MD, active ? TEXT : MUTED)
 			if active do rl.DrawRectangleRec({ r.x + 10, r.y + 32, tw - 20, 2 }, ACCENT)
 			if clicked(r) && insp_tab != i {
 				insp_tab = i

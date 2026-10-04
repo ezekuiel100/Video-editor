@@ -20,25 +20,7 @@ import "core:unicode/utf8"
 import win "core:sys/windows"
 
 
-// ---------- paleta (tema escuro de alto contraste) ----------
-// Três níveis de superfície mantêm os painéis separados sem depender de bordas pesadas.
-BG       :: rl.Color{ 18, 21, 27, 255 }
-PANEL    :: rl.Color{ 34, 39, 48, 255 }
-PANEL2   :: rl.Color{ 26, 30, 38, 255 }
-TOPBAR   :: rl.Color{ 15, 18, 24, 255 }
-LINE     :: rl.Color{ 62, 69, 84, 255 }
-TEXT     :: rl.Color{ 239, 243, 248, 255 }
-MUTED    :: rl.Color{ 157, 168, 186, 255 }
-ACCENT   :: rl.Color{ 45, 212, 192, 255 }
-ACCENT_D :: rl.Color{ 25, 143, 130, 255 }
-PLAYHEAD :: rl.Color{ 236, 72, 60, 255 }
-CLIP     :: rl.Color{ 55, 90, 113, 255 }
-CLIP_HDR :: rl.Color{ 71, 115, 140, 255 }
-AUDIOCLIP:: rl.Color{ 46, 78, 68, 255 }
-HOVER    :: rl.Color{ 51, 58, 71, 255 }
-PV_BACK  :: rl.Color{ 31, 35, 43, 255 } // fundo do painel de preview FORA do quadro de saída (não é preto:
-                                        // separa à vista o que é vídeo do que é só sobra do painel)
-PV_EDGE  :: rl.Color{ 104, 114, 132, 235 } // moldura do quadro de saída
+// paleta e escala tipográfica: theme.odin
 
 ui_font: rl.Font
 g_us: f32 = 1.35 // texto ligeiramente maior para leitura confortável em telas densas
@@ -54,7 +36,18 @@ text_fonts: [dynamic]TextFont
 // 1x/frame) sobe a textura de cada slot pronto, em ordem. O seletor de fonte só aparece
 // com len(text_fonts)>1, então a UI se ajusta sozinha enquanto carregam (~2.5s).
 SDF_SZ    :: i32(64) // tamanho-base dos atlas SDF (UI e fontes de texto)
-FONT_CP_N :: 560     // codepoints 32..591 (acentos PT-BR)
+FONT_CP_LATIN :: 560 // codepoints 32..591 (acentos PT-BR)
+// pontuação tipográfica que a UI usa FORA do Latin Extended — sem estes glifos o texto
+// saía com "?" (o "•" de não salvo no título, o "—" do export, o "…" de progresso)
+FONT_CP_EXTRA :: [?]rune{ '–', '—', '‘', '’', '“', '”', '•', '…', '‹', '›', '€', '←', '→', '−' }
+FONT_CP_N :: FONT_CP_LATIN + len(FONT_CP_EXTRA)
+// lista de codepoints de TODAS as fontes (UI e texto): latim + pontuação extra
+font_codepoints :: proc() -> (cp: [FONT_CP_N]rune) {
+	for i in 0 ..< FONT_CP_LATIN do cp[i] = rune(32 + i)
+	extra := FONT_CP_EXTRA
+	for r, i in extra do cp[FONT_CP_LATIN + i] = r
+	return
+}
 TFontCPU :: struct {
 	glyphs: [^]rl.GlyphInfo,
 	recs:   [^]rl.Rectangle,
@@ -428,8 +421,7 @@ main :: proc() {
 	if g_refresh < 30 || g_refresh > 360 do g_refresh = 60 // driver devolveu 0/valor absurdo: 60
 	rl.SetTargetFPS(g_refresh)
 
-	cp: [FONT_CP_N]rune
-	for i in 0 ..< len(cp) do cp[i] = rune(32 + i)
+	cp := font_codepoints()
 	// fonte SDF (signed distance field): a UI desenha 11..18px (downscale). Atlas bitmap
 	// escalado borra; SDF + shader dá texto NÍTIDO em qualquer tamanho.
 	sdf_shader = rl.LoadShaderFromMemory(nil, SDF_FS)

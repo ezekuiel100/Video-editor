@@ -173,7 +173,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	if cz_ok && clicked(cz) do open_crop_modal()
 	rl.DrawRectangleRounded(cz, 0.3, 4, (hovered(cz) && cz_ok) ? HOVER : PANEL2)
 	{ // ícone: cantos de recorte
-		icx := cz.x + 13; icy := tb.y + tb.height/2; icol := cz_ok ? TEXT : rl.Color{ 92,96,104,255 }
+		icx := cz.x + 13; icy := tb.y + tb.height/2; icol := cz_ok ? TEXT : DISABLED
 		rl.DrawLineEx({icx-6, icy-6},{icx-6, icy+1}, 2, icol); rl.DrawLineEx({icx-6, icy-6},{icx+1, icy-6}, 2, icol)
 		rl.DrawLineEx({icx+6, icy+6},{icx+6, icy-1}, 2, icol); rl.DrawLineEx({icx+6, icy+6},{icx-1, icy+6}, 2, icol)
 	}
@@ -186,7 +186,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	if sz_ok && clicked(sz) do open_silence_modal()
 	rl.DrawRectangleRounded(sz, 0.3, 4, (hovered(sz) && sz_ok) ? HOVER : PANEL2)
 	{ // ícone: onda com vão no meio (silêncio)
-		icx := sz.x + 13; icy := tb.y + tb.height/2; icol := sz_ok ? TEXT : rl.Color{ 92,96,104,255 }
+		icx := sz.x + 13; icy := tb.y + tb.height/2; icol := sz_ok ? TEXT : DISABLED
 		rl.DrawLineEx({icx-8, icy}, {icx-5, icy-5}, 1.6, icol)
 		rl.DrawLineEx({icx-5, icy-5}, {icx-2, icy+4}, 1.6, icol)
 		rl.DrawLineEx({icx-2, icy+4}, {icx-0.5, icy}, 1.6, icol)
@@ -204,7 +204,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	if st_ok && clicked(stz) do open_stt_modal()
 	rl.DrawRectangleRounded(stz, 0.3, 4, (hovered(stz) && st_ok) ? HOVER : PANEL2)
 	{ // ícone: balão de fala
-		icx := stz.x + 13; icy := tb.y + tb.height/2; icol := st_ok ? TEXT : rl.Color{ 92,96,104,255 }
+		icx := stz.x + 13; icy := tb.y + tb.height/2; icol := st_ok ? TEXT : DISABLED
 		rl.DrawRectangleRounded({ icx-8, icy-7, 16, 11 }, 0.4, 4, icol)
 		rl.DrawTriangle({ icx-3, icy+4 }, { icx+2, icy+4 }, { icx-4, icy+8 }, icol)
 		rl.DrawLineEx({ icx-4, icy-3 }, { icx+4, icy-3 }, 1.4, PANEL2)
@@ -223,7 +223,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	}
 	rl.DrawRectangleRounded(gz, 0.3, 4, (hovered(gz) && gz_ok) ? HOVER : PANEL2)
 	{
-		icx := gz.x + 13; icy := tb.y + tb.height/2; icol := gz_ok ? TEXT : rl.Color{ 92,96,104,255 }
+		icx := gz.x + 13; icy := tb.y + tb.height/2; icol := gz_ok ? TEXT : DISABLED
 		// dois blocos com setas se aproximando (fechar o buraco)
 		rl.DrawRectangleRec({ icx-9, icy-5, 6, 10 }, icol)
 		rl.DrawRectangleRec({ icx+3, icy-5, 6, 10 }, icol)
@@ -255,7 +255,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	fit_r := rl.Rectangle{ r.x + r.width - 190, tb.y + 6, 32, 22 }
 	if clicked(fit_r) do tl_fit(view_w)
 	rl.DrawRectangleRounded(fit_r, 0.3, 4, hovered(fit_r) ? HOVER : PANEL2)
-	txt_c("Fit", fit_r.x + fit_r.width/2, fit_r.y + 5, 12, TEXT)
+	txt_c("Fit", fit_r.x + fit_r.width/2, fit_r.y + 5, FS_SM, TEXT)
 	zr_minus := rl.Rectangle{ r.x + r.width - 150, tb.y + 6, 22, 22 }
 	zr_plus := rl.Rectangle{ r.x + r.width - 40, tb.y + 6, 22, 22 }
 	// passos multiplicativos: casam com o slider log (aditivo daria saltos enormes perto do mínimo)
@@ -342,7 +342,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 
 	// Régua discreta: contraste no texto, não em linhas pesadas.
 	ruler := rl.Rectangle{ r.x + LANE_X, r.y + toolbar_h, r.width - LANE_X, ruler_h }
-	rl.DrawRectangleRec(ruler, rl.Color{ 22, 26, 33, 255 })
+	rl.DrawRectangleRec(ruler, SUNK)
 	rl.DrawRectangleRec({ ruler.x, ruler.y + ruler.height - 1, ruler.width, 1 }, LINE)
 	rl.BeginScissorMode(i32(clip_rect.x), i32(clip_rect.y), i32(clip_rect.width), i32(clip_rect.height))
 	// passo adaptativo: escolhe um intervalo "redondo" (s) que garanta ~7px entre
@@ -366,7 +366,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			// hierarquia só pela altura: rótulo 10px, meio 6px, menor 3px
 			if sec % lstep == 0 {
 				rl.DrawLineEx({x, base - 10}, {x, base}, 1, rl.Color{ 126, 136, 153, 230 })
-				txt(ruler_label(sec), x + 4, ruler.y + 4, 11, rl.Color{ 160, 170, 186, 255 })
+				txt(ruler_label(sec), x + 4, ruler.y + 4, FS_XS, MUTED)
 			} else if half > 0 && sec % half == 0 {
 				rl.DrawLineEx({x, base - 6}, {x, base}, 1, rl.Color{ 110, 120, 136, 200 })
 			} else {
@@ -404,19 +404,19 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		}
 		draw_track_header({ r.x, ly, LANE_X, lh }, label, t)
 		// Fundo neutro: a cor identifica o tipo no rótulo e nos clipes, não na faixa inteira.
-		lane_col := row % 2 == 0 ? rl.Color{ 28, 32, 40, 255 } : rl.Color{ 30, 34, 42, 255 }
+		lane_col := row % 2 == 0 ? LANE_A : LANE_B
 		rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, lane_col)
-		rl.DrawRectangleRec({ r.x, ly + lh - 1, r.width, 1 }, rl.Color{ 49, 55, 67, 190 })
-		if track_locked[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, rl.Color{ 210, 160, 50, 20 }) // tint bloqueada
-		if track_muted[t]  do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, rl.Color{ 170, 60, 60, 24 })  // tint muda
-		if track_hidden[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, rl.Color{ 80, 100, 130, 30 })  // tint oculta
+		rl.DrawRectangleRec({ r.x, ly + lh - 1, r.width, 1 }, SEP)
+		if track_locked[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, alpha(LOCKED, 20)) // tint bloqueada
+		if track_muted[t]  do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, alpha(DANGER_D, 24))  // tint muda
+		if track_hidden[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, alpha(TRACK_HIDDEN, 30))  // tint oculta
 		// feedback do pegador: pontilhado discreto, acende no hover/arrasto
 		hot := track_resize == t || (track_resize < 0 && hovered(hz) && st.drag == .None && modal == .None)
 		if hot {
 			rl.SetMouseCursor(.RESIZE_NS)
 			rl.DrawRectangleRec({ r.x, ly + lh - 1, LANE_X, 2 }, ACCENT)
 		} else {
-			for k in 0 ..< 3 do rl.DrawCircleV({ r.x + LANE_X/2 + f32(k - 1)*7, ly + lh - 2 }, 1.1, rl.Color{ 110, 118, 132, 255 })
+			for k in 0 ..< 3 do rl.DrawCircleV({ r.x + LANE_X/2 + f32(k - 1)*7, ly + lh - 2 }, 1.1, DISABLED)
 		}
 	}
 	rl.EndScissorMode()
@@ -452,8 +452,8 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	}
 	if segs_ready() == 0 {
 		empty_y := rows_top + rows_vh/2
-		txt_c("Timeline vazia", vlane.x + vlane.width/2, empty_y - 15, 14, TEXT)
-		txt_c("Arraste uma mídia para começar", vlane.x + vlane.width/2, empty_y + 7, 12, MUTED)
+		txt_c("Timeline vazia", vlane.x + vlane.width/2, empty_y - 15, FS_MD, TEXT)
+		txt_c("Arraste uma mídia para começar", vlane.x + vlane.width/2, empty_y + 7, FS_SM, MUTED)
 	}
 
 	// segmentos de vídeo (e blocos de áudio) colocados na timeline
@@ -475,9 +475,9 @@ draw_timeline :: proc(r: rl.Rectangle) {
 
 		vr := rl.Rectangle{ x, track_y(sg.track) + 4, w, th(sg.track) - 8 }
 		alike := c.is_audio || sg.aonly // se comporta como áudio (mídia só-áudio OU áudio separado)
-		clip_col := alike ? AUDIOCLIP : (c.is_text ? rl.Color{ 66, 54, 86, 255 } : CLIP)
+		clip_col := alike ? AUDIOCLIP : (c.is_text ? TEXTCLIP : CLIP)
 		rl.DrawRectangleRounded(vr, 0.06, 4, clip_col)
-		rl.DrawRectangleRoundedLinesEx(vr, 0.06, 4, 1, alike ? rl.Color{ 66, 102, 88, 200 } : (c.is_text ? rl.Color{ 105, 84, 132, 200 } : CLIP_HDR))
+		rl.DrawRectangleRoundedLinesEx(vr, 0.06, 4, 1, alike ? rl.Color{ 66, 102, 88, 200 } : (c.is_text ? alpha(TEXTCLIP_EDGE, 200) : CLIP_HDR))
 		// clipe só-áudio: a onda ocupa o bloco todo (sem filmstrip). Vídeo: REPARTIÇÃO em que a
 		// IMAGEM cresce devagar (FILM_BASE + 25% do espaço extra, teto FILM_MAX) e TODO o resto
 		// vai pra ONDA — aumentar a trilha engorda o áudio, que é o ponto (achar o corte). Na
@@ -490,7 +490,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		// clipe de texto: mostra o conteúdo centralizado (sem miniaturas)
 		if c.is_text && w > 30 {
 			label := c.is_caps ? (len(c.caps) > 0 ? c.caps[0].text : "Legendas") : c.text
-			txt_c(elide(label, 12, w - 16), vr.x + vr.width/2, vr.y + vr.height/2 - 4, 12, rl.Color{ 214, 204, 236, 255 })
+			txt_c(elide(label, FS_SM, w - 16), vr.x + vr.width/2, vr.y + vr.height/2 - 4, FS_SM, TEXTCLIP_INK)
 		}
 		// tira de miniaturas (filmstrip) sob a barra do título, só o trecho visível
 		if !c.is_text do ensure_thumbs(c)
@@ -553,7 +553,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		if spd_on {
 			scol := speed_color(spd)
 			lbl := speed_label(spd)
-			pw := txt_w(lbl, 10) + 8
+			pw := txt_w(lbl, FS_XS) + 8
 			vis0 := max(vr.x, clip_rect.x)
 			// à direita da área visível fica a barra de rolagem vertical, quando há uma
 			vis1 := min(vr.x + vr.width - xbtn_room, clip_rect.x + clip_rect.width - (max_vscroll > 0 ? 13 : 0))
@@ -561,7 +561,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			if px + pw <= vis1 - 3 {
 				pr := rl.Rectangle{ px, vr.y + 1.5, pw, 12 }
 				rl.DrawRectangleRounded(pr, 0.5, 6, scol)
-				txt_c(lbl, px + pw/2, pr.y + 1, 10, rl.Color{ 24, 26, 32, 255 })
+				txt_c(lbl, px + pw/2, pr.y + 1, FS_XS, INK)
 				name_x = max(name_x, px + pw + 5)
 			} else if vis1 - vis0 > 5 { // estreito: só o risco na borda visível
 				rl.DrawRectangleRec({ vis0 + 1, vr.y + 2, 3, 11 }, scol)
@@ -569,7 +569,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		}
 		if w > 40 { // nome cortado (…) p/ CABER no clipe, sem vazar pro vizinho
 			name_r := vr.x + w - 6 - xbtn_room // limite direito do nome (reserva p/ o botão x)
-			if name_r - name_x > 12 do txt(elide(c.name, 11, name_r - name_x), name_x, vr.y + 1, 11, rl.WHITE)
+			if name_r - name_x > 12 do txt(elide(c.name, FS_XS, name_r - name_x), name_x, vr.y + 1, FS_XS, rl.WHITE)
 		}
 		// marcas de silêncio detectado (modal aberto): faixa âmbar sobre o vão
 		if modal == .Silence && i == sil_si {
@@ -577,12 +577,12 @@ draw_timeline :: proc(r: rl.Rectangle) {
 				sx0 := tl_x(sil_hits[k].t0)
 				sx1 := tl_x(sil_hits[k].t1)
 				sr := rl.Rectangle{ sx0, vr.y, sx1 - sx0, vr.height }
-				rl.DrawRectangleRec(sr, rl.Color{ 220, 170, 50, 70 })
+				rl.DrawRectangleRec(sr, alpha(WARN, 70))
 			}
 		}
 		sel := i == selected
 		mk := seg_marked[i] // parte de uma seleção múltipla
-		if mk && !sel do rl.DrawRectangleRounded(vr, 0.06, 4, rl.Color{ 120, 170, 240, 40 }) // tom azul p/ marcado
+		if mk && !sel do rl.DrawRectangleRounded(vr, 0.06, 4, alpha(SELECT, 40)) // tom azul p/ marcado
 		bcol := (sel || mk) ? rl.WHITE : (active ? ACCENT : ACCENT_D)
 		rl.DrawRectangleRoundedLinesEx(vr, 0.06, 4, (sel || mk || active) ? 2 : 1, bcol)
 		// alças de aparo nas bordas (só no segmento selecionado e largo o bastante)
@@ -598,7 +598,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		// botãozinho de remover (x) no segmento selecionado
 		if sel && w > 26 {
 			xr := rl.Rectangle{ vr.x + vr.width - 18, vr.y + 2, 14, 14 }
-			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : rl.Color{60,64,74,220})
+			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : alpha(GRIP, 220))
 			rl.DrawLineEx({xr.x + 4, xr.y + 4}, {xr.x + 10, xr.y + 10}, 1.6, rl.WHITE)
 			rl.DrawLineEx({xr.x + 10, xr.y + 4}, {xr.x + 4, xr.y + 10}, 1.6, rl.WHITE)
 			if clicked(xr) {
@@ -612,7 +612,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		if c.has_audio && w > 8 {
 			pw := prof_beg(.Tl_Wave); defer prof_end(.Tl_Wave, pw)
 			ar := rl.Rectangle{ vr.x, vr.y + vr.height - wave_h, vr.width, wave_h }
-			rl.DrawRectangleRec(ar, rl.Color{ 24, 46, 40, 200 }) // faixa escura de fundo da onda
+			rl.DrawRectangleRec(ar, alpha(WAVE_BG, 200)) // faixa escura de fundo da onda
 			// só o trecho visível: um clipe longo em zoom alto tem centenas de
 			// milhares de px de largura, e o scissor corta o desenho na tela mas
 			// não o custo das chamadas (eram ~72k DrawLineEx/frame p/ 1h no zoom 4)
@@ -628,8 +628,8 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			amp := ar.height - 4
 			cy := ar.y + ar.height / 2 // só p/ posicionar o ícone de mudo
 			// corpo (RMS) sólido + contorno (pico) translúcido; cinza quando mudo
-			wcol := sg.muted ? rl.Color{ 120, 126, 136, 190 } : rl.Color{ 95, 180, 150, 235 }
-			pcol := sg.muted ? rl.Color{ 120, 126, 136,  70 } : rl.Color{ 95, 180, 150,  90 }
+			wcol := sg.muted ? rl.Color{ 120, 126, 136, 190 } : alpha(WAVE, 235)
+			pcol := sg.muted ? rl.Color{ 120, 126, 136,  70 } : alpha(WAVE, 90)
 			for wx := wx0; wx < wx1; wx += STEP {
 				tl := tl_t(wx)
 				// tempo na FONTE nas duas bordas desta coluna (respeita o in_off do corte)
@@ -637,7 +637,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 				tb := (tl_t(wx + STEP) - sg.start) * seg_speed(i) + sg.in_off
 				p := wave_peak(c, ta, tb)
 				if p < 0 { // ainda calculando: fio esmaecido na base
-					rl.DrawRectangleRec({wx, base - 3, STEP, 3}, rl.Color{70, 100, 92, 130})
+					rl.DrawRectangleRec({wx, base - 3, STEP, 3}, alpha(WAVE_BASE, 130))
 				} else {
 					// DUAS camadas (estilo NLE): contorno do PICO em tom claro/translúcido e o
 					// corpo do RMS sólido por cima. Só o pico virava um bloco cheio em música
@@ -655,10 +655,10 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			}
 			// ícone de mudo à esquerda da faixa
 			if sg.muted && w > 30 {
-				rl.DrawRectangleRec({ ar.x + 5, cy - 3, 4, 6 }, rl.Color{ 220, 90, 90, 255 })
-				rl.DrawTriangle({ ar.x + 9, cy - 5 }, { ar.x + 9, cy + 5 }, { ar.x + 15, cy }, rl.Color{ 220, 90, 90, 255 })
-				rl.DrawLineEx({ ar.x + 18, cy - 5 }, { ar.x + 24, cy + 5 }, 1.6, rl.Color{ 220, 90, 90, 255 })
-				rl.DrawLineEx({ ar.x + 24, cy - 5 }, { ar.x + 18, cy + 5 }, 1.6, rl.Color{ 220, 90, 90, 255 })
+				rl.DrawRectangleRec({ ar.x + 5, cy - 3, 4, 6 }, DANGER)
+				rl.DrawTriangle({ ar.x + 9, cy - 5 }, { ar.x + 9, cy + 5 }, { ar.x + 15, cy }, DANGER)
+				rl.DrawLineEx({ ar.x + 18, cy - 5 }, { ar.x + 24, cy + 5 }, 1.6, DANGER)
+				rl.DrawLineEx({ ar.x + 24, cy - 5 }, { ar.x + 18, cy + 5 }, 1.6, DANGER)
 			}
 		}
 
@@ -676,7 +676,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 				rl.DrawLineEx({ vr.x, vy }, { vr.x + w, vy }, 1.5, rl.Color{ 240, 240, 245, 230 })
 				rl.DrawCircleV({ vr.x + w/2, vy }, 4, rl.WHITE)
 				g_sel_volbar = { vr.x, vy - 5, w, 10 }; g_vby0 = by0; g_vby1 = by1
-				if st.drag == .Vol do txt(rl.TextFormat("%d%%", i32(sg.vol*100 + 0.5)), vr.x + w/2 + 8, vy - 16, 12, rl.WHITE)
+				if st.drag == .Vol do txt(rl.TextFormat("%d%%", i32(sg.vol*100 + 0.5)), vr.x + w/2 + 8, vy - 16, FS_SM, rl.WHITE)
 				// alças de fade arrastáveis (círculos no topo)
 				fix := min(vr.x + sg.fade_in*pps(),  vr.x + w)
 				fox := max(vr.x + w - sg.fade_out*pps(), vr.x)
@@ -687,7 +687,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		}
 
 		// divisória no início do segmento (mostra o corte entre segmentos vizinhos, na trilha dele)
-		if i > 0 do rl.DrawLineEx({x, track_y(sg.track)}, {x, track_y(sg.track) + th(sg.track)}, 1, rl.Color{20,22,27,255})
+		if i > 0 do rl.DrawLineEx({x, track_y(sg.track)}, {x, track_y(sg.track) + th(sg.track)}, 1, SUNK)
 	}
 
 	// SEGUNDO PASSO: indicadores de transição/fade POR CIMA de todos os blocos (senão um
@@ -698,7 +698,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		x := tl_x(sg.start); w := sg.dur * pps()
 		vr := rl.Rectangle{ x, track_y(sg.track) + 4, w, th(sg.track) - 8 }
 		xbtn :: proc(xr: rl.Rectangle) -> bool {
-			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : rl.Color{ 60, 64, 74, 235 })
+			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : alpha(GRIP, 235))
 			rl.DrawLineEx({xr.x+4,xr.y+4},{xr.x+10,xr.y+10},1.7,rl.WHITE)
 			rl.DrawLineEx({xr.x+10,xr.y+4},{xr.x+4,xr.y+10},1.7,rl.WHITE)
 			return clicked(xr)
@@ -725,7 +725,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 				rl.DrawRectangleLinesEx(ext, on ? 1.6 : 1, rl.Color{ 248, 214, 122, on ? 235 : 140 })
 			}
 			// pastilha: fundo escuro arredondado + duas rampas cruzadas (símbolo de crossfade)
-			rl.DrawRectangleRounded(badge, 0.35, 6, is_sel ? (ghost ? rl.Color{ 40, 52, 68, 250 } : rl.Color{ 96, 78, 30, 250 }) : rl.Color{ 33, 36, 43, 240 })
+			rl.DrawRectangleRounded(badge, 0.35, 6, is_sel ? (ghost ? alpha(SEL_BG, 250) : rl.Color{ 96, 78, 30, 250 }) : alpha(SURFACE, 240))
 			rl.DrawRectangleRoundedLinesEx(badge, 0.35, 6, is_sel ? 1.8 : 1.2, rl.Color{ amber.r, amber.g, amber.b, (hb || is_sel) ? 255 : 185 })
 			pd := f32(6)
 			ix0 := badge.x + pd; ix1 := badge.x + bw - pd
@@ -739,7 +739,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 				rl.DrawRectangleRounded({ ext.x - 2.5, vr.y + vr.height/2 - 9, 5, 18 }, 0.5, 4, amber)
 				rl.DrawRectangleRounded({ ext.x + ext.width - 2.5, vr.y + vr.height/2 - 9, 5, 18 }, 0.5, 4, amber)
 				if hovered(eL) || hovered(eR) || dragging do ew_cursor = true
-				txt_c(rl.TextFormat("%.1fs", f64(td)), cut, badge.y + bh + 3, 11, amber)
+				txt_c(rl.TextFormat("%.1fs", f64(td)), cut, badge.y + bh + 3, FS_XS, amber)
 				if xbtn({ cut - 7, vr.y + 2, 14, 14 }) {
 					if track_locked[segs[i].track] { set_toast("Trilha bloqueada") }
 					else { segs[i].trans = 0; segs[i].trans_mode = 0; sel_trans = -1; set_toast("Transição removida") }
@@ -766,10 +766,10 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			rl.DrawLineEx({ vr.x, vr.y + vr.height - 3 }, { vr.x + fw2, vr.y + 3 }, 1.8, white)
 			grip := rl.Rectangle{ vr.x + fw2 - 3, vr.y + vr.height/2 - 9, 6, 18 }
 			hg := hovered(grip) && st.drag == .None
-			rl.DrawRectangleRounded(grip, 0.5, 4, (is_sel || hg) ? rl.WHITE : rl.Color{ 205, 210, 220, 205 })
+			rl.DrawRectangleRounded(grip, 0.5, 4, (is_sel || hg) ? rl.WHITE : alpha(KNOB, 205))
 			if is_sel {
 				rl.DrawRectangleLinesEx(reg, 1.4, white)
-				txt_c(rl.TextFormat("%.1fs", f64(sg.vfin)), vr.x + fw2/2, reg.y + reg.height + 2, 11, white)
+				txt_c(rl.TextFormat("%.1fs", f64(sg.vfin)), vr.x + fw2/2, reg.y + reg.height + 2, FS_XS, white)
 				if xbtn({ vr.x + 3, vr.y + 3, 14, 14 }) {
 					if track_locked[segs[i].track] { set_toast("Trilha bloqueada") }
 					else { segs[i].vfin = 0; sel_trans = -1; set_toast("Fade de entrada removido") }
@@ -791,10 +791,10 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			rl.DrawLineEx({ reg.x, vr.y + 3 }, { reg.x + fw2, vr.y + vr.height - 3 }, 1.8, white)
 			grip := rl.Rectangle{ reg.x - 3, vr.y + vr.height/2 - 9, 6, 18 }
 			hg := hovered(grip) && st.drag == .None
-			rl.DrawRectangleRounded(grip, 0.5, 4, (is_sel || hg) ? rl.WHITE : rl.Color{ 205, 210, 220, 205 })
+			rl.DrawRectangleRounded(grip, 0.5, 4, (is_sel || hg) ? rl.WHITE : alpha(KNOB, 205))
 			if is_sel {
 				rl.DrawRectangleLinesEx(reg, 1.4, white)
-				txt_c(rl.TextFormat("%.1fs", f64(sg.vfout)), reg.x + fw2/2, reg.y + reg.height + 2, 11, white)
+				txt_c(rl.TextFormat("%.1fs", f64(sg.vfout)), reg.x + fw2/2, reg.y + reg.height + 2, FS_XS, white)
 				if xbtn({ reg.x + fw2 - 17, vr.y + 3, 14, 14 }) {
 					if track_locked[segs[i].track] { set_toast("Trilha bloqueada") }
 					else { segs[i].vfout = 0; sel_trans = -1; set_toast("Fade de saída removido") }
@@ -816,7 +816,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			rl.DrawRectangleRec({ vr.x + vr.width*0.45, vr.y, vr.width*0.55, vr.height }, rl.Color{ 210, 220, 232, is_sel ? 55 : 28 })
 			bw := f32(26); bh := min(vr.height - 8, 26)
 			badge := rl.Rectangle{ vr.x + vr.width - bw - 6, vr.y + (vr.height - bh)/2, bw, bh }
-			rl.DrawRectangleRounded(badge, 0.35, 6, is_sel ? rl.Color{ 40, 52, 68, 250 } : rl.Color{ 33, 36, 43, 240 })
+			rl.DrawRectangleRounded(badge, 0.35, 6, is_sel ? alpha(SEL_BG, 250) : alpha(SURFACE, 240))
 			rl.DrawRectangleRoundedLinesEx(badge, 0.35, 6, 1.2, rl.Color{ 200, 214, 230, 220 })
 			rl.DrawRectangleRec({ badge.x + 6, badge.y + 6, 8, bh - 12 }, rl.Color{ 90, 120, 150, 180 })
 			rl.DrawRectangleRec({ badge.x + 12, badge.y + 4, 8, bh - 8 }, rl.Color{ 210, 220, 232, 160 })
@@ -907,12 +907,12 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		gx0 := tl_x(gt0)
 		gx1 := tl_x(gt1)
 		gr := rl.Rectangle{ gx0, track_y(gtr) + 4, max(gx1 - gx0, 2), th(gtr) - 8 }
-		gold := rl.Color{ 245, 200, 70, 235 }
-		rl.DrawRectangleRec(gr, rl.Color{ 245, 200, 70, 28 })
+		gold := alpha(WARN, 235)
+		rl.DrawRectangleRec(gr, alpha(WARN, 28))
 		rl.DrawRectangleRoundedLinesEx(gr, 0.06, 4, 2, gold)
 		if gr.width > 26 {
 			xr := rl.Rectangle{ gr.x + gr.width - 18, gr.y + 2, 14, 14 }
-			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : rl.Color{ 60, 64, 74, 220 })
+			rl.DrawRectangleRounded(xr, 0.4, 4, hovered(xr) ? PLAYHEAD : alpha(GRIP, 220))
 			rl.DrawLineEx({ xr.x + 4, xr.y + 4 }, { xr.x + 10, xr.y + 10 }, 1.6, rl.WHITE)
 			rl.DrawLineEx({ xr.x + 10, xr.y + 4 }, { xr.x + 4, xr.y + 10 }, 1.6, rl.WHITE)
 			if clicked(xr) {
@@ -925,7 +925,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	// guia da lâmina: linha âmbar + tesourinha no ponto onde o corte vai cair
 	if blade_mode && over_lanes {
 		bx := clamp(rl.GetMousePosition().x, vlane.x, r.x + r.width)
-		blade_col := rl.Color{ 245, 200, 70, 235 }
+		blade_col := alpha(WARN, 235)
 		rl.DrawLineEx({bx, ruler.y}, {bx, r.y + r.height}, 1.5, blade_col)
 		rl.DrawLineEx({bx - 4, ruler.y + 2}, {bx + 5, ruler.y + 11}, 1.6, blade_col)
 		rl.DrawLineEx({bx + 4, ruler.y + 2}, {bx - 5, ruler.y + 11}, 1.6, blade_col)
@@ -938,8 +938,8 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	// de segmentos). Aqui já não há scissor ativo e nada mais é desenhado sobre as trilhas,
 	// então a barra fica por cima dos clipes em vez de sumir debaixo deles.
 	if vsb_track.width > 0 {
-		rl.DrawRectangleRounded(vsb_track, 1, 4, rl.Color{20, 22, 27, 255})
-		rl.DrawRectangleRounded(vsb_thumb, 1, 4, (tl_vbar_drag || hovered(vsb_thumb)) ? ACCENT : rl.Color{70, 76, 88, 255})
+		rl.DrawRectangleRounded(vsb_track, 1, 4, SUNK)
+		rl.DrawRectangleRounded(vsb_thumb, 1, 4, (tl_vbar_drag || hovered(vsb_thumb)) ? ACCENT : GRIP)
 	}
 
 	// barra de rolagem horizontal (aparece só quando há conteúdo além da tela)
@@ -947,7 +947,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		sb_h: f32 = 8
 		sb_y := r.y + r.height - sb_h - 3
 		track := rl.Rectangle{ r.x + f32(LANE_X), sb_y, view_w, sb_h }
-		rl.DrawRectangleRounded(track, 1, 4, rl.Color{20, 22, 27, 255})
+		rl.DrawRectangleRounded(track, 1, 4, SUNK)
 		thumb_w := max(30, view_w * view_w / content_w)
 		thumb := rl.Rectangle{ track.x + (tl_scroll / max_scroll) * (view_w - thumb_w), sb_y, thumb_w, sb_h }
 		if clicked(thumb) do tl_hbar_drag = true
@@ -957,7 +957,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			rel := clamp((mx - track.x - thumb_w/2) / (view_w - thumb_w), 0, 1)
 			tl_scroll = rel * max_scroll
 		}
-		rl.DrawRectangleRounded(thumb, 1, 4, (tl_hbar_drag || hovered(thumb)) ? ACCENT : rl.Color{70, 76, 88, 255})
+		rl.DrawRectangleRounded(thumb, 1, 4, (tl_hbar_drag || hovered(thumb)) ? ACCENT : GRIP)
 	}
 
 	// clicar na área das trilhas/régua sai da prévia de origem e volta ao modo timeline
@@ -1088,8 +1088,8 @@ draw_timeline :: proc(r: rl.Rectangle) {
 			mq := rl.Rectangle{ min(tl_marquee_start.x, mm.x), min(tl_marquee_start.y, mm.y),
 			                    abs(mm.x - tl_marquee_start.x), abs(mm.y - tl_marquee_start.y) }
 			tl_marquee_apply(mq, rows_clip, tl_marquee_add)
-			rl.DrawRectangleRec(mq, rl.Color{ 120, 170, 240, 45 })
-			rl.DrawRectangleLinesEx(mq, 1, rl.Color{ 150, 190, 245, 220 })
+			rl.DrawRectangleRec(mq, alpha(SELECT, 45))
+			rl.DrawRectangleLinesEx(mq, 1, alpha(SELECT, 220))
 		}
 		if rl.IsMouseButtonReleased(.LEFT) {
 			if !tl_marquee_moved { // clique seco em área vazia: playhead + seleciona o vão (se houver)
@@ -1109,43 +1109,43 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	// tooltips dos ícones: por cima da régua/trilhas, só no hover
 	if hovered(cz) {
 		tip: cstring = "Cortar e Ampliar"
-		tw := txt_w(tip, 12) + 16
+		tw := txt_w(tip, FS_SM) + 16
 		tr := rl.Rectangle{ cz.x, cz.y + cz.height + 6, tw, 22 }
-		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
+		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
 		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
-		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
+		txt(tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
 	}
 	if hovered(sz) {
 		tip: cstring = "Detectar silêncio"
-		tw := txt_w(tip, 12) + 16
+		tw := txt_w(tip, FS_SM) + 16
 		tr := rl.Rectangle{ sz.x, sz.y + sz.height + 6, tw, 22 }
-		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
+		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
 		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
-		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
+		txt(tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
 	}
 	if hovered(stz) {
 		tip: cstring = "Voz para texto"
-		tw := txt_w(tip, 12) + 16
+		tw := txt_w(tip, FS_SM) + 16
 		tr := rl.Rectangle{ stz.x, stz.y + stz.height + 6, tw, 22 }
-		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
+		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
 		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
-		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
+		txt(tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
 	}
 	if hovered(gz) {
 		tip: cstring = "Fechar vão"
-		tw := txt_w(tip, 12) + 16
+		tw := txt_w(tip, FS_SM) + 16
 		tr := rl.Rectangle{ gz.x, gz.y + gz.height + 6, tw, 22 }
-		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
+		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
 		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
-		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
+		txt(tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
 	}
 	if hovered(mz) {
 		tip: cstring = magnetic ? "Timeline magnética (ligada)" : "Timeline magnética"
-		tw := txt_w(tip, 12) + 16
+		tw := txt_w(tip, FS_SM) + 16
 		tr := rl.Rectangle{ mz.x, mz.y + mz.height + 6, tw, 22 }
-		rl.DrawRectangleRounded(tr, 0.3, 6, rl.Color{ 28, 30, 38, 240 })
+		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
 		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
-		txt(tip, tr.x + 8, tr.y + 4, 12, TEXT)
+		txt(tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
 	}
 }
 
@@ -1164,12 +1164,12 @@ draw_new_track_zone :: proc(z: rl.Rectangle, aud: bool) {
 	over := rl.CheckCollisionPointRec(m, z)
 	hot := dragging && type_ok && over
 	// fundo escuro vazio; leve tom verde + moldura quando um arraste compatível está por cima
-	rl.DrawRectangleRec(z, hot ? rl.Color{ 34, 48, 42, 170 } : rl.Color{ 20, 22, 27, 150 })
-	if hot do rl.DrawRectangleLinesEx(z, 1.4, rl.Color{ 90, 200, 120, 200 })
+	rl.DrawRectangleRec(z, hot ? rl.Color{ 34, 48, 42, 170 } : alpha(SUNK, 150))
+	if hot do rl.DrawRectangleLinesEx(z, 1.4, alpha(SUCCESS, 200))
 	// "+" discreto p/ criar trilha vazia — só ao passar o mouse e FORA de arraste
 	if !dragging && over {
 		pb := rl.Rectangle{ z.x + 8, z.y + z.height/2 - 9, 18, 18 }
-		rl.DrawRectangleRounded(pb, 0.3, 4, hovered(pb) ? HOVER : rl.Color{ 40, 44, 52, 220 })
+		rl.DrawRectangleRounded(pb, 0.3, 4, hovered(pb) ? HOVER : alpha(CONTROL, 220))
 		pcx := pb.x + pb.width/2; pcy := pb.y + pb.height/2
 		rl.DrawLineEx({pcx - 4, pcy}, {pcx + 4, pcy}, 2, TEXT)
 		rl.DrawLineEx({pcx, pcy - 4}, {pcx, pcy + 4}, 2, TEXT)
@@ -1182,12 +1182,12 @@ draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
 	rl.DrawRectangleRec(r, PANEL)
 	rl.DrawRectangle(i32(r.x + r.width) - 1, i32(r.y), 1, i32(r.height), LINE)
 	muted := track_muted[t]; locked := track_locked[t]; hidden := track_hidden[t]
-	track_col := locked ? rl.Color{ 210, 160, 50, 255 } : (aud ? rl.Color{ 70, 148, 116, 255 } : rl.Color{ 76, 128, 174, 255 })
+	track_col := locked ? LOCKED : (aud ? TRACK_AUDIO : TRACK_VIDEO)
 	rl.DrawRectangleRec({r.x, r.y, 3, r.height}, track_col)
 	// Rótulo pequeno concentra a cor sem tingir todo o cabeçalho.
 	name_bg := rl.Rectangle{ r.x + 10, r.y + 7, 30, 18 }
 	rl.DrawRectangleRounded(name_bg, 0.25, 4, rl.Color{ track_col.r, track_col.g, track_col.b, 95 })
-	txt_c(name, name_bg.x + name_bg.width/2, name_bg.y + 2, 12, TEXT)
+	txt_c(name, name_bg.x + name_bg.width/2, name_bg.y + 2, FS_SM, TEXT)
 	// "×" p/ remover a trilha — só na PONTA de cada tipo (topo do vídeo / base do áudio) e se
 	// estiver VAZIA (sem segmentos). Só as pontas removem sem precisar re-indexar as outras.
 	removable := is_audio_track(t) ? (t == MAXV + g_na - 1 && g_na > 1) : (t == g_nv - 1 && g_nv > 1)
@@ -1201,7 +1201,7 @@ draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
 				track_muted[t] = false; track_locked[t] = false; track_hidden[t] = false // devolve o slot limpo
 				if is_audio_track(t) do g_na -= 1; else do g_nv -= 1
 			} else {
-				xcol := hovered(xb) ? rl.Color{ 220, 90, 90, 255 } : MUTED
+				xcol := hovered(xb) ? DANGER : MUTED
 				rl.DrawLineEx({xb.x + 3, xb.y + 3}, {xb.x + 12, xb.y + 12}, 1.6, xcol)
 				rl.DrawLineEx({xb.x + 12, xb.y + 3}, {xb.x + 3, xb.y + 12}, 1.6, xcol)
 			}
@@ -1211,8 +1211,8 @@ draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
 	// botão MUTE (silencia todo o áudio da trilha)
 	mb := rl.Rectangle{ r.x + 12, iy, 20, 16 }
 	if clicked(mb) do track_muted[t] = !track_muted[t]
-	rl.DrawRectangleRounded(mb, 0.25, 4, muted ? rl.Color{ 170, 60, 60, 255 } : (hovered(mb) ? HOVER : PANEL2))
-	txt_c("M", mb.x + mb.width/2, mb.y + 1, 12, muted ? rl.WHITE : MUTED)
+	rl.DrawRectangleRounded(mb, 0.25, 4, muted ? DANGER_D : (hovered(mb) ? HOVER : PANEL2))
+	txt_c("M", mb.x + mb.width/2, mb.y + 1, FS_SM, muted ? rl.WHITE : MUTED)
 	// botão LOCK (bloqueia mover/aparar/cortar) — ícone de cadeado
 	lb := rl.Rectangle{ r.x + 38, iy, 20, 16 }
 	if clicked(lb) {
@@ -1228,9 +1228,9 @@ draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
 			}
 		}
 	}
-	rl.DrawRectangleRounded(lb, 0.25, 4, locked ? rl.Color{ 210, 160, 50, 255 } : (hovered(lb) ? HOVER : PANEL2))
+	rl.DrawRectangleRounded(lb, 0.25, 4, locked ? LOCKED : (hovered(lb) ? HOVER : PANEL2))
 	{
-		lcol := locked ? rl.Color{ 20, 20, 24, 255 } : MUTED
+		lcol := locked ? INK : MUTED
 		lcx := lb.x + lb.width/2; lcy := lb.y + lb.height/2
 		rl.DrawRectangleRec({ lcx - 4, lcy - 1, 8, 6 }, lcol)                     // corpo do cadeado
 		rl.DrawLineEx({ lcx - 2.5, lcy - 1 }, { lcx - 2.5, lcy - 4 }, 1.4, lcol) // arco (U invertido)
@@ -1241,9 +1241,9 @@ draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
 	if !is_audio_track(t) {
 		eb := rl.Rectangle{ r.x + 64, iy, 20, 16 }
 		if clicked(eb) do track_hidden[t] = !track_hidden[t]
-		rl.DrawRectangleRounded(eb, 0.25, 4, hidden ? rl.Color{ 80, 100, 130, 255 } : (hovered(eb) ? HOVER : PANEL2))
+		rl.DrawRectangleRounded(eb, 0.25, 4, hidden ? TRACK_HIDDEN : (hovered(eb) ? HOVER : PANEL2))
 		ecx := eb.x + eb.width/2; ecy := eb.y + eb.height/2
-		ecol := hidden ? rl.Color{ 20, 20, 24, 255 } : MUTED
+		ecol := hidden ? INK : MUTED
 		rl.DrawEllipseLines(i32(ecx), i32(ecy), 6, 3.5, ecol) // contorno do olho
 		rl.DrawCircleV({ ecx, ecy }, 1.8, ecol)               // pupila
 		if hidden do rl.DrawLineEx({ ecx - 7, ecy + 4 }, { ecx + 7, ecy - 4 }, 1.6, ecol) // risco = oculto
