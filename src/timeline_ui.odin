@@ -351,18 +351,26 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	nice := [?]int{ 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200 }
 	tstep := nice[len(nice) - 1] // passo das marcas menores
 	lstep := nice[len(nice) - 1] // passo dos rótulos
-	for s in nice { if f32(s) * pps() >= 7  { tstep = s; break } }
-	for s in nice { if f32(s) * pps() >= 55 { lstep = s; break } }
+	for s in nice { if f32(s) * pps() >= 10 { tstep = s; break } }
+	for s in nice { if f32(s) * pps() >= 60 { lstep = s; break } }
 	if lstep < tstep do lstep = tstep
+	// marca intermediária no meio de cada rótulo (só se cair num múltiplo do passo menor)
+	half := 0
+	if lstep % 2 == 0 && (lstep / 2) % tstep == 0 && lstep / 2 > tstep do half = lstep / 2
+	base := ruler.y + ruler.height
 	sec := (max(0, int(tl_scroll / pps())) / tstep) * tstep // alinhado ao passo
 	for {
 		x := tl_x(f32(sec))
 		if x > ruler.x + ruler.width do break
 		if x >= ruler.x {
-			rl.DrawLineEx({x, ruler.y + ruler.height - 7}, {x, ruler.y + ruler.height}, 1, rl.Color{ 126, 136, 153, 210 })
+			// hierarquia só pela altura: rótulo 10px, meio 6px, menor 3px
 			if sec % lstep == 0 {
-				rl.DrawLineEx({x, ruler.y + 5}, {x, ruler.y + ruler.height}, 1, LINE)
-				txt(timecode(f32(sec)), x + 4, ruler.y + 4, 11, rl.Color{ 170, 180, 196, 255 })
+				rl.DrawLineEx({x, base - 10}, {x, base}, 1, rl.Color{ 126, 136, 153, 230 })
+				txt(ruler_label(sec), x + 4, ruler.y + 4, 11, rl.Color{ 160, 170, 186, 255 })
+			} else if half > 0 && sec % half == 0 {
+				rl.DrawLineEx({x, base - 6}, {x, base}, 1, rl.Color{ 110, 120, 136, 200 })
+			} else {
+				rl.DrawLineEx({x, base - 3}, {x, base}, 1, rl.Color{ 90, 100, 116, 180 })
 			}
 		}
 		sec += tstep
@@ -1243,6 +1251,12 @@ draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
 }
 
 // HH:MM:SS:FF — FF segue o fps do clipe sob o playhead (fonte), senão 30
+// rótulo curto da régua: "0:05", "1:30", "1:02:00" (o timecode completo fica no contador)
+ruler_label :: proc(sec: int) -> cstring {
+	if sec >= 3600 do return fmt.ctprintf("%d:%02d:%02d", sec/3600, (sec%3600)/60, sec%60)
+	return fmt.ctprintf("%d:%02d", sec/60, sec%60)
+}
+
 timecode :: proc(total: f32) -> cstring {
 	fps := DEC_FPS
 	if v := view_seg(); v >= 0 {
