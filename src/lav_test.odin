@@ -69,6 +69,7 @@ lav_modo_keyframe :: proc(t: ^testing.T) {
 	if !os.exists(path) || !lav_init() do return
 	c: Clip
 	c.path = path; c.name = "amostra"; c.aid = 998; c.streaming = true; c.dw = 1280; c.dh = 720
+	c.aud_path = "C:/Users/Adm/AppData/Local/Temp/odin_editor_test_kf" // base do CSV temporário do índice
 	_, _, _, c.vw, c.vh, _ = video_probe(path)
 	build_kf_index(&c)
 	defer delete(c.kf)

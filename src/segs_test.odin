@@ -838,6 +838,23 @@ scrub_publica_se_melhora_a_tela :: proc(t: ^testing.T) {
 }
 
 @(test)
+scrub_adota_frame_no_arrasto_com_play :: proc(t: ^testing.T) {
+	// arrastar a RÉGUA com o vídeo tocando mantém st.playing = true até soltar: o frame do
+	// worker tem de subir (era descartado e o player ficava parado no quadro de antes)
+	t_reset()
+	st.playing = true
+	st.drag = .Playhead
+	testing.expect(t, scrub_can_adopt(), "arrasto da régua com play: sobe o frame")
+	st.drag = .None
+	player_seek_drag = true
+	testing.expect(t, scrub_can_adopt(), "barra do player: sobe o frame")
+	player_seek_drag = false
+	testing.expect(t, !scrub_can_adopt(), "soltou e o play seguiu: frame tardio descartado (flash)")
+	st.playing = false
+	testing.expect(t, scrub_can_adopt(), "pausado: sobe o frame")
+}
+
+@(test)
 scrub_arrasto_usa_filmstrip_quando_frame_atrasado :: proc(t: ^testing.T) {
 	// arrastando um vídeo LONGO o 720p não acompanha: a thumb mais perto do cursor
 	// entra no player (cena certa). Perto do frame nítido (≤0.75s) o 720p continua.

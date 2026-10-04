@@ -1276,9 +1276,13 @@ import_worker :: proc(c: ^Clip) {
 	c.nparts = 1
 	c.parts_thr = thread.create_and_start_with_poly_data(c, parts_worker)
 
+	// índice de keyframes ANTES da onda e das miniaturas: sem ele o arrasto num GOP longo
+	// não entrega quadro nenhum (medido: GOP de 8.3s, cursor a 10-70s/s = 0-2 quadros em 3s,
+	// player parado) e ele chegava por último: ~36s depois da mídia aparecer numa live de
+	// 48min. É só demux: ~0.5s mesmo nesse tamanho (.mp4 ou .ts).
+	if c.streaming do build_kf_index(c)
 	compute_waveform(c) // forma de onda: PCM por pipe, preenche progressivo e rápido
 	decode_thumbs(c)    // miniaturas (cache: instantâneo do RAM; streaming: -ss por frame)
-	if c.streaming do build_kf_index(c) // índice de keyframes p/ o cache do scrub (só demux, sem decode)
 }
 
 // transmite o PCM do áudio (mono, WAVE_RATE Hz, s16le) por PIPE e preenche c.wave
@@ -1704,6 +1708,16 @@ scrub_worth_publish :: proc(cur, done, shown: f32) -> bool {
 	return abs(cur - done) <= SCRUB_SHARP_S || abs(cur - done) < abs(cur - shown)
 }
 
+// (main) o frame que o worker entregou pode subir p/ a textura agora? Durante o GESTO de
+// scrub (régua ou barra do player) sempre; fora dele, só pausado. O arrasto da RÉGUA mantém
+// st.playing = true até soltar (o play segue de onde o cursor parou), e a regra antiga
+// (`!st.playing`) jogava fora TODO frame desse arrasto: num clipe streaming o player ficava
+// parado no quadro de antes de agarrar o cursor. O que ela barrava continua barrado: frame
+// tardio que chega DEPOIS de soltar, com o playback já andando (flash de outro tempo).
+scrub_can_adopt :: proc() -> bool {
+	return st.drag == .Playhead || player_seek_drag || !st.playing
+}
+
 // ---- cache de frames do scrub (só o worker de scrub mexe; sem lock) ----
 // Libav: chave por alvo; fallback -noaccurate_seek: chave por keyframe. Não mistura
 // os dois resultados. aid impede que o slot removido case com outro clipe.
@@ -1758,17 +1772,30 @@ kf_lookup :: proc(c: ^Clip, t: f32) -> int {
 	return lo
 }
 
+kf_csv_path :: proc(c: ^Clip) -> string { return fmt.tprintf("%s_kf.csv", c.aud_path) }
+
 // (import worker) lista os keyframes do vídeo pelos FLAGS dos pacotes: só demux, sem
 // decodificar — segundos mesmo num arquivo de horas. Tempos ficam relativos ao
 // format.start_time, que é a base do -ss.
+// Saída num ARQUIVO (-o) e espera pelo PROCESSO, não pelo fim de um pipe: o os.pipe do
+// Odin cria as pontas HERDÁVEIS e todo spawn herda handles, então um ffmpeg longo nascido
+// no mesmo instante em outra thread (a extração de áudio deste clipe, o import de outro,
+// um decoder ao vivo) ficava com a ponta de escrita e a leitura só via o fim quando ELE
+// morria — medido numa live de 48min: o ffprobe de 0.4s virava 33s.
 build_kf_index :: proc(c: ^Clip) {
 	if intrinsics.atomic_load(&c.stop) do return
-	_, out, _, e := os.process_exec(os.Process_Desc{
+	csv := kf_csv_path(c)
+	defer os.remove(csv)
+	p, e := os.process_start(os.Process_Desc{
 		command = []string{ "ffprobe", "-v", "error", "-select_streams", "v:0",
-			"-show_entries", "packet=pts_time,flags:format=start_time", "-of", "csv=p=0", c.path },
-	}, context.allocator)
-	defer delete(out)
+			"-show_entries", "packet=pts_time,flags:format=start_time", "-of", "csv=p=0", "-o", csv, c.path },
+	})
 	if e != nil do return
+	tame_process(c, p, false) // job do clipe: remover/fechar mata junto
+	if !audio_extract_wait(c, p) do return // polla c.stop; false = falhou ou abortado
+	out, re := os.read_entire_file(csv, context.allocator)
+	if re != nil do return
+	defer delete(out)
 	kf := make([dynamic]f32)
 	start: f32 = 0
 	txt := string(out)

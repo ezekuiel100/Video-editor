@@ -676,12 +676,13 @@ update :: proc() {
 		// NÃO sobe o frame de scrub durante o PLAYBACK: um scrub tardio (o worker ainda estava
 		// decodificando o último ponto arrastado quando você soltou e deu play) plantaria um frame
 		// de OUTRO tempo por 1 frame por cima do vídeo = "imagem rápida aparecendo" (flash). Só
-		// adota quando NÃO está tocando (arrasto/pausa), onde o frame de scrub é o que deve aparecer.
-		if !st.playing && dc >= 0 && dc < nclips && !clips[dc].closed && scrub_done_sf == cframe(&clips[dc]) {
+		// adota durante o gesto de scrub ou pausado — ver scrub_can_adopt (arrastar a régua com
+		// o vídeo tocando mantém st.playing = true, e esses frames TÊM de subir).
+		if scrub_can_adopt() && dc >= 0 && dc < nclips && !clips[dc].closed && scrub_done_sf == cframe(&clips[dc]) {
 			upload_tex(&clips[dc], rawptr(raw_data(scrub_buf)))
 			clips[dc].tex_t = scrub_done_t // frame do scrub: vale pelo tempo PEDIDO (keyframe ≈ perto)
 			scrub_adopt_c = dc; scrub_adopt_at = time.tick_now()
-		} else if st.playing && dc >= 0 {
+		} else if !scrub_can_adopt() && dc >= 0 {
 			dbg("SCRUBDROP", "descartado frame de scrub tardio t=%.1fs durante o playback (evita FLASH)", scrub_done_t)
 		}
 		intrinsics.atomic_store(&scrub_ready, false)

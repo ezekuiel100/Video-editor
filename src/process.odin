@@ -183,6 +183,7 @@ close_now :: proc() {
 		os.remove(c.aud_ck[0])
 		os.remove(c.aud_ck[1])
 		os.remove(part_path(c, 0)) // OGG completo
+		os.remove(kf_csv_path(c))  // índice de keyframes em voo (ffprobe morto pelo Job)
 	}
 	for i in 0 ..< MAX_SEGS do for s in 0 ..< 2 do if spv[i][s].path != "" do os.remove(spv[i][s].path)
 	if spv_render_path != "" do os.remove(spv_render_path) // render em voo (o Job mata o ffmpeg)
