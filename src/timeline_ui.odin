@@ -117,137 +117,60 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	rl.DrawRectangleRec(tb, PANEL)
 	rl.DrawRectangle(i32(tb.x), i32(tb.y + tb.height) - 1, i32(tb.width), 1, LINE)
 
-	icon :: proc(x, cy: f32, kind: int) {
-		switch kind {
-		case 0:
-			rl.DrawLineEx({x + 12, cy - 4}, {x + 4, cy}, 2, TEXT)
-			rl.DrawLineEx({x + 4, cy}, {x + 12, cy + 4}, 2, TEXT)
-			rl.DrawLineEx({x + 4, cy}, {x + 16, cy + 1}, 2, TEXT)
-		case 1:
-			rl.DrawLineEx({x + 4, cy - 4}, {x + 12, cy}, 2, TEXT)
-			rl.DrawLineEx({x + 12, cy}, {x + 4, cy + 4}, 2, TEXT)
-			rl.DrawLineEx({x + 12, cy}, {x, cy + 1}, 2, TEXT)
-		case 2:
-			rl.DrawRectangleRec({x + 3, cy - 3, 10, 9}, TEXT)
-			rl.DrawRectangleRec({x + 1, cy - 6, 14, 2}, TEXT)
-		}
+	// ----- ferramentas: grupos (histórico | remover/cortar | ações do clipe | modos) -----
+	// Botão 28×28 vazio em repouso; fundo só no hover ou quando o modo está LIGADO. A dica do
+	// hover é desenhada no fim de draw_timeline p/ ficar por cima da régua.
+	tl_tip = nil
+	tool :: proc(ix: ^f32, y: f32, ic: Icon, tip: cstring, ok: bool, on := false) -> bool {
+		r := rl.Rectangle{ ix^, y, 28, 28 }
+		ix^ += 30
+		hot := hovered(r)
+		if on do rl.DrawRectangleRounded(r, 0.28, 6, ACCENT_BG)
+		else if hot && ok do rl.DrawRectangleRounded(r, 0.28, 6, HOVER)
+		draw_icon(ic, r.x + 14, r.y + 14, 18, icon_col(ok, hot, on))
+		if hot { tl_tip = tip; tl_tip_r = r }
+		return ok && clicked(r)
 	}
-	ix := tb.x + 12
-	for k in 0 ..< 3 {
-		r2 := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
-		// k==0 desfazer | k==1 refazer | k==2 lixeira (remove selecionado / fecha vão)
-		can := (k == 0 && undo_top > 0) || (k == 1 && redo_top > 0) || (k == 2 && (selected >= 0 || sel_gap_ok()))
-		if hovered(r2) do rl.DrawRectangleRounded(r2, 0.3, 4, can ? HOVER : PANEL2)
-		if can && clicked(r2) {
-			switch k {
-			case 0: do_undo()
-			case 1: do_redo()
-			case 2:
-				if sel_gap_ok() do close_sel_gap()
-				else if track_locked[segs[selected].track] { set_toast("Trilha bloqueada") }
-				else do remove_seg(selected, magnetic || !alt_down())
-			}
-		}
-		icon(ix, tb.y + tb.height/2, k)
-		ix += 30
+	tool_sep :: proc(ix: ^f32, tb: rl.Rectangle) {
+		ix^ += 5
+		rl.DrawRectangleRec({ ix^, tb.y + 10, 1, tb.height - 20 }, LINE)
+		ix^ += 7
 	}
+	ix := tb.x + 8
+	ty := tb.y + 3
 
+	if tool(&ix, ty, .Undo, "Desfazer (Ctrl+Z)", undo_top > 0) do do_undo()
+	if tool(&ix, ty, .Redo, "Refazer (Ctrl+Y)", redo_top > 0) do do_redo()
+	tool_sep(&ix, tb)
+
+	// lixeira: remove o selecionado / fecha o vão selecionado (Alt deixa o vão)
+	if tool(&ix, ty, .Trash, "Excluir (Del)", selected >= 0 || sel_gap_ok()) {
+		if sel_gap_ok() do close_sel_gap()
+		else if track_locked[segs[selected].track] { set_toast("Trilha bloqueada") }
+		else do remove_seg(selected, magnetic || !alt_down())
+	}
 	// ferramenta lâmina: corta clicando direto no clipe (atalho B). Fica destacada quando ativa.
-	br := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
-	if clicked(br) do blade_mode = !blade_mode
-	rl.DrawRectangleRounded(br, 0.3, 4, blade_mode ? ACCENT_D : (hovered(br) ? HOVER : PANEL2))
-	{ // tesoura: duas lâminas cruzadas + dois eixos
-		bcx := ix + 8; bcy := tb.y + tb.height/2
-		bcol := blade_mode ? rl.WHITE : TEXT
-		rl.DrawLineEx({bcx - 5, bcy + 5}, {bcx + 6, bcy - 6}, 1.6, bcol)
-		rl.DrawLineEx({bcx + 5, bcy + 5}, {bcx - 6, bcy - 6}, 1.6, bcol)
-		rl.DrawCircleLinesV({bcx - 5, bcy + 5}, 2.5, bcol)
-		rl.DrawCircleLinesV({bcx + 5, bcy + 5}, 2.5, bcol)
-	}
-	ix += 34
+	if tool(&ix, ty, .Scissors, "Lâmina (B)", true, blade_mode) do blade_mode = !blade_mode
+	tool_sep(&ix, tb)
 
-	// botão "Cortar e Ampliar": só o ícone na barra (como desfazer/lâmina). O nome
-	// aparece no hover, desenhado no fim de draw_timeline p/ ficar por cima da régua.
 	cz_ok := selected >= 0 && selected < nsegs && seg_ready(selected) && !seg_audio_like(selected) && !seg_src(selected).is_text
-	cz := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
-	if cz_ok && clicked(cz) do open_crop_modal()
-	rl.DrawRectangleRounded(cz, 0.3, 4, (hovered(cz) && cz_ok) ? HOVER : PANEL2)
-	{ // ícone: cantos de recorte
-		icx := cz.x + 13; icy := tb.y + tb.height/2; icol := cz_ok ? TEXT : DISABLED
-		rl.DrawLineEx({icx-6, icy-6},{icx-6, icy+1}, 2, icol); rl.DrawLineEx({icx-6, icy-6},{icx+1, icy-6}, 2, icol)
-		rl.DrawLineEx({icx+6, icy+6},{icx+6, icy-1}, 2, icol); rl.DrawLineEx({icx+6, icy+6},{icx-1, icy+6}, 2, icol)
-	}
-	ix += 30
-
-	// Detectar silêncio: ao lado de Cortar e Ampliar (mesmo tamanho/estilo)
-	sz_ok := selected >= 0 && selected < nsegs && seg_ready(selected) &&
+	if tool(&ix, ty, .Crop, "Cortar e Ampliar", cz_ok) do open_crop_modal()
+	has_voice := selected >= 0 && selected < nsegs && seg_ready(selected) &&
 		(seg_src(selected).src_audio || seg_src(selected).has_audio) && !seg_src(selected).is_text
-	sz := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
-	if sz_ok && clicked(sz) do open_silence_modal()
-	rl.DrawRectangleRounded(sz, 0.3, 4, (hovered(sz) && sz_ok) ? HOVER : PANEL2)
-	{ // ícone: onda com vão no meio (silêncio)
-		icx := sz.x + 13; icy := tb.y + tb.height/2; icol := sz_ok ? TEXT : DISABLED
-		rl.DrawLineEx({icx-8, icy}, {icx-5, icy-5}, 1.6, icol)
-		rl.DrawLineEx({icx-5, icy-5}, {icx-2, icy+4}, 1.6, icol)
-		rl.DrawLineEx({icx-2, icy+4}, {icx-0.5, icy}, 1.6, icol)
-		rl.DrawLineEx({icx+0.5, icy}, {icx+2, icy+4}, 1.6, icol)
-		rl.DrawLineEx({icx+2, icy+4}, {icx+5, icy-5}, 1.6, icol)
-		rl.DrawLineEx({icx+5, icy-5}, {icx+8, icy}, 1.6, icol)
-		rl.DrawLineEx({icx-1.5, icy}, {icx+1.5, icy}, 1.4, MUTED) // hiato = silêncio
-	}
-	ix += 30
-
-	// Voz para texto: ao lado de Detectar silêncio
-	st_ok := selected >= 0 && selected < nsegs && seg_ready(selected) &&
-		(seg_src(selected).src_audio || seg_src(selected).has_audio) && !seg_src(selected).is_text
-	stz := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
-	if st_ok && clicked(stz) do open_stt_modal()
-	rl.DrawRectangleRounded(stz, 0.3, 4, (hovered(stz) && st_ok) ? HOVER : PANEL2)
-	{ // ícone: balão de fala
-		icx := stz.x + 13; icy := tb.y + tb.height/2; icol := st_ok ? TEXT : DISABLED
-		rl.DrawRectangleRounded({ icx-8, icy-7, 16, 11 }, 0.4, 4, icol)
-		rl.DrawTriangle({ icx-3, icy+4 }, { icx+2, icy+4 }, { icx-4, icy+8 }, icol)
-		rl.DrawLineEx({ icx-4, icy-3 }, { icx+4, icy-3 }, 1.4, PANEL2)
-		rl.DrawLineEx({ icx-4, icy }, { icx+2, icy }, 1.4, PANEL2)
-	}
-	ix += 30
+	if tool(&ix, ty, .Silence, "Detectar silêncio", has_voice) do open_silence_modal()
+	if tool(&ix, ty, .Captions, "Voz para texto", has_voice) do open_stt_modal()
+	tool_sep(&ix, tb)
 
 	// Fechar vão: cola o espaço vazio selecionado, ou todos os vãos da trilha do clipe.
 	gz_ok := sel_gap_ok() || (selected >= 0 && selected < nsegs && track_has_gap(segs[selected].track))
-	gz := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
-	if gz_ok && clicked(gz) {
+	if tool(&ix, ty, .CloseGap, "Fechar vão", gz_ok) {
 		if sel_gap_ok() do close_sel_gap()
 		else if selected >= 0 {
 			if close_all_gaps(segs[selected].track) == 0 do set_toast("Nenhum vão nesta trilha")
 		}
 	}
-	rl.DrawRectangleRounded(gz, 0.3, 4, (hovered(gz) && gz_ok) ? HOVER : PANEL2)
-	{
-		icx := gz.x + 13; icy := tb.y + tb.height/2; icol := gz_ok ? TEXT : DISABLED
-		// dois blocos com setas se aproximando (fechar o buraco)
-		rl.DrawRectangleRec({ icx-9, icy-5, 6, 10 }, icol)
-		rl.DrawRectangleRec({ icx+3, icy-5, 6, 10 }, icol)
-		rl.DrawLineEx({ icx-2, icy }, { icx-0.5, icy-3 }, 1.5, icol)
-		rl.DrawLineEx({ icx-2, icy }, { icx-0.5, icy+3 }, 1.5, icol)
-		rl.DrawLineEx({ icx+2, icy }, { icx+0.5, icy-3 }, 1.5, icol)
-		rl.DrawLineEx({ icx+2, icy }, { icx+0.5, icy+3 }, 1.5, icol)
-	}
-	ix += 30
-
 	// timeline magnética: clipes da trilha colam (atalho M)
-	mz := rl.Rectangle{ ix - 4, tb.y + 4, 26, 26 }
-	if clicked(mz) do set_magnetic(!magnetic)
-	rl.DrawRectangleRounded(mz, 0.3, 4, magnetic ? ACCENT_D : (hovered(mz) ? HOVER : PANEL2))
-	{
-		icx := mz.x + 13; icy := tb.y + tb.height/2; icol := magnetic ? rl.WHITE : TEXT
-		rl.DrawRectangleRec({ icx-8, icy-4, 6, 8 }, icol)
-		rl.DrawRectangleRec({ icx+2, icy-4, 6, 8 }, icol)
-		rl.DrawLineEx({ icx-1, icy }, { icx+1, icy }, 1.6, icol)
-		rl.DrawCircleV({ icx, icy - 7 }, 1.6, icol)
-		rl.DrawLineEx({ icx - 2.5, icy - 5.5 }, { icx, icy - 7 }, 1.3, icol)
-		rl.DrawLineEx({ icx + 2.5, icy - 5.5 }, { icx, icy - 7 }, 1.3, icol)
-	}
-	ix += 30
+	if tool(&ix, ty, .Magnet, magnetic ? "Timeline magnética (ligada)" : "Timeline magnética (M)", true, magnetic) do set_magnetic(!magnetic)
 
 	view_w := r.width - f32(LANE_X)
 	g_view_w = view_w // guardado p/ o atalho F (ajustar à janela), tratado no update
@@ -1106,46 +1029,13 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		}
 	}
 
-	// tooltips dos ícones: por cima da régua/trilhas, só no hover
-	if hovered(cz) {
-		tip: cstring = "Cortar e Ampliar"
-		tw := txt_w(tip, FS_SM) + 16
-		tr := rl.Rectangle{ cz.x, cz.y + cz.height + 6, tw, 22 }
+	// dica do ícone sob o mouse: por cima da régua/trilhas
+	if tl_tip != nil {
+		tw := txt_w(tl_tip, FS_SM) + 16
+		tr := rl.Rectangle{ tl_tip_r.x, tl_tip_r.y + tl_tip_r.height + 6, tw, 22 }
 		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
 		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
-		txt(tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
-	}
-	if hovered(sz) {
-		tip: cstring = "Detectar silêncio"
-		tw := txt_w(tip, FS_SM) + 16
-		tr := rl.Rectangle{ sz.x, sz.y + sz.height + 6, tw, 22 }
-		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
-		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
-		txt(tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
-	}
-	if hovered(stz) {
-		tip: cstring = "Voz para texto"
-		tw := txt_w(tip, FS_SM) + 16
-		tr := rl.Rectangle{ stz.x, stz.y + stz.height + 6, tw, 22 }
-		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
-		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
-		txt(tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
-	}
-	if hovered(gz) {
-		tip: cstring = "Fechar vão"
-		tw := txt_w(tip, FS_SM) + 16
-		tr := rl.Rectangle{ gz.x, gz.y + gz.height + 6, tw, 22 }
-		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
-		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
-		txt(tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
-	}
-	if hovered(mz) {
-		tip: cstring = magnetic ? "Timeline magnética (ligada)" : "Timeline magnética"
-		tw := txt_w(tip, FS_SM) + 16
-		tr := rl.Rectangle{ mz.x, mz.y + mz.height + 6, tw, 22 }
-		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
-		rl.DrawRectangleRoundedLinesEx(tr, 0.3, 6, 1, LINE)
-		txt(tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
+		txt(tl_tip, tr.x + 8, tr.y + 4, FS_SM, TEXT)
 	}
 }
 

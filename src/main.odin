@@ -300,6 +300,8 @@ tl_hbar_drag: bool  // arrastando a barra de rolagem horizontal
 tl_vscroll: f32     // deslocamento VERTICAL das trilhas (px); 0 = topo. >0 quando não cabem
 tl_vbar_drag: bool  // arrastando a barra de rolagem vertical
 zoom_bar_drag: bool // arrastando o knob do slider de zoom
+tl_tip: cstring       // dica do ícone da barra da timeline sob o mouse (nil = nenhum), desenhada por último
+tl_tip_r: rl.Rectangle
 ui_slider_active: int = -1 // id do slider sendo arrastado no inspector (-1 = nenhum)
 // geometria das alças do segmento SELECIONADO, preenchida no draw da timeline e lida
 // no hit-test do clique (imediato-mode): pontos de fade e faixa da linha de volume

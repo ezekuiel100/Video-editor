@@ -2272,7 +2272,7 @@ transport_btn :: proc(cx, cy: f32, tip: cstring) -> (rl.Color, bool) {
 
 // fundo dos ícones do cluster direito do transporte (mesmo padrão do transport_btn)
 icon_hover_bg :: proc(r: rl.Rectangle, on := false) {
-	if hovered(r) || on do rl.DrawRectangleRounded({ r.x - 5, r.y - 5, r.width + 10, r.height + 10 }, 0.3, 6, HOVER)
+	if hovered(r) || on do rl.DrawRectangleRounded(r, 0.28, 6, HOVER)
 }
 
 // pausa e posiciona (timeline ou prévia de origem), como as setas/Home/End do teclado
@@ -2679,8 +2679,8 @@ draw_preview :: proc(r: rl.Rectangle) {
 	tc_pos := string(timecode(pos))
 	tc_tot := narrow ? "" : fmt.tprintf(" / %s", timecode(total))
 	tcw := txt_tab(tc_pos, 0, 0, FS_LG, TEXT, false) + txt_tab(tc_tot, 0, 0, FS_LG, MUTED, false)
-	// direita: fullscreen(‑30) + câmera(‑32) + alto-falante(‑30) => spr.x = fim‑92; proporção fica 150 antes
-	rclust := tb.x + tb.width - 92 - (tight ? 0 : 150)
+	// direita: tela cheia + câmera + alto-falante (28px a cada 31) => spr.x = fim‑96; proporção fica 144 antes
+	rclust := tb.x + tb.width - 96 - (tight ? 0 : 144)
 	cl := tb.x + 16 + tcw + 12
 	cy := tb.y + 42 // linha de botões abaixo da barra de progresso
 	cx := clamp((cl + rclust) / 2, cl + 92, max(cl + 92, rclust - 104))
@@ -2727,52 +2727,30 @@ draw_preview :: proc(r: rl.Rectangle) {
 	txt_tab(tc_tot, tx, cy - 8, FS_LG, MUTED)
 
 	// --- cluster à direita: volume do player | screenshot | tela cheia ---
-	// tela cheia (canto): 4 cantoneiras
-	fsr := rl.Rectangle{ tb.x + tb.width - 30, cy - 10, 20, 20 }
+	// botões 28×28 (mesmo padrão do transporte), centrados a 31px um do outro a partir do canto
+	fsr := rl.Rectangle{ tb.x + tb.width - 34, cy - 14, 28, 28 }
 	if clicked(fsr) do toggle_fullscreen_preview()
 	icon_hover_bg(fsr)
-	{
-		fc := hovered(fsr) ? ACCENT : TEXT
-		L :: f32(6)
-		rl.DrawLineEx({fsr.x, fsr.y}, {fsr.x + L, fsr.y}, 2, fc);              rl.DrawLineEx({fsr.x, fsr.y}, {fsr.x, fsr.y + L}, 2, fc)
-		rl.DrawLineEx({fsr.x + fsr.width - L, fsr.y}, {fsr.x + fsr.width, fsr.y}, 2, fc); rl.DrawLineEx({fsr.x + fsr.width, fsr.y}, {fsr.x + fsr.width, fsr.y + L}, 2, fc)
-		rl.DrawLineEx({fsr.x, fsr.y + fsr.height - L}, {fsr.x, fsr.y + fsr.height}, 2, fc); rl.DrawLineEx({fsr.x, fsr.y + fsr.height}, {fsr.x + L, fsr.y + fsr.height}, 2, fc)
-		rl.DrawLineEx({fsr.x + fsr.width, fsr.y + fsr.height - L}, {fsr.x + fsr.width, fsr.y + fsr.height}, 2, fc); rl.DrawLineEx({fsr.x + fsr.width - L, fsr.y + fsr.height}, {fsr.x + fsr.width, fsr.y + fsr.height}, 2, fc)
-	}
-	// screenshot (câmera): corpo + lente
-	shr := rl.Rectangle{ fsr.x - 32, cy - 9, 22, 18 }
+	draw_icon(fullscreen_preview ? .ExitFullscreen : .Fullscreen, fsr.x + 14, cy, 18, icon_col(true, hovered(fsr)))
+	shr := rl.Rectangle{ fsr.x - 31, cy - 14, 28, 28 }
 	if clicked(shr) do open_shot_modal()
 	icon_hover_bg(shr)
-	{
-		cc := hovered(shr) ? ACCENT : TEXT
-		rl.DrawRectangleRoundedLinesEx(shr, 0.25, 4, 1.6, cc)
-		rl.DrawRectangleRec({shr.x + 6, shr.y - 3, 6, 4}, cc) // saliência do topo
-		rl.DrawCircleLinesV({shr.x + shr.width/2, shr.y + shr.height/2}, 4, cc)
-	}
+	draw_icon(.Camera, shr.x + 14, cy, 18, icon_col(true, hovered(shr)))
 	// alto-falante: clique ABRE o slider VERTICAL de volume (popup). Antes era um slider
 	// horizontal fixo que confundia com o zoom da timeline.
-	spr := rl.Rectangle{ shr.x - 30, cy - 9, 20, 18 }
+	spr := rl.Rectangle{ shr.x - 31, cy - 14, 28, 28 }
 	if clicked(spr) do vol_popup = !vol_popup
 	icon_hover_bg(spr, vol_popup)
 	{
-		sc := player_vol < 0.01 ? DANGER : ((hovered(spr) || vol_popup) ? ACCENT : TEXT)
-		bx := spr.x + 3; bcy := spr.y + spr.height/2
-		rl.DrawRectangleRec({bx, bcy - 3, 3.5, 6}, sc)                               // corpo (ímã)
-		rl.DrawTriangle({bx + 3.5, bcy - 6}, {bx + 3.5, bcy + 6}, {bx + 9, bcy}, sc) // cone
-		if player_vol < 0.01 {
-			rl.DrawLineEx({bx + 11, bcy - 4}, {bx + 17, bcy + 4}, 1.8, sc)
-			rl.DrawLineEx({bx + 17, bcy - 4}, {bx + 11, bcy + 4}, 1.8, sc)
-		} else {
-			rl.DrawRing({bx + 6, bcy}, 5.2, 6.4, -55, 55, 12, sc) // onda externa
-			rl.DrawRing({bx + 6, bcy}, 3.0, 3.9, -55, 55, 12, sc) // onda interna
-		}
+		mute := player_vol < 0.01
+		draw_icon(mute ? .VolumeMute : .Volume, spr.x + 14, cy, 18, mute ? DANGER : icon_col(true, hovered(spr), vol_popup))
 	}
 	// qualidade da prévia p/ clipes STREAMING (longos): Baixa=360p (leve) <-> Alta=720p
 	// (nítido, ~4x os bytes/frame). Estilo dropdown "Total/1/2/..." de NLEs, aqui binário.
 	if !tight {
 		qlabel: cstring = stream_hi ? "Alta" : "Baixa"
 		qw := txt_w(qlabel, FS_SM) + 22
-		qr := rl.Rectangle{ spr.x - 14 - qw, cy - 11, qw, 22 }
+		qr := rl.Rectangle{ spr.x - 8 - qw, cy - 11, qw, 22 }
 		rl.DrawRectangleRounded(qr, 0.35, 6, hovered(qr) ? HOVER : PANEL2)
 		rl.DrawRectangleRoundedLinesEx(qr, 0.35, 6, 1, stream_hi ? ACCENT : LINE)
 		txt_c(qlabel, qr.x + qr.width/2, qr.y + 4, FS_SM, stream_hi ? ACCENT : TEXT)
@@ -2793,7 +2771,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// (recolhido no modo apertado, junto com a qualidade — reaparece ao alargar o player)
 	if tight do ar_menu_open = false
 	if !tight {
-	arb := rl.Rectangle{ spr.x - 150, cy - 11, 64, 22 }
+	arb := rl.Rectangle{ spr.x - 144, cy - 11, 64, 22 }
 	if clicked(arb) do ar_menu_open = !ar_menu_open
 	rl.DrawRectangleRounded(arb, 0.3, 4, (ar_menu_open || hovered(arb)) ? HOVER : PANEL2)
 	txt(ar_label(proj_ar), arb.x + 8, arb.y + 4, FS_SM, TEXT)
