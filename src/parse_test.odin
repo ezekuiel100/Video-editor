@@ -55,6 +55,19 @@ probe_parse_duracao_stream_e_format :: proc(t: ^testing.T) {
 }
 
 @(test)
+probe_parse_mpegts_stream_repetido :: proc(t: ^testing.T) {
+	// .ts: o ffprobe lista o stream de vídeo 2x (seção do program + seção de streams) e
+	// depois o format — 3 duration=. Antes só 1 ou 2 eram tratados e o .ts não importava.
+	out := "codec_name=h264\nwidth=640\nheight=1280\nr_frame_rate=25/1\navg_frame_rate=0/0\nduration=1708.794000\n" +
+		"codec_name=h264\nwidth=640\nheight=1280\nr_frame_rate=25/1\navg_frame_rate=0/0\nduration=1708.794000\n" +
+		"duration=1708.799000\n"
+	d, vd, c, w, h, f := probe_parse(out)
+	testing.expect(t, t_feq(d, 1708.799), "dur = format (maior)")
+	testing.expect(t, t_feq(vd, 1708.794), "v_dur = stream de vídeo (menor)")
+	testing.expect(t, c == "h264" && w == 640 && h == 1280 && t_feq(f, 25), "campos repetidos não atrapalham")
+}
+
+@(test)
 probe_parse_rotacao_troca_dims :: proc(t: ^testing.T) {
 	// celular gravado deitado: pixels 1920x1080 + display matrix -90 → exibe 1080x1920
 	_, _, _, w, h, _ := probe_parse("width=1920\nheight=1080\nrotation=-90\n")

@@ -523,7 +523,10 @@ parse_fps :: proc(s: string) -> f32 {
 // Com um só, os dois ficam iguais.
 probe_parse :: proc(out: string) -> (dur, v_dur: f32, codec: string, vw, vh: i32, fps: f32) {
 	rot := 0
-	d0, d1: f32
+	// durações: stream de vídeo + format. Em .ts (MPEG-TS) o ffprobe repete o stream dentro
+	// da seção do program, então vêm 3 linhas (stream, stream, format) — contar só 1 ou 2
+	// deixava dur = 0 e a importação falhava. Maior = container (timeline), menor = vídeo.
+	dmax, dmin: f32
 	nd := 0
 	for ln in strings.split_lines(strings.trim_space(out), context.temp_allocator) {
 		l := strings.trim_space(ln)
@@ -535,7 +538,7 @@ probe_parse :: proc(out: string) -> (dur, v_dur: f32, codec: string, vw, vh: i32
 		case key == "duration":
 			if v, ok := strconv.parse_f64(val); ok {
 				fv := f32(v)
-				if nd == 0 { d0 = fv } else if nd == 1 { d1 = fv }
+				if nd == 0 { dmax, dmin = fv, fv } else { dmax = max(dmax, fv); dmin = min(dmin, fv) }
 				nd += 1
 			}
 		case key == "codec_name": codec = val
@@ -549,12 +552,7 @@ probe_parse :: proc(out: string) -> (dur, v_dur: f32, codec: string, vw, vh: i32
 			if v, ok := strconv.parse_int(val, 10); ok do rot = v
 		}
 	}
-	switch nd {
-	case 1: dur, v_dur = d0, d0
-	case 2:
-		dur = max(d0, d1)
-		v_dur = min(d0, d1)
-	}
+	dur, v_dur = dmax, dmin
 	if abs(rot) % 180 == 90 do vw, vh = vh, vw // ±90/±270: as dimensões de exibição se invertem
 	return
 }
