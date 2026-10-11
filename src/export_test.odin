@@ -375,6 +375,25 @@ graph_trilha_oculta_sai_do_video_mas_continua_no_audio :: proc(t: ^testing.T) {
 	track_hidden[1] = false
 }
 
+// Escala do inspetor: o caminho direto (concat) encaixa cada clipe no canvas inteiro,
+// então um clipe só com escala != 100% saía no tamanho cheio. Tem de ir pro overlay.
+@(test)
+graph_escala_vai_pro_arquivo :: proc(t: ^testing.T) {
+	t_export_reset()
+	a := add_seg(0, 0, 0, 10)
+	segs[a].scale = 0.5
+	_, g := t_build(t)
+	testing.expect(t, strings.contains(g, "color=c=black:s=1920x1080"), "escala precisa do canvas + overlay")
+	testing.expect(t, strings.contains(g, "scale=960:540"), "clipe a 50% sai em 960x540")
+	testing.expect(t, strings.contains(g, "overlay=x='(main_w-overlay_w)/2"), "centralizado no canvas")
+
+	t_export_reset()
+	b := add_seg(0, 0, 0, 10)
+	segs[b].scale = 1.5
+	_, g2 := t_build(t)
+	testing.expect(t, strings.contains(g2, "scale=2880:1620"), "clipe a 150% passa do canvas (o overlay corta)")
+}
+
 @(test)
 graph_mp3_e_so_audio :: proc(t: ^testing.T) {
 	t_export_reset()

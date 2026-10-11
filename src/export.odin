@@ -1043,6 +1043,10 @@ export_seg_needs_compose :: proc(i: int) -> bool {
 	c := &clips[sg.src]
 	if c.is_text do return true
 	if abs(sg.px) > 0.001 || abs(sg.py) > 0.001 || abs(sg.rot) > 0.5 do return true
+	// escala != 100%: o caminho direto encaixa tudo no canvas inteiro (concat_fit W×H) e a
+	// escala sumia do arquivo — menor tem de sobrar borda, maior tem de cortar no overlay
+	sc := sg.scale <= 0 ? f32(1) : sg.scale
+	if abs(sc - 1) > 0.001 do return true
 	op := sg.opacity <= 0 ? 1 : sg.opacity
 	if op < 0.999 do return true
 	if sg.vfin > 0.01 || sg.vfout > 0.01 do return true
