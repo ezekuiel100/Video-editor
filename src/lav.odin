@@ -202,6 +202,20 @@ lav_would_seek :: proc(c: ^Clip, ci: int, t: f32, kf_t := f64(-1)) -> bool {
 	return true
 }
 
+// Voltou DENTRO do GOP do quadro retido (keyframe ≤ alvo < quadro retido)? Re-decodificar do
+// keyframe até o alvo é curto: no arrasto para trás, vale mais que mostrar só o keyframe
+// (que faz o vídeo saltar de GOP em GOP em vez de acompanhar o cursor).
+lav_back_in_gop :: proc(c: ^Clip, ci: int, t: f32, kf_t: f64) -> bool {
+	if kf_t < 0 do return false
+	for &d in lav_decs {
+		if d.fmt != nil && d.ci == ci && d.aid == c.aid {
+			target := f64(max(t, 0))
+			return d.has_frame && target < d.frame_t && target + LAV_KF_EPS >= kf_t
+		}
+	}
+	return false
+}
+
 // Primeiro quadro com timestamp >= alvo (ou último quadro no EOF). Usa timestamps
 // de apresentação, não contagem/fps: B-frames e VFR seguem a ordem do decoder.
 // retry distingue orçamento/cancelamento de falha: não envenena lav_bad nem faz spawn.

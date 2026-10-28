@@ -1607,7 +1607,8 @@ scrub_worker :: proc() {
 				// Cursor andando e o quadro exato exigiria seek (voltou, ou pulou de GOP): o
 				// GOP inteiro não cabe no ritmo do mouse — mostra o keyframe (seek + 1 decode).
 				// Parado, ou avançando dentro do alcance do decoder: quadro exato.
-				kfast := precise && moving && k >= 0 && lav_would_seek(c, ci, st0, kf_t)
+				kfast := precise && moving && k >= 0 && lav_would_seek(c, ci, st0, kf_t) &&
+						!lav_back_in_gop(c, ci, st0, kf_t) // voltou no mesmo GOP: seek + decode curto (parcial), não só o keyframe
 				key := scrub_key(ci, c.aid, k, st0, sf0, precise && !kfast)
 				if scrub_shown_ok && scrub_shown == key { time.sleep(4 * time.Millisecond); continue } // já está na tela
 				if scrub_cache_get(key, scrub_buf[:sf0]) {
