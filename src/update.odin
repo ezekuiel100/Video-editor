@@ -852,8 +852,12 @@ update :: proc() {
 						st.playhead = sg.start + sg.dur
 						if st.playhead >= timeline_dur() - 0.001 { stop_timeline_play(); st.playhead = timeline_dur() }
 					} else { st.playhead = sg.start + nl; show_playhead_frame() }
-				} else if !rl.IsMusicStreamPlaying(c.music) || local >= out0 - 0.001 {
-					rl.PauseMusicStream(c.music) // fim da cadeia (a fonte pode continuar)
+				} else if !rl.IsMusicStreamPlaying(c.music) || local + min(dt, 0.034) >= out0 - 0.001 {
+					// fim da cadeia (a fonte pode continuar). Encerra 1 frame ANTES de passar
+					// (local + dt): o relógio só é lido 1×/frame, e esperar `local >= out0` deixava
+					// tocar até um frame do trecho que o corte REMOVEU. Stop, não Pause: o Pause
+					// mantém na fila os sub-buffers já preenchidos — áudio de depois do corte.
+					rl.StopMusicStream(c.music)
 					play_clip = -1
 					// fim da cadeia, na timeline: o start+dur do ÚLTIMO pedaço, calculado do MESMO
 					// jeito que o audio_seg_at testa (`t >= start+dur`). Remapear pela fonte
@@ -863,6 +867,17 @@ update :: proc() {
 					lst := seg_run_last(a)
 					st.playhead = segs[lst].start + segs[lst].dur
 					if st.playhead >= timeline_dur() - 0.001 { stop_timeline_play(); st.playhead = timeline_dur() }
+					else {
+						// passa o bastão NO MESMO frame. Com play_clip=-1 até o próximo frame, o
+						// audio_secondary (logo abaixo) via o segmento seguinte "sem dono" e o
+						// ligava como mix (Stop/Seek/Play); no frame seguinte o master fazia
+						// Stop/Seek/Play DE NOVO no mesmo stream — o trecho já tocado repetia (picote).
+						nx := audio_seg_at(st.playhead)
+						if nx >= 0 && seg_speed(nx) == 1 {
+							nl := seg_local(nx, st.playhead)
+							if audio_clock_ok(seg_src(nx), nl) do set_play_clip(nx, nl)
+						}
+					}
 				} else {
 					// GRAVA um SALTO do playhead: o relógio de áudio mandou o playhead
 					// pular > 2s num único frame de playback contínuo (não é seek). É o

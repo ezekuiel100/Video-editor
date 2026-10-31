@@ -372,6 +372,9 @@ set_play_clip :: proc(si: int, local: f32) {
 	play_clip = si
 	aud_prev = -1; smooth_bad = 0 // relógio suave recomeça após seek/aquisição (âncora = loc0 no bloco)
 	c := seg_src(si)
+	// a fonte vira MASTER: se tocava como mix, o audio_secondary deixa de cuidar dela — com
+	// mix_on preso em true, quando o master a soltasse o mix dava Resume na posição VELHA
+	c.mix_on = false
 	// troca a janela p/ a parte da região ou o chunk no bolso, se prontos
 	if c.has_audio && !try_part_open(c, local) do _ = try_chunk_open(c, local)
 	if c.has_audio && audio_clock_ok(c, local) {
