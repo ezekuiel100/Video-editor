@@ -12,7 +12,7 @@ import "core:math"
 
 Icon :: enum {
 	Undo, Redo, Trash, Scissors, Crop, Silence, Captions, CloseGap, Magnet,
-	Volume, VolumeMute, Camera, Fullscreen, ExitFullscreen,
+	Volume, VolumeMute, Camera, Fullscreen, ExitFullscreen, TallPreview,
 	Play, Pause, SkipBack, SkipForward, StepBack, StepForward,
 	Film, Music, Folder,
 }
@@ -135,6 +135,10 @@ draw_icon :: proc(kind: Icon, cx, cy, size: f32, col: rl.Color) {
 	case .Camera:
 		line(p, 2, 7, 7, 7, 9, 4, 15, 4, 17, 7, 22, 7, 22, 20, 2, 20, 2, 7)
 		circle(p, 12, 13.5, 3.5)
+	case .TallPreview: // janela com o player em coluna à direita, na altura toda
+		line(p, 3, 4, 21, 4, 21, 20, 3, 20, 3, 4)
+		line(p, 14, 4, 14, 20)
+		line(p, 3, 12, 14, 12)
 	case .Fullscreen:
 		line(p, 8, 3, 3, 3, 3, 8)
 		line(p, 16, 3, 21, 3, 21, 8)

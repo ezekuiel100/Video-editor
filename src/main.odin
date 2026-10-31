@@ -293,6 +293,11 @@ tl_split_drag: bool           // arrastando a divisória
 MD_FRAC_DEF :: f32(0.47)      // fração padrão da largura da janela ocupada pelo bin
 md_frac: f32 = MD_FRAC_DEF
 md_split_drag: bool
+// --- player em COLUNA: ocupa a altura toda à direita (bin + timeline ficam à esquerda) ---
+// Feito p/ projeto vertical: o vídeo é limitado pela altura, e na grade normal a timeline
+// rouba essa altura. pv_frac é a largura da coluna da ESQUERDA (a divisória vertical a move).
+pv_tall: bool
+pv_frac: f32 = 0.6
 blade_mode: bool    // ferramenta lâmina: clicar num segmento corta ali (estilo NLE)
 magnetic:   bool    // timeline magnética: clipes da trilha colam uns nos outros (sem vãos)
 tl_scroll: f32      // deslocamento horizontal da timeline (px); 0 = início

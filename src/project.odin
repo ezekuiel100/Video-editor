@@ -102,7 +102,7 @@ save_project_text :: proc() -> string {
 	// vídeo exportado, mas o usuário monta o espaço de trabalho e espera reencontrá-lo.
 	// Chaves novas: projetos antigos simplesmente não as têm e caem nos padrões (o switch do
 	// load ignora chaves desconhecidas, então o formato segue compatível nos dois sentidos).
-	fmt.sbprintf(&b, "layout %.4f %.4f\n", tl_frac, md_frac)
+	fmt.sbprintf(&b, "layout %.4f %.4f %d %.4f\n", tl_frac, md_frac, pv_tall ? 1 : 0, pv_frac)
 	fmt.sbprintf(&b, "prevq %d\n", stream_hi ? 1 : 0) // qualidade da prévia de clipes streaming
 	fmt.sbprintf(&b, "magnet %d\n", magnetic ? 1 : 0)
 	fmt.sbprintf(&b, "trackh")
@@ -285,6 +285,7 @@ load_project :: proc(path: string) {
 	res_w, res_h := 0, 0 // resolução salva (0 = ausente em projetos antigos; deriva de `ar`)
 	lnv := -1; lna := -1 // contagem de trilhas do arquivo (-1 = não especificada; deriva do uso)
 	ltl := f32(-1); lmd := f32(-1) // divisórias salvas (-1 = ausente: mantém o padrão)
+	ltall := false; lpv := f32(-1)  // player em coluna + largura da esquerda
 	lpq := stream_hi               // qualidade da prévia salva (ausente = mantém a atual)
 	lmag := false                 // timeline magnética (ausente = desligada)
 	lth: [MAXTRACKS]f32            // alturas de trilha salvas (0 = padrão)
@@ -313,6 +314,10 @@ load_project :: proc(path: string) {
 			if len(toks) >= 3 {
 				if v, o := strconv.parse_f64(toks[1]); o do ltl = f32(v)
 				if v, o := strconv.parse_f64(toks[2]); o do lmd = f32(v)
+			}
+			if len(toks) >= 5 { // player em coluna (ausente = projeto antigo: grade normal)
+				ltall = (strconv.parse_int(toks[3]) or_else 0) != 0
+				if v, o := strconv.parse_f64(toks[4]); o do lpv = f32(v)
 			}
 		case "prevq": // qualidade da prévia de streaming (0 = Baixa/360p, 1 = Alta/720p)
 			if len(toks) >= 2 do lpq = (strconv.parse_int(toks[1]) or_else 1) != 0
@@ -469,6 +474,8 @@ load_project :: proc(path: string) {
 	// no padrão. Ausente (projeto antigo) mantém o que já estava.
 	if ltl > 0.05 && ltl < 0.95 do tl_frac = ltl
 	if lmd > 0.05 && lmd < 0.95 do md_frac = lmd
+	pv_tall = ltall
+	if lpv > 0.05 && lpv < 0.95 do pv_frac = lpv
 	stream_hi = lpq // qualidade da prévia (set_stream_quality não serve aqui: nada foi importado ainda)
 	magnetic = lmag
 	for i in 0 ..< MAXTRACKS {

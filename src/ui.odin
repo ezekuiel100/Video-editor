@@ -785,6 +785,25 @@ prof_hud :: proc() {
 	}
 }
 
+// ---------- player em coluna ----------
+PV_LEFT_MIN :: f32(560) // timeline à esquerda ainda mostra o cabeçalho das trilhas + régua útil
+PV_COL_MIN  :: f32(420) // = PV_MIN do draw: largura mínima do player
+
+pv_left_max :: proc(sw: f32) -> f32 { return max(PV_LEFT_MIN, sw - PV_COL_MIN) }
+pv_left_w   :: proc(sw: f32) -> f32 { return clamp(sw * pv_frac, PV_LEFT_MIN, pv_left_max(sw)) }
+
+// Liga/desliga a coluna. Ao ligar, a coluna abraça o canvas na altura toda (mais a largura
+// do inspetor), em vez de herdar uma fração que deixaria faixas cinzas dos lados.
+toggle_pv_tall :: proc() {
+	pv_tall = !pv_tall
+	dirty = true // layout vai no .ovp
+	if !pv_tall do return
+	sw := f32(rl.GetScreenWidth()); sh := f32(rl.GetScreenHeight())
+	video_h := sh - (34 + 64) - 66 // topbar + toolbar e o transporte do draw_preview
+	col_w := max(PV_COL_MIN, video_h * proj_ar + 308) // 308 = inspetor (flutuante ou fixo)
+	pv_frac = clamp((sw - col_w) / sw, PV_LEFT_MIN / sw, pv_left_max(sw) / sw)
+}
+
 // ---------- draw raiz ----------
 draw :: proc() {
 	sw := f32(rl.GetScreenWidth())
@@ -832,7 +851,7 @@ draw :: proc() {
 			tl_h = clamp(sh * tl_frac, TL_MIN, tl_max)
 			tl_top = sh - tl_h
 		}
-	} else if rl.IsMouseButtonPressed(.LEFT) && hovered({ 0, tl_top - 6, sw, 9 }) &&
+	} else if rl.IsMouseButtonPressed(.LEFT) && hovered({ 0, tl_top - 6, pv_tall ? pv_left_w(sw) : sw, 9 }) &&
 	          st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !win_dragging && modal == .None {
 		// zona de 9px esticada p/ CIMA (6px sobre o rodapé do bin/preview — a divisória tem
 		// prioridade sobre eles; 3px p/ baixo, longe dos botões da toolbar em tl_top+4).
@@ -847,46 +866,57 @@ draw :: proc() {
 	PV_MIN :: f32(420)
 	md_max := max(MD_MIN, sw - PV_MIN)
 	media_w := clamp(sw * md_frac, MD_MIN, md_max)
+	// coluna: a divisória vertical separa esquerda (bin+timeline) do player e desce até o rodapé
+	md_bot := tl_top
+	if pv_tall {
+		media_w = pv_left_w(sw)
+		md_bot = sh
+	}
 	if md_split_drag {
 		if !rl.IsMouseButtonDown(.LEFT) { md_split_drag = false; dirty = true } // idem: layout salvo no .ovp
-		else {
+		else if pv_tall {
+			pv_frac = clamp(m_div.x / sw, PV_LEFT_MIN / sw, pv_left_max(sw) / sw)
+			media_w = pv_left_w(sw)
+		} else {
 			md_frac = clamp(m_div.x / sw, MD_MIN / sw, md_max / sw)
 			media_w = clamp(sw * md_frac, MD_MIN, md_max)
 		}
-	} else if rl.IsMouseButtonPressed(.LEFT) && hovered({ media_w - 5, content_top, 8, tl_top - content_top }) &&
+	} else if rl.IsMouseButtonPressed(.LEFT) && hovered({ media_w - 5, content_top, 8, md_bot - content_top }) &&
 	          !tl_split_drag && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !win_dragging && modal == .None {
 		// zona de 8px (5 sobre o bin, 3 sobre o player); a de cima tem prioridade (T-junção)
 		md_split_drag = true
 	}
+	tl_w := pv_tall ? media_w : sw // na coluna a timeline fica só à esquerda do player
 
 	draw_topbar(sw, topbar_h)
 	draw_toolbar(sw, topbar_h, toolbar_h)
 	draw_subbar(topbar_h + toolbar_h, media_w, subbar_h)
 	draw_media_panel(rl.Rectangle{ 0, content_top, media_w, tl_top - content_top })
-	preview_area := inspector_layout({ media_w, topbar_h + toolbar_h, sw - media_w, tl_top - (topbar_h + toolbar_h) })
+	pv_bot := pv_tall ? sh : tl_top
+	preview_area := inspector_layout({ media_w, topbar_h + toolbar_h, sw - media_w, pv_bot - (topbar_h + toolbar_h) })
 	draw_preview(preview_area)
-	draw_timeline(rl.Rectangle{ 0, tl_top, sw, tl_h })
+	draw_timeline(rl.Rectangle{ 0, tl_top, tl_w, tl_h })
 
 	// feedback das divisórias (depois do draw_timeline: o cursor setado aqui vence o de lá)
-	split_hot := tl_split_drag || (hovered({ 0, tl_top - 6, sw, 9 }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !md_split_drag && modal == .None)
+	split_hot := tl_split_drag || (hovered({ 0, tl_top - 6, tl_w, 9 }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !md_split_drag && modal == .None)
 	if split_hot {
 		rl.SetMouseCursor(.RESIZE_NS)
-		rl.DrawRectangleRec({ 0, tl_top - 1, sw, 2 }, alpha(ACCENT, tl_split_drag ? 235 : 130))
+		rl.DrawRectangleRec({ 0, tl_top - 1, tl_w, 2 }, alpha(ACCENT, tl_split_drag ? 235 : 130))
 	}
 	// pegador SEMPRE visível no centro (pílula + 3 pontinhos): mostra ONDE agarrar mesmo sem hover
-	gp := rl.Rectangle{ sw/2 - 26, tl_top - 4, 52, 8 }
+	gp := rl.Rectangle{ tl_w/2 - 26, tl_top - 4, 52, 8 }
 	rl.DrawRectangleRounded(gp, 1, 4, split_hot ? ACCENT : GRIP)
 	dc := split_hot ? INK : MUTED
 	for i in 0 ..< 3 {
 		rl.DrawCircleV({ gp.x + gp.width/2 + f32(i - 1) * 9, gp.y + gp.height/2 }, 1.6, dc)
 	}
 	// divisória VERTICAL bin↔player: mesma linguagem visual, cursor EW e pegador em pé
-	md_hot := md_split_drag || (hovered({ media_w - 5, content_top, 8, tl_top - content_top }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !tl_split_drag && modal == .None)
+	md_hot := md_split_drag || (hovered({ media_w - 5, content_top, 8, md_bot - content_top }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !tl_split_drag && modal == .None)
 	if md_hot {
 		rl.SetMouseCursor(.RESIZE_EW)
-		rl.DrawRectangleRec({ media_w - 1, content_top, 2, tl_top - content_top }, alpha(ACCENT, md_split_drag ? 235 : 130))
+		rl.DrawRectangleRec({ media_w - 1, content_top, 2, md_bot - content_top }, alpha(ACCENT, md_split_drag ? 235 : 130))
 	}
-	mgp := rl.Rectangle{ media_w - 4, (content_top + tl_top)/2 - 26, 8, 52 }
+	mgp := rl.Rectangle{ media_w - 4, (content_top + md_bot)/2 - 26, 8, 52 }
 	rl.DrawRectangleRounded(mgp, 1, 4, md_hot ? ACCENT : GRIP)
 	mdc := md_hot ? INK : MUTED
 	for i in 0 ..< 3 {
@@ -2778,8 +2808,8 @@ draw_preview :: proc(r: rl.Rectangle) {
 	tc_pos := string(timecode(pos))
 	tc_tot := narrow ? "" : fmt.tprintf(" / %s", timecode(total))
 	tcw := txt_tab(tc_pos, 0, 0, FS_LG, TEXT, false) + txt_tab(tc_tot, 0, 0, FS_LG, MUTED, false)
-	// direita: tela cheia + câmera + alto-falante (28px a cada 31) => spr.x = fim‑96; proporção fica 144 antes
-	rclust := tb.x + tb.width - 96 - (tight ? 0 : 144)
+	// direita: tela cheia + câmera + alto-falante + coluna (28px a cada 31) => lyr.x = fim‑127; proporção fica 144 antes
+	rclust := tb.x + tb.width - 127 - (tight ? 0 : 144)
 	cl := tb.x + 16 + tcw + 12
 	cy := tb.y + 42 // linha de botões abaixo da barra de progresso
 	cx := clamp((cl + rclust) / 2, cl + 102, max(cl + 102, rclust - 104))
@@ -2835,12 +2865,24 @@ draw_preview :: proc(r: rl.Rectangle) {
 		mute := player_vol < 0.01
 		draw_icon(mute ? .VolumeMute : .Volume, spr.x + 14, cy, 18, mute ? DANGER : icon_col(true, hovered(spr), vol_popup))
 	}
+	// player em coluna (altura toda à direita): aceso quando ligado
+	lyr := rl.Rectangle{ spr.x - 31, cy - 14, 28, 28 }
+	if clicked(lyr) do toggle_pv_tall()
+	icon_hover_bg(lyr, pv_tall)
+	draw_icon(.TallPreview, lyr.x + 14, cy, 18, icon_col(true, hovered(lyr), pv_tall))
+	if hovered(lyr) {
+		tip: cstring = pv_tall ? "Player normal" : "Player na altura toda"
+		tw := txt_w(tip, FS_SM) + 14
+		tr := rl.Rectangle{ min(lyr.x + 14 - tw/2, tb.x + tb.width - tw - 4), cy - 48, tw, 22 }
+		rl.DrawRectangleRounded(tr, 0.3, 6, TOOLTIP)
+		txt_c(tip, tr.x + tw/2, tr.y + 4, FS_SM, TEXT)
+	}
 	// qualidade da prévia p/ clipes STREAMING (longos): Baixa=360p (leve) <-> Alta=720p
 	// (nítido, ~4x os bytes/frame). Estilo dropdown "Total/1/2/..." de NLEs, aqui binário.
 	if !tight {
 		qlabel: cstring = stream_hi ? "Alta" : "Baixa"
 		qw := txt_w(qlabel, FS_SM) + 22
-		qr := rl.Rectangle{ spr.x - 8 - qw, cy - 11, qw, 22 }
+		qr := rl.Rectangle{ lyr.x - 8 - qw, cy - 11, qw, 22 }
 		rl.DrawRectangleRounded(qr, 0.35, 6, hovered(qr) ? HOVER : PANEL2)
 		rl.DrawRectangleRoundedLinesEx(qr, 0.35, 6, 1, stream_hi ? ACCENT : LINE)
 		txt_c(qlabel, qr.x + qr.width/2, qr.y + 4, FS_SM, stream_hi ? ACCENT : TEXT)
@@ -2861,7 +2903,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// (recolhido no modo apertado, junto com a qualidade — reaparece ao alargar o player)
 	if tight do ar_menu_open = false
 	if !tight {
-	arb := rl.Rectangle{ spr.x - 144, cy - 11, 64, 22 }
+	arb := rl.Rectangle{ lyr.x - 144, cy - 11, 64, 22 } // ancorado no botão de coluna, como a qualidade
 	if clicked(arb) do ar_menu_open = !ar_menu_open
 	rl.DrawRectangleRounded(arb, 0.3, 4, (ar_menu_open || hovered(arb)) ? HOVER : PANEL2)
 	txt(ar_label(proj_ar), arb.x + 8, arb.y + 4, FS_SM, TEXT)
