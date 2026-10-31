@@ -786,21 +786,24 @@ prof_hud :: proc() {
 }
 
 // ---------- player em coluna ----------
-PV_LEFT_MIN :: f32(560) // timeline à esquerda ainda mostra o cabeçalho das trilhas + régua útil
+INSP_DOCK_W :: f32(300) // inspetor na esquerda (mesma largura do fixo no player)
+PV_LEFT_MIN :: f32(600) // bin com ~2 colunas ao lado do inspetor; timeline com régua útil
 PV_COL_MIN  :: f32(420) // = PV_MIN do draw: largura mínima do player
+PV_COL_FIT  :: f32(560) // abaixo disso o transporte esconde proporção/qualidade
 
 pv_left_max :: proc(sw: f32) -> f32 { return max(PV_LEFT_MIN, sw - PV_COL_MIN) }
 pv_left_w   :: proc(sw: f32) -> f32 { return clamp(sw * pv_frac, PV_LEFT_MIN, pv_left_max(sw)) }
 
-// Liga/desliga a coluna. Ao ligar, a coluna abraça o canvas na altura toda (mais a largura
-// do inspetor), em vez de herdar uma fração que deixaria faixas cinzas dos lados.
+// Liga/desliga a coluna. Ao ligar, a coluna abraça o canvas na altura toda (o inspetor vai
+// p/ a esquerda), em vez de herdar uma fração que deixaria faixas cinzas dos lados. Não fica
+// mais estreita que PV_COL_FIT: em 9:16 o vídeo dá ~500px e o transporte perderia controles.
 toggle_pv_tall :: proc() {
 	pv_tall = !pv_tall
 	dirty = true // layout vai no .ovp
 	if !pv_tall do return
 	sw := f32(rl.GetScreenWidth()); sh := f32(rl.GetScreenHeight())
 	video_h := sh - (34 + 64) - 66 // topbar + toolbar e o transporte do draw_preview
-	col_w := max(PV_COL_MIN, video_h * proj_ar + 308) // 308 = inspetor (flutuante ou fixo)
+	col_w := max(PV_COL_FIT, video_h * proj_ar)
 	pv_frac = clamp((sw - col_w) / sw, PV_LEFT_MIN / sw, pv_left_max(sw) / sw)
 }
 
@@ -887,13 +890,20 @@ draw :: proc() {
 		md_split_drag = true
 	}
 	tl_w := pv_tall ? media_w : sw // na coluna a timeline fica só à esquerda do player
+	// na coluna o inspetor sai do player: fica na esquerda, entre o bin e a divisória
+	bin_w := media_w
+	insp_dock: rl.Rectangle
+	if pv_tall {
+		bin_w = media_w - INSP_DOCK_W
+		insp_dock = { bin_w, topbar_h + toolbar_h, INSP_DOCK_W, tl_top - (topbar_h + toolbar_h) - 6 }
+	}
 
 	draw_topbar(sw, topbar_h)
 	draw_toolbar(sw, topbar_h, toolbar_h)
-	draw_subbar(topbar_h + toolbar_h, media_w, subbar_h)
-	draw_media_panel(rl.Rectangle{ 0, content_top, media_w, tl_top - content_top })
+	draw_subbar(topbar_h + toolbar_h, bin_w, subbar_h)
+	draw_media_panel(rl.Rectangle{ 0, content_top, bin_w, tl_top - content_top })
 	pv_bot := pv_tall ? sh : tl_top
-	preview_area := inspector_layout({ media_w, topbar_h + toolbar_h, sw - media_w, pv_bot - (topbar_h + toolbar_h) })
+	preview_area := inspector_layout({ media_w, topbar_h + toolbar_h, sw - media_w, pv_bot - (topbar_h + toolbar_h) }, insp_dock)
 	draw_preview(preview_area)
 	draw_timeline(rl.Rectangle{ 0, tl_top, tl_w, tl_h })
 

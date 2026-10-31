@@ -41,17 +41,20 @@ inspector_clear_focus :: proc() {
 
 // Reserva espaço ANTES de calcular o canvas: os transforms continuam relativos
 // ao quadro real. Em janela estreita o modo flutuante preserva o transporte.
-inspector_layout :: proc(area: rl.Rectangle) -> rl.Rectangle {
+// `dock` (player em coluna): o inspetor sai do player e ocupa esse retângulo na esquerda.
+inspector_layout :: proc(area: rl.Rectangle, dock := rl.Rectangle{}) -> rl.Rectangle {
 	g_insp_card = {}
 	insp_video_inset = 0
 	floating := area.width < 860
 	// Sem cabeçalho: vídeo e inspetor aproveitam toda a altura disponível.
 	preview := area
-	if fullscreen_preview || (floating && crop_mode) {
+	if fullscreen_preview || (floating && crop_mode && dock.width <= 0) {
 		inspector_clear_focus()
 		return preview
 	}
-	if floating {
+	if dock.width > 0 {
+		g_insp_card = dock
+	} else if floating {
 		g_insp_card = { preview.x + preview.width - 300, preview.y + 8, 288, max(f32(40), preview.height - 82) }
 		// O transporte segue com a largura toda; só o canvas encolhe para não ficar atrás do cartão.
 		insp_video_inset = 308
