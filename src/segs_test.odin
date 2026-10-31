@@ -270,6 +270,24 @@ cadeia_contigua_de_corte :: proc(t: ^testing.T) {
 	testing.expect(t, t_feq(seg_run_end(0), 8), "cadeia quebrada termina no out do próprio segmento")
 }
 
+// REGRESSÃO "o player não sai do corte": o fim da cadeia era remapeado pela fonte
+// (start + (out0-in_off)/speed) e o f32 arredondava 1 ulp ANTES de start+dur — o
+// playhead ficava DENTRO do mesmo segmento e o playback re-adquiria o áudio no fim
+// todo frame. Valores achados por busca: com eles o remapeamento antigo cai dentro.
+@(test)
+fim_da_cadeia_sai_do_segmento :: proc(t: ^testing.T) {
+	t_reset()
+	a := add_seg(0, 10, 7.3, 2.1)    // trecho do meio da fonte (sobrou de um corte)
+	b := add_seg(1, 20, 0, 5)        // outro clipe encostado: NÃO é continuação de `a`
+	segs[b].start = segs[a].start + segs[a].dur
+	testing.expect(t, next_contiguous_seg(a) == -1, "fontes diferentes não emendam")
+	old := segs[a].start + (seg_run_end(a) - segs[a].in_off) / seg_speed(a)
+	testing.expect(t, seg_on_track_at(0, old) == a, "pré-condição: o mapa antigo ficava preso em `a`")
+	lst := seg_run_last(a)
+	ph := segs[lst].start + segs[lst].dur // o que o playback usa agora
+	testing.expect(t, seg_on_track_at(0, ph) == b, "fim da cadeia já está no próximo segmento")
+}
+
 @(test)
 cadeia_nao_emenda_speed_diferente :: proc(t: ^testing.T) {
 	t_reset()

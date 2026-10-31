@@ -855,7 +855,13 @@ update :: proc() {
 				} else if !rl.IsMusicStreamPlaying(c.music) || local >= out0 - 0.001 {
 					rl.PauseMusicStream(c.music) // fim da cadeia (a fonte pode continuar)
 					play_clip = -1
-					st.playhead = sg.start + (out0 - sg.in_off) / seg_speed(a) // fim da cadeia, na timeline
+					// fim da cadeia, na timeline: o start+dur do ÚLTIMO pedaço, calculado do MESMO
+					// jeito que o audio_seg_at testa (`t >= start+dur`). Remapear pela fonte
+					// (start + (out0-in_off)/speed) arredonda em f32 p/ 1 ulp ANTES do fim em ~1/3
+					// dos cortes: o próximo frame achava o MESMO segmento, re-adquiria o áudio no
+					// fim e voltava p/ cá — o playhead ficava preso no corte p/ sempre.
+					lst := seg_run_last(a)
+					st.playhead = segs[lst].start + segs[lst].dur
 					if st.playhead >= timeline_dur() - 0.001 { stop_timeline_play(); st.playhead = timeline_dur() }
 				} else {
 					// GRAVA um SALTO do playhead: o relógio de áudio mandou o playhead

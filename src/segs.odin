@@ -1885,14 +1885,17 @@ next_contiguous_seg :: proc(a: int) -> int {
 // fim (na FONTE) da cadeia de segmentos contíguos a partir de `a`. Cortes internos
 // de um mesmo clipe formam uma cadeia; para o playback são invisíveis — o áudio da
 // fonte só "termina" no fim da cadeia inteira, nunca num corte interno.
-seg_run_end :: proc(a: int) -> f32 {
+seg_run_end :: proc(a: int) -> f32 { return seg_src_out(seg_run_last(a)) }
+
+// último segmento da cadeia contígua a partir de `a` (o próprio `a` se ela não continua)
+seg_run_last :: proc(a: int) -> int {
 	cur := a
 	for _ in 0 ..< nsegs { // limite = nº de segmentos (nunca entra em laço)
 		nx := next_contiguous_seg(cur)
 		if nx < 0 do break
 		cur = nx
 	}
-	return seg_src_out(cur)
+	return cur
 }
 
 // ---------- undo/redo ----------
