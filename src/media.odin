@@ -384,6 +384,21 @@ Clip :: struct {
 	rsp_t0:   f64,  // quando foi pedido (p/ medir a latência no overlay)
 	rsp_busy: bool, // atômico: worker é o DONO do live stream (main não toca)
 	rsp_done: bool, // atômico: novo decoder pronto, 1º frame em fbuf
+	// decoder de RESERVA (pré-abertura antes de um corte): um 2º ffmpeg já posicionado no
+	// início do PRÓXIMO trecho, com o 1º frame lido. No corte o clip_frame só o adota no
+	// lugar do ao vivo — sem os ~220ms de respawn em que a imagem ficava congelada.
+	pre_thr:  ^thread.Thread,
+	pre_ps:   os.Process,
+	pre_r:    ^os.File,
+	pre_buf:  []u8, // 1º frame do decoder de reserva (mesmo tamanho do fbuf)
+	pre_sf:   int,  // bytes do frame na resolução em que a reserva foi aberta
+	pre_t:    f32,  // -ss da reserva (s)
+	pre_fps:  f32,  // -r da reserva
+	pre_hw:   bool, // reserva por NVDEC?
+	pre_on:   bool, // (main) reserva pronta p/ adotar
+	pre_busy: bool, // atômico: worker abrindo a reserva (dono dos campos pre_*)
+	pre_done: bool, // atômico: worker terminou
+	pre_ok:   bool, // atômico: worker entregou o 1º frame
 	// áudio (WAV em disco; funciona p/ qualquer duração)
 	music:     rl.Music,
 	has_audio: bool, // existe um rl.Music CARREGADO AGORA. É estado do player: oscila a cada
@@ -2203,6 +2218,155 @@ adopt_respawns :: proc() {
 	}
 }
 
+// ----- decoder de reserva (pré-abertura antes de um corte) -----
+// Ao cortar e remover um trecho, os pedaços que sobram da MESMA fonte ficam colados na
+// timeline mas longe no arquivo (ex.: 373s -> 675s). O decoder ao vivo só anda p/ frente,
+// então no corte precisava respawnar (~220ms medidos, NVDEC) com a imagem congelada.
+// PREFETCH_LEAD antes do corte, prefetch_next_cut abre a reserva no início do próximo
+// trecho; no corte o clip_frame a adota (pre_adopt) e a troca é instantânea.
+PREFETCH_LEAD :: f32(3) // s antes do corte: cobre o respawn do vídeo e a extração do chunk de áudio (~1-2s)
+
+// worker: abre o ffmpeg em c.pre_t e lê o 1º frame p/ pre_buf (sem GL). Mesmo comando do
+// stream_seek; se o NVDEC não entregar (recusa/verde), tenta uma vez por software.
+pre_worker :: proc(c: ^Clip) {
+	ok := false
+	force_sw := false
+	for {
+		if intrinsics.atomic_load(&app_closing) || intrinsics.atomic_load(&c.stop) do break
+		hw := force_sw ? "" : use_cuvid(c)
+		ss := fmt.tprintf("%.3f", c.pre_t)
+		vfb: [128]u8; vf := dec_vf_of(c, vfb[:])
+		rs := fmt.tprintf("%.2f", c.pre_fps)
+		sw_cmd := []string{
+			"ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "2",
+			"-ss", ss, "-i", c.path,
+			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", rs,
+			"-an", "-sn", "pipe:1",
+		}
+		hw_cmd := []string{
+			"ffmpeg", "-hide_banner", "-loglevel", "error",
+			"-ss", ss, "-c:v", hw, "-i", c.path,
+			"-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-r", rs,
+			"-an", "-sn", "pipe:1",
+		}
+		sf := cframe(c)
+		p, r, _, pe := spawn(hw != "" ? hw_cmd : sw_cmd, stdout = true)
+		if pe != nil do break
+		tame_process(c, p, false)
+		total := 0
+		for total < sf {
+			n, e := os.read(r, c.pre_buf[total:sf])
+			if n > 0 do total += n
+			if n == 0 || e != nil do break
+		}
+		if total == sf && !(hw != "" && frame_is_green(c.pre_buf[:sf])) {
+			c.pre_ps = p; c.pre_r = r; c.pre_sf = sf; c.pre_hw = hw != ""
+			ok = true
+			break
+		}
+		_ = os.process_kill(p); _, _ = os.process_wait(p); os.close(r)
+		if hw == "" do break // nem o software entregou: alvo além do fim do vídeo
+		force_sw = true
+	}
+	intrinsics.atomic_store(&c.pre_ok, ok)
+	intrinsics.atomic_store(&c.pre_done, true)
+}
+
+// (main) recolhe o worker da reserva que terminou
+pre_poll :: proc(c: ^Clip) {
+	if !intrinsics.atomic_load(&c.pre_busy) || !intrinsics.atomic_load(&c.pre_done) do return
+	intrinsics.atomic_store(&c.pre_busy, false)
+	if c.pre_thr != nil { thread.join(c.pre_thr); thread.destroy(c.pre_thr); c.pre_thr = nil }
+	c.pre_on = intrinsics.atomic_load(&c.pre_ok)
+}
+
+// (main) fecha a reserva pronta (alvo mudou, ou o clipe vai fechar)
+pre_discard :: proc(c: ^Clip) {
+	if !c.pre_on do return
+	_ = os.process_kill(c.pre_ps)
+	_, _ = os.process_wait(c.pre_ps)
+	os.close(c.pre_r)
+	c.pre_on = false
+}
+
+// (main) pede uma reserva em `t` (posição na fonte), tocando a `spd`. Uma por clipe: um
+// alvo novo substitui a reserva velha; com um worker no ar, espera ele terminar.
+pre_request :: proc(c: ^Clip, t: f32, spd: f32) {
+	pre_poll(c)
+	if intrinsics.atomic_load(&c.pre_busy) do return
+	fps := live_want_fps(spd)
+	if c.pre_on {
+		if abs(c.pre_t - t) < 0.02 && abs(c.pre_fps - fps) < 0.6 do return // já pronta
+		pre_discard(c)
+	}
+	if c.eof_at > 0 && t >= c.eof_at - 0.05 do return // além do fim real do vídeo
+	if c.pre_thr != nil { thread.join(c.pre_thr); thread.destroy(c.pre_thr); c.pre_thr = nil }
+	if len(c.pre_buf) != len(c.fbuf) { delete(c.pre_buf); c.pre_buf = make([]u8, len(c.fbuf)) }
+	c.pre_t = t
+	c.pre_fps = fps
+	intrinsics.atomic_store(&c.pre_ok, false)
+	intrinsics.atomic_store(&c.pre_done, false)
+	intrinsics.atomic_store(&c.pre_busy, true)
+	c.pre_thr = thread.create_and_start_with_poly_data(c, pre_worker)
+}
+
+// (main, dentro do clip_frame) o alvo `l` caiu fora do decoder ao vivo: se a reserva cobre
+// `l`, ela VIRA o ao vivo (o velho é morto) e o 1º frame sobe na hora. false = respawn normal.
+pre_adopt :: proc(c: ^Clip, l: f32) -> bool {
+	pre_poll(c)
+	if !c.pre_on do return false
+	if l < c.pre_t - 0.05 || l > c.pre_t + 1.0 do return false // a reserva é de outro ponto
+	if c.pre_sf != cframe(c) || abs(c.pre_fps - live_want_fps(clip_view_speed(c))) > 0.6 {
+		pre_discard(c) // qualidade/velocidade mudou desde a abertura: não serve mais
+		return false
+	}
+	stream_stop(c)
+	c.live_ps = c.pre_ps; c.live_r = c.pre_r; c.live_on = true
+	c.live_hw = c.pre_hw; c.live_fps = c.pre_fps
+	c.live_base = c.pre_t; c.live_frame = 1 // o 1º frame já foi lido pelo worker
+	c.pre_on = false
+	copy(c.fbuf[:c.pre_sf], c.pre_buf[:c.pre_sf])
+	upload_tex(c, rawptr(raw_data(c.fbuf)))
+	c.tex_t = live_now(c)
+	dbg_vframes += 1
+	dbg("PREFETCH", "clip='%s' reserva adotada em %.1fs (alvo %.1fs) %s", c.name, c.pre_t, l, c.pre_hw ? "HW" : "SW")
+	return true
+}
+
+// (main, a cada frame do playback) perto de um corte que SALTA na fonte, prepara o próximo
+// trecho: abre a reserva de vídeo e encomenda o chunk de áudio. Corte contíguo (o pedaço
+// seguinte continua de onde este para) não precisa — o decoder e o áudio já seguem sozinhos.
+prefetch_next_cut :: proc() {
+	if !st.playing || src_preview >= 0 do return
+	ph := st.playhead
+	for t in 0 ..< g_nv {
+		if track_hidden[t] do continue
+		i := seg_on_track_at(t, ph)
+		if i < 0 do continue
+		end := segs[i].start + segs[i].dur
+		if end - ph > PREFETCH_LEAD do continue
+		nx := seg_on_track_at(t, end)
+		if nx < 0 || nx == next_contiguous_seg(i) || segs[nx].aonly || seg_is_dup(nx) do continue
+		c := seg_src(nx)
+		if c.is_text || !c.streaming do continue // clipe em cache: o frame já está na RAM
+		pre_request(c, seg_local(nx, end), seg_speed(nx))
+	}
+	a := audio_seg_at(ph)
+	if a < 0 || seg_speed(a) != 1 do return
+	end := segs[a].start + segs[a].dur
+	if end - ph > PREFETCH_LEAD do return
+	nx := audio_seg_at(end)
+	if nx < 0 || nx == next_contiguous_seg(a) || seg_speed(nx) != 1 do return
+	c := seg_src(nx)
+	nl := seg_local(nx, end)
+	// mesma fonte e a janela ativa ainda não cobre o fim DESTE trecho: o slot livre é da
+	// continuação (pré-busca do laço de playback) — encomendar aqui a sobrescreveria
+	if seg_src(a) == c && !audio_clock_ok(c, seg_src_out(a) - 0.3) do return
+	// completo carregado já cobre tudo; senão encomenda o chunk do próximo trecho (fica
+	// "no bolso" e o try_chunk_open o adota no corte)
+	if c.has_audio && !c.music_full && !audio_clock_ok(c, nl) do chunk_request(c, nl)
+}
+
 // re-alimenta o buffer do áudio ativo no MEIO de operações bloqueantes da main
 // thread (respawn do decoder ao vivo, leitura de frame): sem isso o stream
 // esvazia durante um seek/salto e o som engasga. SÓ main thread (raylib audio).
@@ -2422,6 +2586,7 @@ clip_frame :: proc(c: ^Clip, local: f32) {
 		// o stream já provou acabar antes de `l`: respawnar de novo só spawnaria
 		// ffmpeg em loop (~3x/s) até o playhead passar — congela no último frame
 		if c.eof_at > 0 && l >= c.eof_at - 0.05 do return
+		if pre_adopt(c, l) do return // reserva aberta antes do corte: troca instantânea
 		stream_seek_async(c, l)
 		return
 	}
@@ -2440,6 +2605,7 @@ clip_frame :: proc(c: ^Clip, local: f32) {
 	// miniatura ("a imagem vai ficando ruim com o tempo"). Margem de 0.2s: o decoder
 	// passa do alvo por até 1 frame (33ms) no catch-up, o que não deve respawnar.
 	if l < cur - 0.2 || l > cur + 1.5 {
+		if pre_adopt(c, l) do return // reserva aberta antes do corte: troca instantânea
 		stream_seek_async(c, l)
 		return
 	}
@@ -2480,6 +2646,13 @@ clip_close :: proc(c: ^Clip) {
 	if c.chunk_thr != nil { thread.join(c.chunk_thr); thread.destroy(c.chunk_thr); c.chunk_thr = nil } // worker polla `stop`
 	if c.parts_thr != nil { thread.join(c.parts_thr); thread.destroy(c.parts_thr); c.parts_thr = nil } // idem (polla via audio_extract_wait)
 	if c.rsp_thr != nil { thread.join(c.rsp_thr); thread.destroy(c.rsp_thr); c.rsp_thr = nil }          // respawn é curto (~300ms)
+	if c.pre_thr != nil { // reserva: o job fechado acima já matou o ffmpeg dela (o read desbloqueia)
+		thread.join(c.pre_thr); thread.destroy(c.pre_thr); c.pre_thr = nil
+		c.pre_on = intrinsics.atomic_load(&c.pre_ok)
+		intrinsics.atomic_store(&c.pre_busy, false)
+	}
+	pre_discard(c)
+	delete(c.pre_buf); c.pre_buf = nil
 	if c.streaming { stream_stop(c); delete(c.fbuf) }
 	else do delete(c.cache)
 	intrinsics.atomic_store(&c.kf_ok, false)

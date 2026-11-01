@@ -875,7 +875,9 @@ update :: proc() {
 						nx := audio_seg_at(st.playhead)
 						if nx >= 0 && seg_speed(nx) == 1 {
 							nl := seg_local(nx, st.playhead)
-							if audio_clock_ok(seg_src(nx), nl) do set_play_clip(nx, nl)
+							// o chunk do próximo trecho (encomendado pelo prefetch_next_cut) já
+							// pode estar no bolso: adota AGORA, sem esperar o frame seguinte
+							if audio_clock_ok(seg_src(nx), nl) || try_chunk_open(seg_src(nx), nl) do set_play_clip(nx, nl)
 						}
 					}
 				} else {
@@ -922,6 +924,7 @@ update :: proc() {
 			}
 		}
 	}
+	prefetch_next_cut() // perto de um corte que salta na fonte: prepara vídeo e áudio do próximo trecho
 	// mantém os buffers do áudio ativo alimentados + aplica volume/mudo/fade do
 	// segmento SOB O PLAYHEAD (não o dono da cadeia: num run contíguo cada pedaço
 	// tem o seu próprio ganho). SetMusicVolume age no stream compartilhado da fonte,
