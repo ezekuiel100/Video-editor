@@ -23,9 +23,13 @@ shot_frame :: proc() {
 		shot_checked = true
 		for a, i in os.args do if a == "-shot" && i + 1 < len(os.args) {
 			shot_out = cstring(raw_data(fmt.aprintf("%s\x00", os.args[i + 1])))
-			if i + 2 < len(os.args) do import_media(os.args[i + 2], true)
+			if i + 2 < len(os.args) && os.args[i + 2][0] != '-' do import_media(os.args[i + 2], true)
 			shot_t0 = rl.GetTime()
 		}
+		// -shotvert: projeto 9:16 (ANTES do -shottall: a coluna abraça o canvas na proporção atual)
+		// -shottall: captura com o player em coluna (altura toda à direita)
+		for a in os.args do if a == "-shotvert" && shot_out != nil { set_proj_ar(9.0/16); ar_auto = false }
+		for a in os.args do if a == "-shottall" && shot_out != nil && !pv_tall do toggle_pv_tall()
 	}
 	if shot_out == nil || should_close do return
 	if rl.GetTime() - shot_t0 < SHOT_WAIT do return

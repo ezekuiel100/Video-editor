@@ -789,7 +789,7 @@ prof_hud :: proc() {
 INSP_DOCK_W :: f32(300) // inspetor na esquerda (mesma largura do fixo no player)
 PV_LEFT_MIN :: f32(600) // bin com ~2 colunas ao lado do inspetor; timeline com régua útil
 PV_COL_MIN  :: f32(420) // = PV_MIN do draw: largura mínima do player
-PV_COL_FIT  :: f32(560) // abaixo disso o transporte esconde proporção/qualidade
+PV_COL_FIT  :: f32(600) // abaixo disso o transporte esconde proporção/qualidade (ver `tight` no draw_preview)
 
 pv_left_max :: proc(sw: f32) -> f32 { return max(PV_LEFT_MIN, sw - PV_COL_MIN) }
 pv_left_w   :: proc(sw: f32) -> f32 { return clamp(sw * pv_frac, PV_LEFT_MIN, pv_left_max(sw)) }
@@ -802,7 +802,7 @@ toggle_pv_tall :: proc() {
 	dirty = true // layout vai no .ovp
 	if !pv_tall do return
 	sw := f32(rl.GetScreenWidth()); sh := f32(rl.GetScreenHeight())
-	video_h := sh - (34 + 64) - 66 // topbar + toolbar e o transporte do draw_preview
+	video_h := sh - 34 - 66 // topbar e o transporte do draw_preview (a coluna sobe por cima da faixa das abas)
 	col_w := max(PV_COL_FIT, video_h * proj_ar)
 	pv_frac = clamp((sw - col_w) / sw, PV_LEFT_MIN / sw, pv_left_max(sw) / sw)
 }
@@ -871,10 +871,13 @@ draw :: proc() {
 	PV_MIN :: f32(420)
 	md_max := max(MD_MIN, sw - PV_MIN)
 	media_w := clamp(sw * md_frac, MD_MIN, md_max)
-	// coluna: a divisória vertical separa esquerda (bin+timeline) do player e desce até o rodapé
+	// coluna: a divisória vertical separa esquerda (bin+timeline) do player e vai da barra de
+	// título ao rodapé
+	md_top := content_top
 	md_bot := tl_top
 	if pv_tall {
 		media_w = pv_left_w(sw)
+		md_top = topbar_h
 		md_bot = sh
 	}
 	if md_split_drag {
@@ -886,7 +889,7 @@ draw :: proc() {
 			md_frac = clamp(m_div.x / sw, MD_MIN / sw, md_max / sw)
 			media_w = clamp(sw * md_frac, MD_MIN, md_max)
 		}
-	} else if rl.IsMouseButtonPressed(.LEFT) && hovered({ media_w - 5, content_top, 8, md_bot - content_top }) &&
+	} else if rl.IsMouseButtonPressed(.LEFT) && hovered({ media_w - 5, md_top, 8, md_bot - md_top }) &&
 	          !tl_split_drag && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !win_dragging && modal == .None {
 		// zona de 8px (5 sobre o bin, 3 sobre o player); a de cima tem prioridade (T-junção)
 		md_split_drag = true
@@ -901,11 +904,14 @@ draw :: proc() {
 	}
 
 	draw_topbar(sw, topbar_h)
-	draw_toolbar(sw, topbar_h, toolbar_h)
+	// na coluna o player sobe até a barra de título: as abas e o Exportar ficam só na esquerda
+	// (+64px de altura p/ o vídeo, que é o que limita um projeto vertical)
+	draw_toolbar(pv_tall ? media_w : sw, topbar_h, toolbar_h)
 	draw_subbar(topbar_h + toolbar_h, bin_w, subbar_h)
 	draw_media_panel(rl.Rectangle{ 0, content_top, bin_w, tl_top - content_top })
+	pv_top := pv_tall ? topbar_h : topbar_h + toolbar_h
 	pv_bot := pv_tall ? sh : tl_top
-	preview_area := inspector_layout({ media_w, topbar_h + toolbar_h, sw - media_w, pv_bot - (topbar_h + toolbar_h) }, insp_dock)
+	preview_area := inspector_layout({ media_w, pv_top, sw - media_w, pv_bot - pv_top }, insp_dock)
 	draw_preview(preview_area)
 	draw_timeline(rl.Rectangle{ 0, tl_top, tl_w, tl_h })
 
@@ -917,13 +923,13 @@ draw :: proc() {
 	// painéis (em vez de bordas claras em cada um) e é também a divisória arrastável — a zona
 	// de agarre continua a mesma (9px/8px), a calha só a deixa visível.
 	GUT :: f32(4)
-	pv_top := topbar_h + toolbar_h
-	rl.DrawRectangleRec({ 0, pv_top - 1, sw, 2 }, GUTTER)                         // sob as abas
+	tabs_bot := topbar_h + toolbar_h
+	rl.DrawRectangleRec({ 0, tabs_bot - 1, pv_tall ? media_w : sw, 2 }, GUTTER)   // sob as abas
 	rl.DrawRectangleRec({ 0, tl_top - GUT/2, tl_w, GUT }, GUTTER)                 // conteúdo | timeline
 	rl.DrawRectangleRec({ media_w - GUT/2, pv_top, GUT, md_bot - pv_top }, GUTTER) // bin | player
-	if pv_tall do rl.DrawRectangleRec({ bin_w - GUT/2, pv_top, GUT, tl_top - pv_top }, GUTTER) // bin | inspetor
+	if pv_tall do rl.DrawRectangleRec({ bin_w - GUT/2, tabs_bot, GUT, tl_top - tabs_bot }, GUTTER) // bin | inspetor
 	else if g_insp_card.width > 0 && insp_video_inset == 0 {                     // player | inspetor fixo
-		rl.DrawRectangleRec({ g_insp_card.x - GUT/2, pv_top, GUT, tl_top - pv_top }, GUTTER)
+		rl.DrawRectangleRec({ g_insp_card.x - GUT/2, tabs_bot, GUT, tl_top - tabs_bot }, GUTTER)
 	}
 	// feedback das divisórias (depois do draw_timeline: o cursor setado aqui vence o de lá)
 	split_hot := tl_split_drag || (hovered({ 0, tl_top - 6, tl_w, 9 }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !md_split_drag && modal == .None)
@@ -936,13 +942,13 @@ draw :: proc() {
 	dc := split_hot ? ACCENT : GRIP
 	for i in 0 ..< 3 do rl.DrawCircleV({ tl_w/2 + f32(i - 1) * 7, tl_top }, 1.3, dc)
 	// divisória VERTICAL bin↔player: mesma linguagem visual, cursor EW
-	md_hot := md_split_drag || (hovered({ media_w - 5, content_top, 8, md_bot - content_top }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !tl_split_drag && modal == .None)
+	md_hot := md_split_drag || (hovered({ media_w - 5, md_top, 8, md_bot - md_top }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !tl_split_drag && modal == .None)
 	if md_hot {
 		rl.SetMouseCursor(.RESIZE_EW)
-		rl.DrawRectangleRec({ media_w - 1, content_top, 2, md_bot - content_top }, alpha(ACCENT, md_split_drag ? 235 : 150))
+		rl.DrawRectangleRec({ media_w - 1, md_top, 2, md_bot - md_top }, alpha(ACCENT, md_split_drag ? 235 : 150))
 	}
 	mdc := md_hot ? ACCENT : GRIP
-	for i in 0 ..< 3 do rl.DrawCircleV({ media_w, (content_top + md_bot)/2 + f32(i - 1) * 7 }, 1.3, mdc)
+	for i in 0 ..< 3 do rl.DrawCircleV({ media_w, (md_top + md_bot)/2 + f32(i - 1) * 7 }, 1.3, mdc)
 
 	// fantasma do item do bin sendo arrastado para a timeline (com contagem se forem vários)
 	if st.drag == .Bin && bin_drag >= 0 && bin_drag < nclips {
@@ -1451,7 +1457,9 @@ draw_subbar :: proc(y, media_w, h: f32) {
 	rl.DrawLineEx({sr.x + 18, sr.y + sr.height/2 + 3}, {sr.x + 22, sr.y + sr.height/2 + 7}, 1.5, MUTED)
 	// campo (depois da lupa; deixa espaço p/ o X de limpar à direita)
 	fld := rl.Rectangle{ sr.x + 22, sr.y, sr.width - 22 - 24, sr.height }
-	if tf_search.len == 0 && !search_focus do txt("Pesquisar mídia", fld.x + 4, sr.y + sr.height/2 - 8, FS_MD, MUTED)
+	// bin estreito (player em coluna): encurta o placeholder em vez de cortá-lo no meio da palavra
+	ph: cstring = txt_w("Pesquisar mídia", FS_MD) + 8 <= fld.width ? "Pesquisar mídia" : "Pesquisar"
+	if tf_search.len == 0 && !search_focus && txt_w(ph, FS_MD) + 8 <= fld.width do txt(ph, fld.x + 4, sr.y + sr.height/2 - 8, FS_MD, MUTED)
 	tf_field(&tf_search, fld, &search_focus, true)
 	// X p/ limpar (só quando há texto)
 	if tf_search.len > 0 {
@@ -2826,11 +2834,13 @@ draw_preview :: proc(r: rl.Rectangle) {
 	// com a posição; apertado: esconde proporção/qualidade (raramente usados — reaparecem ao
 	// alargar). O cluster central centra no ESPAÇO LIVRE entre o timecode e a direita, clampado.
 	narrow := tb.width < 700
-	tight  := tb.width < 560
 	// timecode com dígitos de largura fixa (não "dança" durante a reprodução): atual claro, total apagado
 	tc_pos := string(timecode(pos))
 	tc_tot := narrow ? "" : fmt.tprintf(" / %s", timecode(total))
 	tcw := txt_tab(tc_pos, 0, 0, FS_LG, TEXT, false) + txt_tab(tc_tot, 0, 0, FS_LG, MUTED, false)
+	// apertado = o cluster central (±96px do play, colado no timecode) não cabe antes da proporção.
+	// Medido, não por largura fixa: com 560px o "Fim" ficava por cima do "9:16".
+	tight := tb.x + 16 + tcw + 12 + 204 + 8 > tb.x + tb.width - 127 - 144
 	// direita: tela cheia + câmera + alto-falante + coluna (28px a cada 31) => lyr.x = fim‑127; proporção fica 144 antes
 	rclust := tb.x + tb.width - 127 - (tight ? 0 : 144)
 	cl := tb.x + 16 + tcw + 12
