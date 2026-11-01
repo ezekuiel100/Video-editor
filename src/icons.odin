@@ -15,6 +15,7 @@ Icon :: enum {
 	Volume, VolumeMute, Camera, Fullscreen, ExitFullscreen, TallPreview,
 	Play, Pause, SkipBack, SkipForward, StepBack, StepForward,
 	Film, Music, Folder,
+	Lock, Unlock, Eye, EyeOff, Import, Text,
 }
 
 // caneta: origem do quadro 24×24 na tela, escala e espessura do traço
@@ -184,5 +185,28 @@ draw_icon :: proc(kind: Icon, cx, cy, size: f32, col: rl.Color) {
 		circle(p, 18, 16, 3)
 	case .Folder:
 		line(p, 3, 5, 9, 5, 11, 7.5, 21, 7.5, 21, 19, 3, 19, 3, 5)
+	case .Lock, .Unlock: // cadeado: corpo + arco (aberto = arco solto de um lado)
+		line(p, 5, 11, 19, 11, 19, 21, 5, 21, 5, 11)
+		if kind == .Lock {
+			line(p, 8, 11, 8, 7.5); line(p, 16, 11, 16, 7.5)
+			arc(p, 12, 7.5, 4, 180, 360)
+		} else {
+			line(p, 8, 11, 8, 7.5)
+			arc(p, 12, 7.5, 4, 180, 330)
+		}
+		line(p, 12, 15, 12, 17)
+	case .Eye, .EyeOff: // olho: duas pálpebras em arco + pupila (oculto = risco diagonal)
+		arc(p, 12, 17.33, 11.33, 208, 332) // pálpebras pelos cantos (2,12)/(22,12), abertura 6..18
+		arc(p, 12, 6.67, 11.33, 28, 152)
+		circle(p, 12, 12, 3)
+		if kind == .EyeOff do line(p, 4, 20, 20, 4)
+	case .Import: // seta descendo para a bandeja
+		line(p, 12, 3, 12, 15)
+		line(p, 7, 10, 12, 15, 17, 10)
+		line(p, 4, 15, 4, 20, 20, 20, 20, 15)
+	case .Text: // "T"
+		line(p, 5, 6, 5, 4, 19, 4, 19, 6)
+		line(p, 12, 4, 12, 20)
+		line(p, 9, 20, 15, 20)
 	}
 }

@@ -267,6 +267,12 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	ruler := rl.Rectangle{ r.x + LANE_X, r.y + toolbar_h, r.width - LANE_X, ruler_h }
 	rl.DrawRectangleRec(ruler, SUNK)
 	rl.DrawRectangleRec({ ruler.x, ruler.y + ruler.height - 1, ruler.width, 1 }, LINE)
+	// canto acima dos cabeçalhos: posição do playhead (o canto ficava vazio)
+	corner := rl.Rectangle{ r.x, ruler.y, LANE_X, ruler_h }
+	rl.DrawRectangleRec(corner, SUNK)
+	rl.DrawRectangleRec({ corner.x, corner.y + corner.height - 1, corner.width, 1 }, LINE)
+	rl.DrawRectangleRec({ corner.x + corner.width - 1, corner.y, 1, corner.height }, LINE)
+	txt_tab(string(timecode(st.playhead)), corner.x + 12, corner.y + 5, FS_SM, ACCENT)
 	rl.BeginScissorMode(i32(clip_rect.x), i32(clip_rect.y), i32(clip_rect.width), i32(clip_rect.height))
 	// passo adaptativo: escolhe um intervalo "redondo" (s) que garanta ~7px entre
 	// marcas e ~55px entre rótulos. Sem isso, no zoom-out extremo a régua tentaria
@@ -333,13 +339,11 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		if track_locked[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, alpha(LOCKED, 20)) // tint bloqueada
 		if track_muted[t]  do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, alpha(DANGER_D, 24))  // tint muda
 		if track_hidden[t] do rl.DrawRectangleRec({ r.x + LANE_X, ly, r.width - LANE_X, lh }, alpha(TRACK_HIDDEN, 30))  // tint oculta
-		// feedback do pegador: pontilhado discreto, acende no hover/arrasto
+		// feedback do pegador: linha accent no hover/arrasto
 		hot := track_resize == t || (track_resize < 0 && hovered(hz) && st.drag == .None && modal == .None)
 		if hot {
 			rl.SetMouseCursor(.RESIZE_NS)
 			rl.DrawRectangleRec({ r.x, ly + lh - 1, LANE_X, 2 }, ACCENT)
-		} else {
-			for k in 0 ..< 3 do rl.DrawCircleV({ r.x + LANE_X/2 + f32(k - 1)*7, ly + lh - 2 }, 1.1, DISABLED)
 		}
 	}
 	rl.EndScissorMode()
@@ -1074,38 +1078,50 @@ draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
 	muted := track_muted[t]; locked := track_locked[t]; hidden := track_hidden[t]
 	track_col := locked ? LOCKED : (aud ? TRACK_AUDIO : TRACK_VIDEO)
 	rl.DrawRectangleRec({r.x, r.y, 3, r.height}, track_col)
-	// Rótulo pequeno concentra a cor sem tingir todo o cabeçalho.
-	name_bg := rl.Rectangle{ r.x + 10, r.y + 7, 30, 18 }
-	rl.DrawRectangleRounded(name_bg, 0.25, 4, rl.Color{ track_col.r, track_col.g, track_col.b, 95 })
-	txt_c(name, name_bg.x + name_bg.width/2, name_bg.y + 2, FS_SM, TEXT)
+	// UMA linha centrada na altura: nome à esquerda, controles à direita. Ícones sem caixa em
+	// repouso (fundo só no hover); a cor do ícone diz o estado ligado.
+	cy := r.y + r.height/2
+	txt(name, r.x + 14, cy - 8, FS_MD, TEXT)
 	// "×" p/ remover a trilha — só na PONTA de cada tipo (topo do vídeo / base do áudio) e se
 	// estiver VAZIA (sem segmentos). Só as pontas removem sem precisar re-indexar as outras.
+	// Aparece ao passar o mouse no cabeçalho, logo depois do nome.
 	removable := is_audio_track(t) ? (t == MAXV + g_na - 1 && g_na > 1) : (t == g_nv - 1 && g_nv > 1)
-	if removable {
+	if removable && hovered(r) {
 		empty := true
 		for i in 0 ..< nsegs do if segs[i].track == t { empty = false; break }
 		if empty do for i in 0 ..< nfx do if fxsegs[i].track == t { empty = false; break } // efeito na trilha também conta
 		if empty {
-			xb := rl.Rectangle{ r.x + r.width - 22, r.y + 6, 15, 15 }
+			xb := rl.Rectangle{ r.x + 34, cy - 8, 16, 16 }
 			if clicked(xb) {
 				track_muted[t] = false; track_locked[t] = false; track_hidden[t] = false // devolve o slot limpo
 				if is_audio_track(t) do g_na -= 1; else do g_nv -= 1
 			} else {
-				xcol := hovered(xb) ? DANGER : MUTED
-				rl.DrawLineEx({xb.x + 3, xb.y + 3}, {xb.x + 12, xb.y + 12}, 1.6, xcol)
-				rl.DrawLineEx({xb.x + 12, xb.y + 3}, {xb.x + 3, xb.y + 12}, 1.6, xcol)
+				xh := hovered(xb)
+				if xh do rl.DrawRectangleRounded(xb, 0.3, 4, HOVER)
+				xcol := xh ? DANGER : MUTED
+				rl.DrawLineEx({xb.x + 4.5, xb.y + 4.5}, {xb.x + 11.5, xb.y + 11.5}, 1.5, xcol)
+				rl.DrawLineEx({xb.x + 11.5, xb.y + 4.5}, {xb.x + 4.5, xb.y + 11.5}, 1.5, xcol)
 			}
 		}
 	}
-	iy := r.y + r.height - 22
-	// botão MUTE (silencia todo o áudio da trilha)
-	mb := rl.Rectangle{ r.x + 12, iy, 20, 16 }
-	if clicked(mb) do track_muted[t] = !track_muted[t]
-	rl.DrawRectangleRounded(mb, 0.25, 4, muted ? DANGER_D : (hovered(mb) ? HOVER : PANEL2))
-	txt_c("M", mb.x + mb.width/2, mb.y + 1, FS_SM, muted ? rl.WHITE : MUTED)
-	// botão LOCK (bloqueia mover/aparar/cortar) — ícone de cadeado
-	lb := rl.Rectangle{ r.x + 38, iy, 20, 16 }
-	if clicked(lb) {
+	hbtn :: proc(b: rl.Rectangle, ic: Icon, on: bool, on_col: rl.Color) -> bool {
+		hot := hovered(b)
+		if hot do rl.DrawRectangleRounded(b, 0.3, 4, HOVER)
+		draw_icon(ic, b.x + b.width/2, b.y + b.height/2, 15, on ? on_col : (hot ? TEXT : MUTED))
+		return clicked(b)
+	}
+	BW :: f32(22)
+	bx := r.x + r.width - 6 - BW
+	// MUTE (silencia todo o áudio da trilha)
+	if hbtn({ bx, cy - BW/2, BW, BW }, muted ? .VolumeMute : .Volume, muted, DANGER) do track_muted[t] = !track_muted[t]
+	bx -= BW + 2
+	// OLHO (esconde o vídeo da trilha no preview/export) — só em trilha de vídeo
+	if !aud {
+		if hbtn({ bx, cy - BW/2, BW, BW }, hidden ? .EyeOff : .Eye, hidden, INFO) do track_hidden[t] = !track_hidden[t]
+		bx -= BW + 2
+	}
+	// LOCK (bloqueia mover/aparar/cortar)
+	if hbtn({ bx, cy - BW/2, BW, BW }, locked ? .Lock : .Unlock, locked, LOCKED) {
 		track_locked[t] = !track_locked[t]
 		if track_locked[t] {
 			for i in 0 ..< nsegs do if segs[i].track == t { // solta seleção/marcação
@@ -1117,26 +1133,6 @@ draw_track_header :: proc(r: rl.Rectangle, name: cstring, t: int) {
 				if fx_sel == i do fx_sel = -1
 			}
 		}
-	}
-	rl.DrawRectangleRounded(lb, 0.25, 4, locked ? LOCKED : (hovered(lb) ? HOVER : PANEL2))
-	{
-		lcol := locked ? INK : MUTED
-		lcx := lb.x + lb.width/2; lcy := lb.y + lb.height/2
-		rl.DrawRectangleRec({ lcx - 4, lcy - 1, 8, 6 }, lcol)                     // corpo do cadeado
-		rl.DrawLineEx({ lcx - 2.5, lcy - 1 }, { lcx - 2.5, lcy - 4 }, 1.4, lcol) // arco (U invertido)
-		rl.DrawLineEx({ lcx + 2.5, lcy - 1 }, { lcx + 2.5, lcy - 4 }, 1.4, lcol)
-		rl.DrawLineEx({ lcx - 2.5, lcy - 4 }, { lcx + 2.5, lcy - 4 }, 1.4, lcol)
-	}
-	// botão OLHO (esconde o vídeo da trilha no preview/export) — só em trilha de vídeo
-	if !is_audio_track(t) {
-		eb := rl.Rectangle{ r.x + 64, iy, 20, 16 }
-		if clicked(eb) do track_hidden[t] = !track_hidden[t]
-		rl.DrawRectangleRounded(eb, 0.25, 4, hidden ? TRACK_HIDDEN : (hovered(eb) ? HOVER : PANEL2))
-		ecx := eb.x + eb.width/2; ecy := eb.y + eb.height/2
-		ecol := hidden ? INK : MUTED
-		rl.DrawEllipseLines(i32(ecx), i32(ecy), 6, 3.5, ecol) // contorno do olho
-		rl.DrawCircleV({ ecx, ecy }, 1.8, ecol)               // pupila
-		if hidden do rl.DrawLineEx({ ecx - 7, ecy + 4 }, { ecx + 7, ecy - 4 }, 1.6, ecol) // risco = oculto
 	}
 }
 

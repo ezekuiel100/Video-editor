@@ -11,6 +11,7 @@ import rl "vendor:raylib"
 
 // superfícies, do mais fundo ao mais alto. Três níveis de painel mantêm a separação sem
 // depender de bordas pesadas.
+GUTTER   :: rl.Color{ 11, 13, 17, 255 }  // calha escura ENTRE painéis (é ela que separa, não uma borda)
 TOPBAR   :: rl.Color{ 15, 18, 24, 255 }
 BG       :: rl.Color{ 18, 21, 27, 255 }
 SUNK     :: rl.Color{ 20, 23, 29, 255 }  // rebaixado: trilho de scroll, régua, faixas de fundo
@@ -69,9 +70,9 @@ WAVE_BG       :: rl.Color{ 24, 46, 40, 255 }
 WAVE_BASE     :: rl.Color{ 70, 100, 92, 255 }
 
 // preview
-PV_BACK  :: rl.Color{ 31, 35, 43, 255 }    // fundo do painel FORA do quadro de saída (não é preto:
-                                           // separa à vista o que é vídeo do que é só sobra do painel)
-PV_EDGE  :: rl.Color{ 104, 114, 132, 235 } // moldura do quadro de saída
+PV_BACK  :: rl.Color{ 20, 23, 29, 255 }    // fundo do visor FORA do quadro de saída: escuro (o vídeo é
+                                           // o destaque), mas não preto — o quadro preto ainda se distingue
+PV_EDGE  :: rl.Color{ 255, 255, 255, 22 }  // contorno do quadro de saída: só um fio, não uma moldura
 
 // inspetor
 INSP_HDR     :: rl.Color{ 42, 48, 59, 255 } // um degrau acima do PANEL: cabeçalho destacado sem borda

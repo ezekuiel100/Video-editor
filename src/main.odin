@@ -511,6 +511,7 @@ main :: proc() {
 		// (bench) trabalho = update+draw, SEM o vsync do EndDrawing; no-op sem -bench
 		work_ms := time.duration_milliseconds(time.tick_diff(bench_wt, time.tick_now()))
 		bench_frame(work_ms)
+		shot_frame()
 		// TEMPO REAL entre frames apresentados (inclui vsync/GPU/swap — o que work_ms NÃO pega).
 		// É ISTO que o olho vê como travadinha. 60fps liso = ~16ms; >33ms (abaixo de 30fps) = engasgo.
 		// Ignora >300ms (stall de sistema: modal de arrasto de janela, minimizado — não é o vídeo).

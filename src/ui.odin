@@ -807,6 +807,8 @@ toggle_pv_tall :: proc() {
 	pv_frac = clamp((sw - col_w) / sw, PV_LEFT_MIN / sw, pv_left_max(sw) / sw)
 }
 
+bin_import_hot: bool // mouse sobre a área clicável do bin vazio (cursor de mão)
+
 // ---------- draw raiz ----------
 draw :: proc() {
 	sw := f32(rl.GetScreenWidth())
@@ -895,7 +897,7 @@ draw :: proc() {
 	insp_dock: rl.Rectangle
 	if pv_tall {
 		bin_w = media_w - INSP_DOCK_W
-		insp_dock = { bin_w, topbar_h + toolbar_h, INSP_DOCK_W, tl_top - (topbar_h + toolbar_h) - 6 }
+		insp_dock = { bin_w, topbar_h + toolbar_h, INSP_DOCK_W, tl_top - (topbar_h + toolbar_h) }
 	}
 
 	draw_topbar(sw, topbar_h)
@@ -907,31 +909,40 @@ draw :: proc() {
 	draw_preview(preview_area)
 	draw_timeline(rl.Rectangle{ 0, tl_top, tl_w, tl_h })
 
+	// bin vazio clicável: mãozinha. Aqui (e não no draw_media_panel) porque o draw_timeline põe
+	// o cursor padrão em todo frame; antes das divisórias, que têm prioridade no cursor.
+	if bin_import_hot do rl.SetMouseCursor(.POINTING_HAND)
+
+	// CALHAS entre os painéis: faixa escura de 4px por cima das emendas. É ela que separa os
+	// painéis (em vez de bordas claras em cada um) e é também a divisória arrastável — a zona
+	// de agarre continua a mesma (9px/8px), a calha só a deixa visível.
+	GUT :: f32(4)
+	pv_top := topbar_h + toolbar_h
+	rl.DrawRectangleRec({ 0, pv_top - 1, sw, 2 }, GUTTER)                         // sob as abas
+	rl.DrawRectangleRec({ 0, tl_top - GUT/2, tl_w, GUT }, GUTTER)                 // conteúdo | timeline
+	rl.DrawRectangleRec({ media_w - GUT/2, pv_top, GUT, md_bot - pv_top }, GUTTER) // bin | player
+	if pv_tall do rl.DrawRectangleRec({ bin_w - GUT/2, pv_top, GUT, tl_top - pv_top }, GUTTER) // bin | inspetor
+	else if g_insp_card.width > 0 && insp_video_inset == 0 {                     // player | inspetor fixo
+		rl.DrawRectangleRec({ g_insp_card.x - GUT/2, pv_top, GUT, tl_top - pv_top }, GUTTER)
+	}
 	// feedback das divisórias (depois do draw_timeline: o cursor setado aqui vence o de lá)
 	split_hot := tl_split_drag || (hovered({ 0, tl_top - 6, tl_w, 9 }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !md_split_drag && modal == .None)
 	if split_hot {
 		rl.SetMouseCursor(.RESIZE_NS)
-		rl.DrawRectangleRec({ 0, tl_top - 1, tl_w, 2 }, alpha(ACCENT, tl_split_drag ? 235 : 130))
+		rl.DrawRectangleRec({ 0, tl_top - 1, tl_w, 2 }, alpha(ACCENT, tl_split_drag ? 235 : 150))
 	}
-	// pegador SEMPRE visível no centro (pílula + 3 pontinhos): mostra ONDE agarrar mesmo sem hover
-	gp := rl.Rectangle{ tl_w/2 - 26, tl_top - 4, 52, 8 }
-	rl.DrawRectangleRounded(gp, 1, 4, split_hot ? ACCENT : GRIP)
-	dc := split_hot ? INK : MUTED
-	for i in 0 ..< 3 {
-		rl.DrawCircleV({ gp.x + gp.width/2 + f32(i - 1) * 9, gp.y + gp.height/2 }, 1.6, dc)
-	}
-	// divisória VERTICAL bin↔player: mesma linguagem visual, cursor EW e pegador em pé
+	// pegador discreto no centro da calha (3 pontinhos): mostra ONDE agarrar mesmo sem hover,
+	// sem a pílula clara que cobria o rodapé do player
+	dc := split_hot ? ACCENT : GRIP
+	for i in 0 ..< 3 do rl.DrawCircleV({ tl_w/2 + f32(i - 1) * 7, tl_top }, 1.3, dc)
+	// divisória VERTICAL bin↔player: mesma linguagem visual, cursor EW
 	md_hot := md_split_drag || (hovered({ media_w - 5, content_top, 8, md_bot - content_top }) && st.drag == .None && !player_seek_drag && !bin_marquee && !tl_marquee && !tl_split_drag && modal == .None)
 	if md_hot {
 		rl.SetMouseCursor(.RESIZE_EW)
-		rl.DrawRectangleRec({ media_w - 1, content_top, 2, md_bot - content_top }, alpha(ACCENT, md_split_drag ? 235 : 130))
+		rl.DrawRectangleRec({ media_w - 1, content_top, 2, md_bot - content_top }, alpha(ACCENT, md_split_drag ? 235 : 150))
 	}
-	mgp := rl.Rectangle{ media_w - 4, (content_top + md_bot)/2 - 26, 8, 52 }
-	rl.DrawRectangleRounded(mgp, 1, 4, md_hot ? ACCENT : GRIP)
-	mdc := md_hot ? INK : MUTED
-	for i in 0 ..< 3 {
-		rl.DrawCircleV({ mgp.x + mgp.width/2, mgp.y + mgp.height/2 + f32(i - 1) * 9 }, 1.6, mdc)
-	}
+	mdc := md_hot ? ACCENT : GRIP
+	for i in 0 ..< 3 do rl.DrawCircleV({ media_w, (content_top + md_bot)/2 + f32(i - 1) * 7 }, 1.3, mdc)
 
 	// fantasma do item do bin sendo arrastado para a timeline (com contagem se forem vários)
 	if st.drag == .Bin && bin_drag >= 0 && bin_drag < nclips {
@@ -1263,6 +1274,7 @@ draw_topbar :: proc(sw, h: f32) {
 	rl.DrawRectangleRec({0, 0, sw, h}, TOPBAR)
 	rl.DrawRectangle(0, i32(h) - 1, i32(sw), 1, LINE)
 	rl.DrawRectangleRounded({10, h/2 - 8, 16, 16}, 0.3, 6, ACCENT)
+	draw_tri2({ 16, h/2 - 4 }, { 22, h/2 }, { 16, h/2 + 4 }, INK) // "play" na marca
 	txt("Editor de Vídeo", 34, h/2 - 9, FS_LG, TEXT)
 
 	menus := []cstring{ "Arquivo", "Editar", "Ferramentas", "Visualização", "Exportar", "Ajuda" }
@@ -1415,25 +1427,21 @@ draw_toolbar :: proc(sw, y, h: f32) {
 draw_subbar :: proc(y, media_w, h: f32) {
 	rl.DrawRectangleRec({0, y, media_w, h}, PANEL)
 	rl.DrawRectangle(0, i32(y + h) - 1, i32(media_w), 1, LINE)
-	pill :: proc(label: cstring, x, y, h: f32) -> f32 {
-		w := txt_w(label, FS_MD) + 40
+	// botão com ícone à esquerda; `ic_col` destaca a ação principal (Importar) sem gritar
+	btn :: proc(label: cstring, ic: Icon, ic_col: rl.Color, x, y, h: f32) -> bool {
+		w := txt_w(label, FS_MD) + 44
 		r := rl.Rectangle{ x, y + 5, w, h - 10 }
-		rl.DrawRectangleRounded(r, 0.35, 6, hovered(r) ? HOVER : PANEL2)
-		txt(label, x + 12, y + h/2 - 8, FS_MD, TEXT)
-		cx := x + w - 16
-		rl.DrawTriangle({cx, y + h/2 - 2}, {cx + 8, y + h/2 - 2}, {cx + 4, y + h/2 + 3}, MUTED)
-		return w
+		rl.DrawRectangleRounded(r, 0.3, 6, hovered(r) ? HOVER : CONTROL)
+		draw_icon(ic, x + 18, y + h/2, 16, ic_col)
+		txt(label, x + 32, y + h/2 - 8, FS_MD, TEXT)
+		return clicked(r)
 	}
 	x: f32 = 10
-	imp_w := pill("Importar", x, y, h)
-	if clicked({ x, y + 5, imp_w, h - 10 }) do want_import = true
-	x += imp_w + 8
-	// botão "Texto" (＋): adiciona um título/legenda na timeline
-	tb := rl.Rectangle{ x, y + 5, txt_w("+ Texto", FS_MD) + 24, h - 10 }
-	rl.DrawRectangleRounded(tb, 0.35, 6, hovered(tb) ? HOVER : PANEL2)
-	txt("+ Texto", x + 12, y + h/2 - 8, FS_MD, TEXT)
-	if clicked(tb) do add_text()
-	x += tb.width + 8
+	if btn("Importar", .Import, ACCENT, x, y, h) do want_import = true
+	x += txt_w("Importar", FS_MD) + 44 + 8
+	// botão "Texto": adiciona um título/legenda na timeline
+	if btn("Texto", .Text, MUTED, x, y, h) do add_text()
+	x += txt_w("Texto", FS_MD) + 44 + 8
 	// --- busca de mídia (filtra o bin pelo nome; campo editável com cursor/seleção) ---
 	sr := rl.Rectangle{ x, y + 5, media_w - x - 20, h - 10 }
 	rl.DrawRectangleRounded(sr, 0.35, 6, PANEL2)
@@ -2104,6 +2112,7 @@ bin_marks_count :: proc() -> int { n := 0; for k in 0 ..< nclips do if bin_marke
 bin_clear_marks :: proc() { for k in 0 ..< MAX_CLIPS do bin_marked[k] = false }
 
 draw_media_panel :: proc(r: rl.Rectangle) {
+	bin_import_hot = false
 	rl.DrawRectangleRec(r, PANEL)
 	if st.active_tab == 1 { draw_transitions_panel(r); return } // aba "Transições"
 	if st.active_tab == 2 { draw_effects_panel(r); return }     // aba "Efeitos"
@@ -2117,32 +2126,21 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		if media_matches(i) do nmatch += 1
 	}
 
-	if nshow == 0 { // bin vazio: convite p/ importar
-		cx := r.x + r.width/2
-		cy := r.y + r.height*0.5
+	if nshow == 0 { // bin vazio: convite p/ importar centrado (o painel todo é clicável)
 		hov := hovered(r)
-		box := rl.Rectangle{ cx - 34, cy - 34, 68, 68 }
-		rl.DrawRectangleRounded(box, 0.3, 8, CONTROL)
-		// borda azul->ciano (aprox. do gradiente); brilha no hover
-		rl.DrawRectangleRoundedLinesEx(box, 0.3, 8, 2, hov ? rl.Color{ 96, 214, 236, 255 } : rl.Color{ 68, 160, 214, 255 })
-		blue := rl.Color{ 92, 152, 242, 255 } // topo (haste)
-		cyan := rl.Color{ 48, 208, 216, 255 } // base (ponta + bandeja)
-		// seta p/ baixo: haste + ponta em V (chevron)
-		rl.DrawLineEx({ cx, cy - 15 }, { cx, cy + 3 }, 3.5, blue)
-		rl.DrawLineEx({ cx - 8, cy - 5 }, { cx, cy + 5 }, 3.5, cyan)
-		rl.DrawLineEx({ cx + 8, cy - 5 }, { cx, cy + 5 }, 3.5, cyan)
-		// bandeja aberta embaixo (caixa sem topo): laterais + base
-		rl.DrawLineEx({ cx - 14, cy + 9 }, { cx - 14, cy + 16 }, 3.5, cyan)
-		rl.DrawLineEx({ cx + 14, cy + 9 }, { cx + 14, cy + 16 }, 3.5, cyan)
-		rl.DrawLineEx({ cx - 15.5, cy + 16 }, { cx + 15.5, cy + 16 }, 3.5, cyan)
-		txt_c("Clique aqui para importar (ou solte vídeos)", cx, cy + 52, FS_MD, hov ? TEXT : MUTED)
+		cx := r.x + r.width/2
+		cy := r.y + r.height*0.46
+		rl.DrawCircleV({ cx, cy - 6 }, 30, hov ? ACCENT_BG : CONTROL)
+		draw_icon(.Import, cx, cy - 7, 26, hov ? ACCENT : MUTED)
+		txt_c("Importar mídia", cx, cy + 36, FS_LG, TEXT)
+		txt_c("Clique aqui ou arraste vídeos, áudios e imagens", cx, cy + 60, FS_SM, MUTED)
 			// bin vazio: 1 clique importa — MENOS nas faixas de 24px encostadas nas divisórias
 		// (agarre perdido do redimensionar caía aqui e abria o diálogo) e nunca durante arrasto
 		mi := rl.GetMousePosition()
-		if clicked(r) && src_preview < 0 && !tl_split_drag && !md_split_drag &&
-		   mi.y < r.y + r.height - 24 && mi.x < r.x + r.width - 24 {
-			want_import = true
-		}
+		import_ok := hovered(r) && src_preview < 0 && !tl_split_drag && !md_split_drag && st.drag == .None &&
+		             mi.y < r.y + r.height - 24 && mi.x < r.x + r.width - 24
+		bin_import_hot = import_ok // mãozinha: aplicada no draw() depois da timeline (que reseta o cursor)
+		if import_ok && rl.IsMouseButtonPressed(.LEFT) && clicked(r) do want_import = true
 		return
 	}
 	if nmatch == 0 { // há mídia, mas nada casa com a busca
@@ -2198,9 +2196,10 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 				ensure_tex(c)
 				if c.tex_ok do rl.DrawTexturePro(c.tex, {0,0,f32(cdw(c)),f32(cdh(c))}, box, {0,0}, 0, rl.WHITE)
 			}
+			// duração curta num selo escuro no canto inferior ESQUERDO (o direito é do ✓/+).
 			// imagem/texto não têm duração de fonte — o 00:00:05:00 (IMG_DUR) parecia um vídeo
-			if !c.is_img && !c.is_text do txt(timecode(c.dur), tx + tw - 62, ty + th - 15, FS_XS, rl.WHITE)
-			if c.streaming do txt("streaming", tx + 4, ty + 3, FS_XS, alpha(INFO, 220))
+			if !c.is_img && !c.is_text do thumb_badge(dur_short(c.dur), tx + 4, ty + th - 20, TEXT)
+			if c.streaming do thumb_badge("streaming", tx + 4, ty + 4, INFO)
 		} else {
 			txt_c("importando...", tx + tw/2, ty + th/2 - 6, FS_SM, alpha(WARN, 230))
 		}
@@ -2213,10 +2212,10 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		placed := intrinsics.atomic_load(&c.probed) && src_placed(i)
 		sel := bin_marked[i] || i == bin_sel // marcado (multi) ou com foco
 		hot := i == view_src()
-		border := sel ? rl.WHITE : (hot ? ACCENT : (placed ? ACCENT_D : LINE))
+		border := sel ? rl.WHITE : (hot ? ACCENT : (hovered(box) ? GRIP : alpha(LINE, 120)))
 		rl.DrawRectangleLinesEx(box, (sel || hot) ? 2 : 1, border)
 		if c.name_el == nil do c.name_el = strings.clone_to_cstring(string(elide(c.name, FS_XS, tw)))
-		txt(c.name_el, tx, ty + th + 3, FS_XS, MUTED)
+		txt(c.name_el, tx, ty + th + 4, FS_XS, sel ? TEXT : MUTED)
 
 		// --- badge do canto inferior direito (estilo NLE) ---
 		// JÁ na timeline: "✓" fixo (dispensa o rótulo "na timeline", que roubava o canto).
@@ -2314,11 +2313,24 @@ draw_media_panel :: proc(r: rl.Rectangle) {
 		}
 	}
 
-	have_media := false
-	for k in 0 ..< nclips do if !intrinsics.atomic_load(&clips[k].failed) && !clips[k].closed { have_media = true; break }
-	hint: cstring = bin_marks_count() > 1 ? "arraste p/ a timeline (várias selecionadas)" :
-	                (!have_media ? "clique aqui para importar mídia" : "duplo-clique para importar · arraste p/ selecionar")
-	txt(hint, r.x + 12, r.y + r.height - 22, FS_SM, MUTED)
+	// dica do rodapé só na seleção múltipla (importar já tem o botão e o estado vazio)
+	if nm := bin_marks_count(); nm > 1 {
+		txt(rl.TextFormat("%d selecionadas · arraste p/ a timeline", nm), r.x + 12, r.y + r.height - 22, FS_SM, MUTED)
+	}
+}
+
+// selo de texto pequeno sobre a miniatura (fundo escuro translúcido, legível sobre qualquer imagem)
+thumb_badge :: proc(label: cstring, x, y: f32, col: rl.Color) {
+	w := txt_w(label, FS_XS) + 10
+	rl.DrawRectangleRounded({ x, y, w, 16 }, 0.4, 6, rl.Color{ 0, 0, 0, 170 })
+	txt(label, x + 5, y + 1, FS_XS, col)
+}
+
+// duração curta p/ selos: "0:45", "12:03", "1:02:00"
+dur_short :: proc(sec: f32) -> cstring {
+	s := int(sec + 0.5)
+	if s >= 3600 do return fmt.ctprintf("%d:%02d:%02d", s/3600, (s%3600)/60, s%60)
+	return fmt.ctprintf("%d:%02d", s/60, s%60)
 }
 
 // ---------- preview + transporte ----------
@@ -2744,8 +2756,9 @@ draw_preview :: proc(r: rl.Rectangle) {
 		draw_crop_editor(fx, fy, fw, fh)
 	} else {
 		// COMPOSITING das trilhas de vídeo com transform (mesma função da tela cheia)
-		if !composite_video(fx, fy, fw, fh, true) {
-			txt_c("Preview", video.x + video.width/2, video.y + video.height/2 - 10, FS_LG, LINE)
+		// timeline vazia: só uma marca d'água discreta no quadro (vão no meio do vídeo = preto puro)
+		if !composite_video(fx, fy, fw, fh, true) && nsegs == 0 {
+			draw_icon(.Film, fx + fw/2, fy + fh/2, 40, alpha(TEXT, 28))
 		}
 	}
 	// guias de alinhamento (centro/bordas do canvas) ao mover um clipe no preview
@@ -2780,7 +2793,7 @@ draw_preview :: proc(r: rl.Rectangle) {
 
 	tb := rl.Rectangle{ r.x, r.y + r.height - transport_h, r.width, transport_h }
 	rl.DrawRectangleRec(tb, PANEL)
-	rl.DrawRectangle(i32(tb.x), i32(tb.y), i32(tb.width), 1, LINE)
+	rl.DrawRectangle(i32(tb.x), i32(tb.y), i32(tb.width), 1, SEP)
 
 	// --- barra de progresso do player (posição atual + duração total, arrastável) ---
 	total := src_preview >= 0 ? (src_preview < nclips ? clips[src_preview].dur : 0) : timeline_dur()
@@ -2893,9 +2906,9 @@ draw_preview :: proc(r: rl.Rectangle) {
 		qlabel: cstring = stream_hi ? "Alta" : "Baixa"
 		qw := txt_w(qlabel, FS_SM) + 22
 		qr := rl.Rectangle{ lyr.x - 8 - qw, cy - 11, qw, 22 }
-		rl.DrawRectangleRounded(qr, 0.35, 6, hovered(qr) ? HOVER : PANEL2)
-		rl.DrawRectangleRoundedLinesEx(qr, 0.35, 6, 1, stream_hi ? ACCENT : LINE)
-		txt_c(qlabel, qr.x + qr.width/2, qr.y + 4, FS_SM, stream_hi ? ACCENT : TEXT)
+		// mesmo estilo neutro do botão de proporção ao lado (o contorno accent gritava mais que o play)
+		rl.DrawRectangleRounded(qr, 0.3, 4, hovered(qr) ? HOVER : PANEL2)
+		txt_c(qlabel, qr.x + qr.width/2, qr.y + 4, FS_SM, TEXT)
 		if clicked(qr) { set_stream_quality(!stream_hi); dirty = true } // escolha vai no .ovp
 	}
 	if vol_popup { // painel com slider VERTICAL acima do alto-falante

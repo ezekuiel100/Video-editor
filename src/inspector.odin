@@ -59,7 +59,7 @@ inspector_layout :: proc(area: rl.Rectangle, dock := rl.Rectangle{}) -> rl.Recta
 		// O transporte segue com a largura toda; só o canvas encolhe para não ficar atrás do cartão.
 		insp_video_inset = 308
 	} else {
-		g_insp_card = { preview.x + preview.width - 300, preview.y, 300, preview.height - 6 }
+		g_insp_card = { preview.x + preview.width - 300, preview.y, 300, preview.height } // até a calha da timeline
 		preview.width -= 300
 	}
 	return preview
@@ -351,14 +351,25 @@ draw_seg_inspector :: proc(area: rl.Rectangle) {
 	insp_drawing = true
 	defer insp_drawing = false
 	rl.DrawRectangleRec(area, PANEL)
-	rl.DrawRectangleLinesEx(area, 1, LINE)
+	// fixo/encaixado: a calha escura já separa dos vizinhos. Só o cartão FLUTUANTE (sobre o
+	// vídeo) precisa de contorno próprio.
+	if insp_video_inset > 0 do rl.DrawRectangleLinesEx(area, 1, LINE)
 	valid := selected >= 0 && selected < nsegs && seg_ready(selected)
 	if !valid || src_preview >= 0 || crop_mode {
 		inspector_clear_focus()
 		insp_last_seg = -1
-		txt("Inspetor", area.x + INSP_PAD, area.y + 14, FS_LG, TEXT)
-		msg: cstring = crop_mode ? "Conclua o recorte na prévia." : "Selecione um clipe na timeline."
-		txt(msg, area.x + INSP_PAD, area.y + 46, FS_MD, MUTED)
+		// cabeçalho no mesmo formato do de um clipe (faixa PANEL2 + filete), estado vazio centrado
+		rl.DrawRectangleRec({ area.x, area.y, area.width, 44 }, PANEL2)
+		rl.DrawLineEx({ area.x, area.y + 44 }, { area.x + area.width, area.y + 44 }, 1, LINE)
+		txt("Inspetor", area.x + INSP_PAD, area.y + 13, FS_MD, TEXT)
+		cx := area.x + area.width/2
+		cy := area.y + 44 + (area.height - 44) * 0.42
+		rl.DrawCircleV({ cx, cy - 18 }, 26, PANEL2)
+		draw_icon(crop_mode ? .Crop : .Film, cx, cy - 18, 24, DISABLED)
+		msg: cstring = crop_mode ? "Conclua o recorte na prévia" : "Nenhum clipe selecionado"
+		sub: cstring = crop_mode ? "" : "Selecione um clipe na timeline"
+		txt_c(msg, cx, cy + 20, FS_MD, MUTED)
+		if sub != "" do txt_c(sub, cx, cy + 40, FS_SM, DISABLED)
 		return
 	}
 	if insp_last_seg != selected || insp_last_tab != insp_tab {
