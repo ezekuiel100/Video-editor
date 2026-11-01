@@ -11,32 +11,32 @@ import rl "vendor:raylib"
 
 // superfícies, do mais fundo ao mais alto. Três níveis de painel mantêm a separação sem
 // depender de bordas pesadas.
-GUTTER   :: rl.Color{ 11, 13, 17, 255 }  // calha escura ENTRE painéis (é ela que separa, não uma borda)
-TOPBAR   :: rl.Color{ 15, 18, 24, 255 }
-BG       :: rl.Color{ 18, 21, 27, 255 }
-SUNK     :: rl.Color{ 20, 23, 29, 255 }  // rebaixado: trilho de scroll, régua, faixas de fundo
-PANEL2   :: rl.Color{ 26, 30, 38, 255 }
-SURFACE  :: rl.Color{ 30, 34, 42, 255 }  // cartão de modal
-POPUP    :: rl.Color{ 30, 34, 42, 250 }  // menus, popups (mesmo tom do modal, quase opaco)
-TOOLTIP  :: rl.Color{ 16, 19, 24, 242 }
-PANEL    :: rl.Color{ 34, 39, 48, 255 }
-CONTROL  :: rl.Color{ 42, 47, 58, 255 }  // fundo de botão/chip/campo em repouso
-SEL_BG   :: rl.Color{ 40, 50, 64, 255 }  // linha/badge selecionado (não-accent)
-HOVER    :: rl.Color{ 51, 58, 71, 255 }
-TRACK_BG :: rl.Color{ 50, 55, 66, 255 }  // trilho de barra de progresso
-GRIP     :: rl.Color{ 72, 78, 90, 255 }  // pegador/scroll em repouso
+GUTTER   :: rl.Color{ 14, 14, 14, 255 }  // calha escura ENTRE painéis (é ela que separa, não uma borda)
+TOPBAR   :: rl.Color{ 19, 19, 19, 255 }
+BG       :: rl.Color{ 23, 23, 23, 255 }
+SUNK     :: rl.Color{ 26, 26, 26, 255 }  // rebaixado: trilho de scroll, régua, faixas de fundo
+PANEL2   :: rl.Color{ 30, 30, 30, 255 }
+SURFACE  :: rl.Color{ 33, 33, 33, 255 }  // cartão de modal
+POPUP    :: rl.Color{ 33, 33, 33, 250 }  // menus, popups (mesmo tom do modal, quase opaco)
+TOOLTIP  :: rl.Color{ 18, 18, 18, 242 }
+PANEL    :: rl.Color{ 36, 36, 36, 255 }
+CONTROL  :: rl.Color{ 45, 45, 45, 255 }  // fundo de botão/chip/campo em repouso
+SEL_BG   :: rl.Color{ 40, 48, 58, 255 }  // linha/badge selecionado (não-accent)
+HOVER    :: rl.Color{ 54, 54, 54, 255 }
+TRACK_BG :: rl.Color{ 52, 52, 52, 255 }  // trilho de barra de progresso
+GRIP     :: rl.Color{ 76, 76, 76, 255 }  // pegador/scroll em repouso
 SCRIM    :: rl.Color{ 0, 0, 0, 150 }     // escurece o fundo atrás de modal
 
 // linhas
-LINE     :: rl.Color{ 62, 69, 84, 255 }
-SEP      :: rl.Color{ 49, 55, 67, 190 }  // separador sutil entre trilhas
+LINE     :: rl.Color{ 66, 66, 66, 255 }
+SEP      :: rl.Color{ 52, 52, 52, 190 }  // separador sutil entre trilhas
 
 // texto
-TEXT     :: rl.Color{ 239, 243, 248, 255 }
-MUTED    :: rl.Color{ 157, 168, 186, 255 }
-DISABLED :: rl.Color{ 96, 102, 114, 255 }
-INK      :: rl.Color{ 18, 22, 28, 255 }  // texto/ícone escuro sobre fundo claro (accent, âmbar)
-KNOB     :: rl.Color{ 225, 230, 238, 255 } // botão de slider
+TEXT     :: rl.Color{ 238, 238, 238, 255 }
+MUTED    :: rl.Color{ 162, 162, 162, 255 }
+DISABLED :: rl.Color{ 101, 101, 101, 255 }
+INK      :: rl.Color{ 20, 20, 20, 255 }  // texto/ícone escuro sobre fundo claro (accent, âmbar)
+KNOB     :: rl.Color{ 228, 228, 228, 255 } // botão de slider
 
 // marca
 ACCENT    :: rl.Color{ 45, 212, 192, 255 }
@@ -54,8 +54,8 @@ INFO     :: rl.Color{ 120, 190, 230, 255 }
 SELECT   :: rl.Color{ 140, 184, 244, 255 } // seleção por retângulo (marquee) e marcados
 
 // timeline
-LANE_A        :: rl.Color{ 28, 32, 40, 255 } // trilhas alternadas
-LANE_B        :: rl.Color{ 30, 34, 42, 255 }
+LANE_A        :: rl.Color{ 30, 30, 30, 255 } // trilhas alternadas
+LANE_B        :: rl.Color{ 32, 32, 32, 255 }
 CLIP          :: rl.Color{ 55, 90, 113, 255 }
 CLIP_HDR      :: rl.Color{ 71, 115, 140, 255 }
 AUDIOCLIP     :: rl.Color{ 46, 78, 68, 255 }
@@ -70,13 +70,13 @@ WAVE_BG       :: rl.Color{ 24, 46, 40, 255 }
 WAVE_BASE     :: rl.Color{ 70, 100, 92, 255 }
 
 // preview
-PV_BACK  :: rl.Color{ 20, 23, 29, 255 }    // fundo do visor FORA do quadro de saída: escuro (o vídeo é
+PV_BACK  :: rl.Color{ 26, 26, 26, 255 }    // fundo do visor FORA do quadro de saída: escuro (o vídeo é
                                            // o destaque), mas não preto — o quadro preto ainda se distingue
 PV_EDGE  :: rl.Color{ 255, 255, 255, 22 }  // contorno do quadro de saída: só um fio, não uma moldura
 
 // inspetor
-INSP_HDR     :: rl.Color{ 42, 48, 59, 255 } // um degrau acima do PANEL: cabeçalho destacado sem borda
-INSP_HDR_HOT :: rl.Color{ 49, 56, 69, 255 }
+INSP_HDR     :: rl.Color{ 44, 44, 44, 255 } // um degrau acima do PANEL: cabeçalho destacado sem borda
+INSP_HDR_HOT :: rl.Color{ 52, 52, 52, 255 }
 
 // mesma cor com outra opacidade (0..255). `fa` (preview.odin) MULTIPLICA a opacidade;
 // esta SUBSTITUI — é a que os tokens usam p/ variantes translúcidas.

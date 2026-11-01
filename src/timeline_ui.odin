@@ -294,12 +294,12 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		if x >= ruler.x {
 			// hierarquia só pela altura: rótulo 10px, meio 6px, menor 3px
 			if sec % lstep == 0 {
-				rl.DrawLineEx({x, base - 10}, {x, base}, 1, rl.Color{ 126, 136, 153, 230 })
+				rl.DrawLineEx({x, base - 10}, {x, base}, 1, rl.Color{ 136, 136, 136, 230 })
 				txt(ruler_label(sec), x + 4, ruler.y + 4, FS_XS, MUTED)
 			} else if half > 0 && sec % half == 0 {
-				rl.DrawLineEx({x, base - 6}, {x, base}, 1, rl.Color{ 110, 120, 136, 200 })
+				rl.DrawLineEx({x, base - 6}, {x, base}, 1, rl.Color{ 120, 120, 120, 200 })
 			} else {
-				rl.DrawLineEx({x, base - 3}, {x, base}, 1, rl.Color{ 90, 100, 116, 180 })
+				rl.DrawLineEx({x, base - 3}, {x, base}, 1, rl.Color{ 100, 100, 100, 180 })
 			}
 		}
 		sec += tstep
