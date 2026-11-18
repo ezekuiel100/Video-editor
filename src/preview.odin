@@ -994,8 +994,20 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		} else if fs.kind >= FX_PIXEL && fs.kind != FX_CHROMA {
 			fxk = f32(fs.kind); fxa = fs.amount; fxt = vt; fxa_ang = fs.angle
 			if fs.kind == FX_SPOT || fs.kind == FX_BLUR_PART {
-				b_cx = clamp(0.5+fs.cx, 0, 1); b_cy = clamp(0.5+fs.cy, 0, 1)
-				b_r = fs.radius <= 0 ? BULGE_R_DEF : fs.radius
+				// centro/raio do efeito de faixa são relativos ao QUADRO (canvas), como o anel
+				// do preview e o filtro do export; o shader trabalha no espaço LOCAL do clipe
+				// (o retângulo desenhado). Converte, senão um clipe que não ocupa o quadro
+				// inteiro (metade de baixo, PiP, escala) desfoca no lugar errado.
+				rdef := fs.kind == FX_BLUR_PART ? f32(0.22) : BULGE_R_DEF
+				rcan := fs.radius <= 0 ? rdef : fs.radius
+				pcx := fx + fw/2 + fs.cx*fw; pcy := fy + fh/2 + fs.cy*fh // centro em px
+				if dw > 0 && dh > 0 {
+					b_cx = (pcx - (ccx - dw/2)) / dw
+					b_cy = (pcy - (ccy - dh/2)) / dh
+					b_r = rcan * fh / dh // raio em alturas do quadro -> alturas do clipe
+				} else {
+					b_cx = clamp(0.5+fs.cx, 0, 1); b_cy = clamp(0.5+fs.cy, 0, 1); b_r = rcan
+				}
 			}
 			if fs.kind == FX_SHAKE {
 				hz := fs.speed <= 0 ? f32(8) : fs.speed
