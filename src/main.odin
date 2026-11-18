@@ -106,6 +106,8 @@ player_seek_bar:  rl.Rectangle // geometria publicada pelo draw; update processa
 // não deixa valor velho para o próximo.
 seek_was_playing: bool
 dbg_seek_n: int // frames de log restantes após um seek (DBG_SEEK)
+preview_key_focus: bool // clique no canvas direciona as setas para a posição
+preview_nudging: bool // agrupa a repetição de tecla em um passo de undo
 g_frame:     rl.Rectangle // retângulo do frame base no preview (p/ mapear transform<->tela)
 g_insp_card: rl.Rectangle // retângulo do cartão do inspector (p/ não roubar cliques do preview)
 prev_grab:   rl.Vector2   // offset do mouse ao centro do clipe ao começar a mover no preview

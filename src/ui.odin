@@ -2666,7 +2666,7 @@ draw_text_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	txt("Opacidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(sg.opacity*100 + 0.5)), vx, y, FS_MD, ACCENT); y += 20
 	ui_slider(12, { x, y, cw - 2*pad, 16 }, &sg.opacity, 0, 1)
 	y += 26
-	txt("Arraste no preview para mover.", x, y, FS_XS, MUTED)
+	txt("Clique no preview: setas movem; Shift = 10 px.", x, y, FS_XS, MUTED)
 }
 
 // inspector da faixa de legendas: estilo + botão para editar fala a fala.
@@ -2729,7 +2729,7 @@ draw_caps_inspector :: proc(c: ^Clip, sg: ^Seg, card: rl.Rectangle, x, pad, cw: 
 	txt("Opacidade", x, y, FS_MD, TEXT); txt(rl.TextFormat("%d%%", i32(sg.opacity*100 + 0.5)), vx, y, FS_MD, ACCENT); y += 20
 	ui_slider(12, { x, y, cw - 2*pad, 16 }, &sg.opacity, 0, 1)
 	y += 26
-	txt("Arraste no preview para mover.", x, y, FS_XS, MUTED)
+	txt("Clique no preview: setas movem; Shift = 10 px.", x, y, FS_XS, MUTED)
 }
 
 draw_preview :: proc(r: rl.Rectangle) {

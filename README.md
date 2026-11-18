@@ -188,3 +188,7 @@ dist/               # payload do instalador (ffmpeg + Setup.exe) — não versio
 ```
 
 O formato de projeto `.ovp` guarda a proporção do canvas, os caminhos das mídias e os segmentos (com transform e áudio).
+
+### Posicionar com o teclado
+
+Selecione o clipe na timeline e clique na imagem do player. As setas movem a imagem em 1 pixel da resolução de saída; Shift + seta move 10 pixels. Segurar a tecla repete o movimento. Ctrl+Z desfaz o movimento depois de soltar a seta. Clique na timeline para voltar a usar as setas para navegar pelos frames.

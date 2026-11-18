@@ -285,6 +285,14 @@ update :: proc() {
 		}
 	}
 
+	// Foco explícito: clicar fora do canvas devolve as setas ao transporte.
+	if rl.IsMouseButtonPressed(.LEFT) {
+		preview_key_focus = !fullscreen_preview && src_preview < 0 && !ctx_open && !ctx_ate &&
+			rl.CheckCollisionPointRec(m, g_frame) && !rl.CheckCollisionPointRec(m, g_insp_card)
+	}
+	arrows_down := rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.UP) || rl.IsKeyDown(.DOWN)
+	if !arrows_down do preview_nudging = false
+
 	// atalhos de transporte
 	//  espaço = play/pause | ←/→ = 1 frame (Shift = 1s) | Home/End = início/fim
 	//  S = dividir no playhead | B = ferramenta lâmina | F = ajustar à janela | Esc = sair da lâmina
@@ -306,15 +314,35 @@ update :: proc() {
 		else if sel_trans >= 0 do sel_trans = -1 // Esc desseleciona a transição
 		blade_mode = false
 	}
-	if modal == .None && src_preview < 0 && !ctrl && !txt_edit && !search_focus && insp_num_id < 0 { // atalhos de edição da timeline (não digitando; Ctrl reservado)
+	if modal == .None && src_preview < 0 && !ctrl && !txt_edit && !search_focus && insp_num_id < 0 && !cue_focus && !ctx_open { // atalhos de edição da timeline (não digitando; Ctrl reservado)
 		if rl.IsKeyPressed(.S) do split_at_playhead()
 		if rl.IsKeyPressed(.B) do blade_mode = !blade_mode
 		if rl.IsKeyPressed(.M) do set_magnetic(!magnetic)
 		if rl.IsKeyPressed(.F) do tl_fit(g_view_w) // ajusta o zoom p/ o conteúdo caber na janela
 		vs := view_seg() // passo de 1 frame segue o fps do clipe sob o playhead (60fps -> 1/60)
 		step := (rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)) ? f32(1) : (vs >= 0 ? 1.0 / cfps_of(seg_src(vs)) : 1.0 / DEC_FPS)
-		if rl.IsKeyPressed(.RIGHT) || rl.IsKeyPressedRepeat(.RIGHT) { st.playing = false; seek_global(st.playhead + step) }
-		if rl.IsKeyPressed(.LEFT)  || rl.IsKeyPressedRepeat(.LEFT)  { st.playing = false; seek_global(st.playhead - step) }
+		position_keys := preview_key_focus && !fullscreen_preview && !crop_mode
+		if position_keys {
+			if selected >= 0 && selected < nsegs && seg_ready(selected) && !seg_audio_like(selected) &&
+			   !track_locked[segs[selected].track] && st.drag == .None && ui_slider_active < 0 &&
+			   st.playhead >= segs[selected].start && st.playhead < segs[selected].start + segs[selected].dur {
+				dx, dy: f32
+				if rl.IsKeyPressed(.LEFT) || rl.IsKeyPressedRepeat(.LEFT) do dx -= 1
+				if rl.IsKeyPressed(.RIGHT) || rl.IsKeyPressedRepeat(.RIGHT) do dx += 1
+				if rl.IsKeyPressed(.UP) || rl.IsKeyPressedRepeat(.UP) do dy -= 1
+				if rl.IsKeyPressed(.DOWN) || rl.IsKeyPressedRepeat(.DOWN) do dy += 1
+				if dx != 0 || dy != 0 {
+					pixels: f32 = shift ? 10 : 1
+					sg := &segs[selected]
+					sg.px = clamp(sg.px + dx*pixels/f32(max(1, proj_w)), -1.5, 1.5)
+					sg.py = clamp(sg.py + dy*pixels/f32(max(1, proj_h)), -1.5, 1.5)
+					preview_nudging = true
+				}
+			}
+		} else {
+			if rl.IsKeyPressed(.RIGHT) || rl.IsKeyPressedRepeat(.RIGHT) { st.playing = false; seek_global(st.playhead + step) }
+			if rl.IsKeyPressed(.LEFT) || rl.IsKeyPressedRepeat(.LEFT) { st.playing = false; seek_global(st.playhead - step) }
+		}
 		if rl.IsKeyPressed(.HOME) { st.playing = false; seek_global(0) }
 		if rl.IsKeyPressed(.END)  { st.playing = false; seek_global(timeline_dur()) }
 	}

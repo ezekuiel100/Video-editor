@@ -1932,6 +1932,7 @@ history_baseline :: proc() { committed = snap_now(); committed_ok = true }
 // condição espelha a de escrita do draw_crop_editor, então um crop_drag pendurado se resolve
 // no primeiro frame com o botão solto — nunca trava o histórico para sempre.
 edit_in_progress :: proc() -> bool {
+	if preview_nudging do return true
 	if st.drag != .None || ui_slider_active != -1 || player_seek_drag || bin_drag >= 0 do return true
 	return crop_drag >= 0 && rl.IsMouseButtonDown(.LEFT)
 }
