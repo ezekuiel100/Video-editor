@@ -886,6 +886,12 @@ update :: proc() {
 					// bug "o cursor pula sozinho / imagem vai ficando ruim". Guarda o
 					// estado do relógio no instante p/ o HUD mostrar POR QUE saltou.
 					new_ph := sg.start + (local - sg.in_off) / seg_speed(a)
+					// nunca recua o playhead. Num corte que salta na fonte o trecho seguinte pode
+					// começar 1 ulp ANTES do fim do anterior (f32 do corte); no in_off da fonte
+					// (~4085s, ulp ~0.5ms) o (ph - start) some no arredondamento e new_ph voltava
+					// p/ start — DENTRO do trecho anterior. O frame seguinte re-adquiria o áudio
+					// dele, achava o fim e passava o bastão de novo: playhead preso no corte p/ sempre.
+					if new_ph < st.playhead do new_ph = st.playhead
 					if new_ph - st.playhead > 2.0 {
 						dbg_jmp_n += 1; dbg_jmp_kind = 1
 						dbg_jmp_from = st.playhead; dbg_jmp_to = new_ph
