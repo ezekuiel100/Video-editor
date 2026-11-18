@@ -1601,3 +1601,18 @@ export_fx_chroma_azul :: proc(t: ^testing.T) {
 	_, g := t_build(t)
 	testing.expect(t, strings.contains(g, "chromakey=0x0000FF"), "key azul")
 }
+
+@(test)
+export_desfoque_forte_acompanha_resolucao :: proc(t: ^testing.T) {
+    for kind in ([]int{FX_BLUR, FX_BLUR_PART}) {
+        for angle in ([]f32{0, 1}) {
+            b: strings.Builder
+            export_emit_track_fx(&b, FxSeg{kind = kind, amount = 1, angle = angle}, 0, 1920, 1080)
+            testing.expect(t, strings.contains(strings.to_string(b), "boxblur=lr=108.0:lp=3:cr=54.0:cp=3"), "raio forte em Full HD, com tres passadas")
+            strings.builder_destroy(&b)
+            export_emit_track_fx(&b, FxSeg{kind = kind, amount = 1, angle = angle}, 0, 3840, 2160)
+            testing.expect(t, strings.contains(strings.to_string(b), "boxblur=lr=216.0:lp=3:cr=108.0:cp=3"), "4K preserva a intensidade relativa")
+            strings.builder_destroy(&b)
+        }
+    }
+}

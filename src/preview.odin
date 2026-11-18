@@ -90,13 +90,21 @@ float fbm3(vec2 p) {
          + vn(p*4.13, vec2(74.2, 91.7))*0.15;
 }
 vec3 samp(vec2 uv) { return texture(texture0, uv0 + clamp(uv, 0.0, 1.0)*(uv1 - uv0)).rgb; }
-vec3 blur3(vec2 uv, float amt) {                  // caixa 3×3 (desfoque inteiro / local)
-    vec2 o = vec2(amt * 0.012 / max(aspect, 0.2), amt * 0.012);
+// Gaussian sampling across a wide area; sparse 3x3 taps left readable copies.
+vec3 blur3(vec2 uv, float amt) {
+    float sigma = max(amt, 0.0) * 0.10 * min(aspect, 1.0);
+    vec2 scale = vec2(sigma / max(aspect, 0.2), sigma);
     vec3 acc = vec3(0.0);
-    for (int j = -1; j <= 1; j++)
-        for (int i = -1; i <= 1; i++)
-            acc += samp(uv + vec2(float(i), float(j)) * o);
-    return acc / 9.0;
+    float total = 0.0;
+    // A stratified disk avoids repeating sharp, regularly spaced ghost images.
+    for (int i = 0; i < 192; i++) {
+        float r = sqrt((float(i) + 0.5) / 192.0) * 3.0;
+        float a = float(i) * 2.39996323;
+        float w = exp(-0.5 * r * r);
+        acc += samp(uv + vec2(cos(a), sin(a)) * r * scale) * w;
+        total += w;
+    }
+    return acc / total;
 }
 bool isK(float k, float v) { return k > v - 0.5 && k < v + 0.5; }
 out vec4 finalColor;
