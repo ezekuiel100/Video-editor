@@ -17,6 +17,7 @@ fx_loc_rgb: i32 // uniform da separação RGB
 fx_loc_wipe_edge, fx_loc_wipe_feather, fx_loc_wipe_inv, fx_loc_wipe_kind: i32 // transições de máscara
 fx_loc_kind, fx_loc_amt, fx_loc_time, fx_loc_ang: i32 // clipes de efeito de faixa (além de distorção/RGB)
 fx_loc_tblur, fx_loc_tpix, fx_loc_tneg: i32 // transições de edit (desfoque / pixelizar / negativo)
+fx_loc_region: i32 // 1 = passada extra de desfoque local: só a região, alpha 0 fora dela
 BULGE_R_DEF :: f32(0.5) // raio padrão do efeito (quando bulge_r==0)
 WOBBLE_HZ_DEF :: f32(2) // frequência padrão do wobble (Hz, quando wobble_speed==0)
 // desloca a coord de textura em direção ao (bulge>0) ou p/ longe do (bulge<0) centro,
@@ -50,6 +51,7 @@ uniform float fxAng;       // Espelhar: <0.5 horizontal, senão vertical | Chrom
 uniform vec2  tBlur;       // TRANSIÇÃO de edit: raio do desfoque em caixa (x, y locais; 0 = off)
 uniform vec2  tPix;        // TRANSIÇÃO de edit: blocos (largura, altura); 0 = off
 uniform float tNeg;        // TRANSIÇÃO de edit: 1 = negativo
+uniform float fxRegion;    // 1 = passada extra de desfoque local (empilhado): alpha = máscara da região
 float vn(vec2 p, vec2 seed) {
     vec2 i = floor(p); vec2 f = fract(p);
     f = f*f*(3.0-2.0*f);
@@ -106,6 +108,7 @@ void main() {
     vec2 tex = uv0 + clamp(uv, 0.0, 1.0)*span;
     vec4 src;
     vec3 c;
+    float regA = 1.0;
     if ((fxKind > 2.5 && fxKind < 3.5) || (fxKind > 16.5 && fxKind < 17.5)) {  // DESFOQUE 3×3 (inteiro ou local)
         vec2 o = vec2(fxAmt * 0.012 / max(aspect, 0.2), fxAmt * 0.012);
         vec3 acc = vec3(0.0);
@@ -123,7 +126,8 @@ void main() {
             vec2 bd = vec2((local.x - center.x) * aspect, local.y - center.y);
             float dlt = fxAng < 0.5 ? max(abs(bd.x), abs(bd.y)) : length(bd);
             float m = 1.0 - smoothstep(radius * 0.82, radius, dlt);
-            c = mix(sharp, acc / 9.0, m);
+            if (fxRegion > 0.5) { c = acc / 9.0; regA = m; } // passada extra: só a região por cima
+            else c = mix(sharp, acc / 9.0, m);
         } else {
             c = acc / 9.0;
         }
@@ -242,7 +246,7 @@ void main() {
     }
     c = clamp(c, 0.0, 1.0);
     if (tNeg > 0.5) c = vec3(1.0) - c;            // NEGATIVO da transição (negate do export)
-    float a = src.a * chromaA;
+    float a = src.a * chromaA * regA;
     if (wipeKind > 1.5) {
         float e = clamp(wipeEdge, 0.0, 1.0);
         float f = 0.022;
@@ -880,6 +884,18 @@ scrub_player_uses_thumb :: proc(c: ^Clip, lt: f32) -> bool {
 // (usado pelo blend da transição: clipe que sai × (1-p), clipe que entra × p).
 // `vt` é o tempo de EXIBIÇÃO (view_t), não o playhead cru — ver view_t.
 // wipe_feather>0 = dissolve orgânico (fumaça + opacidade). wipe_inv>0 = clipe que SAI.
+// centro/raio de um efeito de faixa com região (Holofote / Desfoque local) no espaço LOCAL
+// do clipe desenhado em (ccx,ccy, dw×dh). O efeito guarda tudo relativo ao QUADRO (como o
+// anel do preview e o filtro do export, que roda no composto); o shader trabalha no clipe.
+// Sem isso um clipe que não ocupa o quadro inteiro (metade de baixo, PiP) erra o lugar.
+fx_region_local :: proc(e: FxSeg, fx, fy, fw, fh, ccx, ccy, dw, dh: f32) -> (cx, cy, r: f32) {
+	rdef := e.kind == FX_BLUR_PART ? f32(0.22) : BULGE_R_DEF
+	rcan := e.radius <= 0 ? rdef : e.radius
+	if dw <= 0 || dh <= 0 do return clamp(0.5+e.cx, 0, 1), clamp(0.5+e.cy, 0, 1), rcan
+	pcx := fx + fw/2 + e.cx*fw; pcy := fy + fh/2 + e.cy*fh // centro em px
+	return (pcx - (ccx - dw/2)) / dw, (pcy - (ccy - dh/2)) / dh, rcan * fh / dh
+}
+
 draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: bool, wipe_edge: f32 = 0, wipe_feather: f32 = 0, wipe_inv: f32 = 0, wipe_kind: f32 = 0, off_x: f32 = 0, off_y: f32 = 0, scl_mul: f32 = 1, rot_add: f32 = 0, sx_mul: f32 = 1, glitch: f32 = 0, tblur: f32 = 0, tpix: f32 = 0, tneg := false) {
 	c := seg_src(i)
 	sg := segs[i]
@@ -998,16 +1014,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 				// do preview e o filtro do export; o shader trabalha no espaço LOCAL do clipe
 				// (o retângulo desenhado). Converte, senão um clipe que não ocupa o quadro
 				// inteiro (metade de baixo, PiP, escala) desfoca no lugar errado.
-				rdef := fs.kind == FX_BLUR_PART ? f32(0.22) : BULGE_R_DEF
-				rcan := fs.radius <= 0 ? rdef : fs.radius
-				pcx := fx + fw/2 + fs.cx*fw; pcy := fy + fh/2 + fs.cy*fh // centro em px
-				if dw > 0 && dh > 0 {
-					b_cx = (pcx - (ccx - dw/2)) / dw
-					b_cy = (pcy - (ccy - dh/2)) / dh
-					b_r = rcan * fh / dh // raio em alturas do quadro -> alturas do clipe
-				} else {
-					b_cx = clamp(0.5+fs.cx, 0, 1); b_cy = clamp(0.5+fs.cy, 0, 1); b_r = rcan
-				}
+				b_cx, b_cy, b_r = fx_region_local(fs, fx, fy, fw, fh, ccx, ccy, dw, dh)
 			}
 			if fs.kind == FX_SHAKE {
 				hz := fs.speed <= 0 ? f32(8) : fs.speed
@@ -1070,7 +1077,32 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		rl.BeginShaderMode(bulge_shader)
 	}
 	rl.DrawTexturePro(tex, src, { ccx, ccy, dw, dh }, { dw/2, dh/2 }, sg.rot + rot_add, tint)
-	if use_fx do rl.EndShaderMode()
+	if use_fx do rl.EndShaderMode() // EndShaderMode descarrega o lote: os uniforms abaixo não vazam p/ o draw acima
+	// DESFOQUES LOCAIS EMPILHADOS: o shader só aplica UM efeito de faixa por draw (o `af`).
+	// Cada outro "Desfoque local" ativo que rege esta trilha vira uma passada por cima, com
+	// alpha = máscara da região — como o export, que aplica todos em sequência no composto.
+	if use_fx && af >= 0 && !has_chroma && !is_audio_track(sg.track) {
+		for k in 0 ..< nfx {
+			e := fxsegs[k]
+			if k == af || e.kind != FX_BLUR_PART do continue
+			if e.track < sg.track || st.playhead < e.start || st.playhead >= e.start + e.dur do continue
+			ecx, ecy, er := fx_region_local(e, fx, fy, fw, fh, ccx, ccy, dw, dh)
+			ctr := [2]f32{ ecx, ecy }
+			zero := f32(0); one := f32(1)
+			ek := f32(FX_BLUR_PART); ea := e.amount; eang := e.angle
+			rl.SetShaderValue(bulge_shader, bulge_loc_center, &ctr, .VEC2)
+			rl.SetShaderValue(bulge_shader, bulge_loc_radius, &er, .FLOAT)
+			rl.SetShaderValue(bulge_shader, bulge_loc_strength, &zero, .FLOAT) // sem distorção nesta passada
+			rl.SetShaderValue(bulge_shader, fx_loc_kind, &ek, .FLOAT)
+			rl.SetShaderValue(bulge_shader, fx_loc_amt, &ea, .FLOAT)
+			rl.SetShaderValue(bulge_shader, fx_loc_ang, &eang, .FLOAT)
+			rl.SetShaderValue(bulge_shader, fx_loc_region, &one, .FLOAT)
+			rl.BeginShaderMode(bulge_shader)
+			rl.DrawTexturePro(tex, src, { ccx, ccy, dw, dh }, { dw/2, dh/2 }, sg.rot + rot_add, tint)
+			rl.EndShaderMode()
+			rl.SetShaderValue(bulge_shader, fx_loc_region, &zero, .FLOAT)
+		}
+	}
 	if sel_box && i == selected {
 		rad := sg.rot * math.PI/180; cs_ := math.cos(rad); sn := math.sin(rad)
 		hw := dw/2; hh := dh/2
