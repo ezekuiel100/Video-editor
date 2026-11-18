@@ -983,7 +983,7 @@ export_chroma_for_seg :: proc(si: int) -> (FxSeg, bool) {
 	best := -1
 	for k in 0 ..< nfx {
 		e := fxsegs[k]
-		if e.kind != FX_CHROMA || e.track < sg.track do continue
+		if e.kind != FX_CHROMA || e.track < sg.track || track_hidden[e.track] do continue // olho fechado: sem chroma
 		t0 := max(e.start, sg.start)
 		t1 := min(e.start + e.dur, sg.start + sg.dur)
 		if t1 - t0 <= 0.001 do continue

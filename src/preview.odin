@@ -1003,7 +1003,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	if !is_audio_track(sg.track) {
 		for k in 0 ..< nfx {
 			e := fxsegs[k]
-			if e.kind != FX_CHROMA do continue
+			if e.kind != FX_CHROMA || track_hidden[e.track] do continue // olho fechado: efeito desligado
 			if vt < e.start || vt >= e.start + e.dur do continue
 			if chroma_target_track(e, vt) != sg.track do continue
 			if fx_stack_push(&stk, FX_CHROMA, e.amount, 0, e.angle, {0, 0}, e.radius <= 0 ? f32(0.20) : e.radius) do has_chroma = true
@@ -1014,6 +1014,7 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 	got_distort := bulge_active(sg) // distorção do próprio clipe tem prioridade
 	if !is_audio_track(sg.track) {
 		for t in sg.track ..< g_nv {
+			if track_hidden[t] do continue // trilha oculta (olho): seus efeitos não aplicam
 			for k in 0 ..< nfx {
 				fs := fxsegs[k]
 				if fs.track != t || fs.kind == FX_CHROMA do continue
