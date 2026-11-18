@@ -147,7 +147,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	if tool(&ix, ty, .Trash, "Excluir (Del)", selected >= 0 || sel_gap_ok()) {
 		if sel_gap_ok() do close_sel_gap()
 		else if track_locked[segs[selected].track] { set_toast("Trilha bloqueada") }
-		else do remove_seg(selected, magnetic || !alt_down())
+		else do remove_seg(selected, mag_on(segs[selected].track) || !alt_down())
 	}
 	// ferramenta lâmina: corta clicando direto no clipe (atalho B). Fica destacada quando ativa.
 	if tool(&ix, ty, .Scissors, "Lâmina (B)", true, blade_mode) do blade_mode = !blade_mode

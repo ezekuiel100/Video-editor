@@ -1003,6 +1003,8 @@ magnetica_reordena_e_cola :: proc(t: ^testing.T) {
 	a := add_seg(0, 0, 0, 5)
 	b := add_seg(0, 5, 0, 5)
 	c := add_seg(0, 10, 0, 5)
+	magnetic = true
+	defer magnetic = false
 	magnetic_move_seg(c, 0, 1) // mouse no 1º clipe: c vai p/ o início
 	testing.expect(t, t_feq(segs[c].start, 0), "inserido no começo")
 	testing.expect(t, t_feq(segs[a].start, 5) && t_feq(segs[b].start, 10), "os outros escorregaram")
@@ -1021,6 +1023,18 @@ magnetica_liga_fecha_vaos :: proc(t: ^testing.T) {
 	testing.expect(t, t_feq(segs[0].start, 0) && t_feq(segs[1].start, 4), "vãos sumiram")
 	set_magnetic(false)
 	testing.expect(t, !magnetic)
+}
+
+@(test)
+magnetica_so_na_v1 :: proc(t: ^testing.T) {
+	t_reset()
+	add_seg(0, 4, 0, 4)
+	b := add_seg(0, 6, 0, 2, 1) // V2 com vão antes
+	set_magnetic(true)
+	defer set_magnetic(false)
+	testing.expect(t, t_feq(segs[0].start, 0), "V1 colou")
+	testing.expect(t, t_feq(segs[b].start, 6), "V2 continua livre")
+	testing.expect(t, mag_on(0) && !mag_on(1) && !mag_on(MAXV), "só a V1 é magnética")
 }
 
 @(test)

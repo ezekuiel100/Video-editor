@@ -362,7 +362,7 @@ bin_add_to_timeline :: proc(i: int) {
 	if !media_ready(i) do return
 	tr := free_track_from(track_for_media(i, 0))
 	if tr < 0 { set_toast("Trilha bloqueada"); return }
-	start := magnetic ? magnetic_pack(tr, -1, -1, st.playhead, c.dur) : free_start(tr, -1, st.playhead, c.dur)
+	start := mag_on(tr) ? magnetic_pack(tr, -1, -1, st.playhead, c.dur) : free_start(tr, -1, st.playhead, c.dur)
 	si := add_seg(i, start, 0, c.dur, tr)
 	if si < 0 do return // add_seg já avisa (timeline cheia)
 	selected = si; bin_sel = -1; insp_tab = 0
@@ -1287,6 +1287,11 @@ close_all_gaps :: proc(tr: int) -> int {
 
 MagOcc :: struct { start, dur: f32, si, fi: int }
 
+// só a trilha principal (V1) é magnética. As de cima (sobreposição, efeitos) e as
+// de áudio ficam livres mesmo com o ímã ligado — senão um efeito solto numa trilha
+// vazia sempre ia parar no 0:00, sem como posicioná-lo.
+mag_on :: proc(tr: int) -> bool { return magnetic && tr == 0 }
+
 magnetic_collect :: proc(tr, skip_si, skip_fi: int) -> (occ: [MAX_SEGS + MAX_FX]MagOcc, n: int) {
 	n = 0
 	for i in 0 ..< nsegs {
@@ -1353,7 +1358,7 @@ magnetic_move_seg :: proc(si, ntr: int, t: f32) {
 	start := magnetic_pack(ntr, si, -1, t, dur)
 	segs[si].start = start
 	segs[si].track = ntr
-	if old != ntr && !track_locked[old] do magnetic_pack(old, si, -1, 0, 0)
+	if old != ntr && mag_on(old) && !track_locked[old] do magnetic_pack(old, si, -1, 0, 0)
 	snap_line = start
 }
 
@@ -1365,7 +1370,7 @@ magnetic_move_fx :: proc(fi, ntr: int, t: f32) {
 	start := magnetic_pack(ntr, -1, fi, t, dur)
 	fxsegs[fi].start = start
 	fxsegs[fi].track = ntr
-	if old != ntr && old >= 0 && !track_locked[old] do magnetic_pack(old, -1, fi, 0, 0)
+	if old != ntr && old >= 0 && mag_on(old) && !track_locked[old] do magnetic_pack(old, -1, fi, 0, 0)
 	snap_line = start
 }
 
@@ -1384,11 +1389,7 @@ magnetic_insert_start :: proc(tr, skip_si: int, t, dur: f32) -> f32 {
 set_magnetic :: proc(on: bool) {
 	magnetic = on
 	if on {
-		for tr in 0 ..< g_nv { if !track_locked[tr] do magnetic_pack(tr, -1, -1, 0, 0) }
-		for k in 0 ..< g_na {
-			tr := MAXV + k
-			if !track_locked[tr] do magnetic_pack(tr, -1, -1, 0, 0)
-		}
+		if !track_locked[0] do magnetic_pack(0, -1, -1, 0, 0) // só a V1 (ver mag_on)
 		set_toast("Timeline magnética")
 	} else {
 		set_toast("Timeline livre")
