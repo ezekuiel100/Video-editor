@@ -55,7 +55,26 @@ TFontCPU :: struct {
 	name:   cstring,
 	ready:  bool, // atômico: worker terminou este slot (main pode subir a textura)
 }
-tf_cpu:  [9]TFontCPU
+// fontes de texto (nome exibido, arquivo em C:/Windows/Fonts — ou, com prefixo "fonts/",
+// relativo à pasta do .exe). Projetos salvam o ÍNDICE da
+// fonte: fonte nova entra SEMPRE no fim da lista, senão os projetos antigos trocam de fonte.
+TEXT_FONT_FILES :: [?][2]cstring{
+	{ "Arial", "arial.ttf" }, { "Arial Black", "ariblk.ttf" }, { "Impact", "impact.ttf" },
+	{ "Times New Roman", "times.ttf" }, { "Georgia", "georgia.ttf" }, { "Verdana", "verdana.ttf" },
+	{ "Comic Sans", "comic.ttf" }, { "Consolas", "consola.ttf" }, { "Trebuchet", "trebuc.ttf" },
+	// --- acrescentadas depois (manter a ordem acima) ---
+	{ "Arial Bold", "arialbd.ttf" }, { "Segoe UI Bold", "segoeuib.ttf" }, { "Segoe UI Black", "seguibl.ttf" },
+	{ "Segoe UI Light", "segoeuil.ttf" }, { "Calibri", "calibri.ttf" }, { "Calibri Bold", "calibrib.ttf" },
+	{ "Bahnschrift", "bahnschrift.ttf" }, { "Franklin Gothic", "framd.ttf" }, { "Tahoma", "tahoma.ttf" },
+	{ "Candara", "Candara.ttf" }, { "Corbel", "corbel.ttf" }, { "Constantia", "constan.ttf" },
+	{ "Palatino", "pala.ttf" }, { "Courier New", "cour.ttf" }, { "Lucida Console", "lucon.ttf" },
+	{ "Cascadia Code", "CascadiaCode.ttf" }, { "Ink Free", "Inkfree.ttf" }, { "Segoe Print", "segoepr.ttf" },
+	{ "Segoe Script", "segoesc.ttf" }, { "MV Boli", "mvboli.ttf" }, { "Gabriola", "Gabriola.ttf" },
+	// empacotadas com o app (pasta fonts/ ao lado do .exe; Apache 2.0, ver fonts/LICENSE-Roboto.txt)
+	{ "Roboto", "fonts/Roboto-Regular.ttf" }, { "Roboto Medium", "fonts/Roboto-Medium.ttf" },
+	{ "Roboto Bold", "fonts/Roboto-Bold.ttf" }, { "Roboto Black", "fonts/Roboto-Black.ttf" },
+}
+tf_cpu:  [len(TEXT_FONT_FILES)]TFontCPU
 tf_up:   int  // (main) próximo slot a subir p/ text_fonts
 tf_done: bool // atômico: worker acabou (slots não-ready a partir daqui nunca ficarão prontos)
 tf_thr:  ^thread.Thread

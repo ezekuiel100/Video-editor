@@ -51,6 +51,8 @@ Source: "dist\ffmpeg.exe";          DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\ffprobe.exe";         DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\LICENSE-ffmpeg.txt";  DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\*.dll";               DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; fontes de texto empacotadas (Roboto, Apache 2.0)
+Source: "fonts\*"; DestDir: "{app}\fonts"; Flags: ignoreversion
 ; Whisper: motor + ggml-small. skipifsourcedoesntexist se o fetch-stt ainda nao rodou.
 Source: "stt\*"; DestDir: "{app}\stt"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 

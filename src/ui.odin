@@ -142,22 +142,21 @@ load_sdf_font :: proc(path: cstring, cp: []rune, sz: i32) -> (rl.Font, bool) {
 // em ordem compacta (fonte que falha é pulada) e marca ready um a um — a main sobe conforme.
 text_fonts_worker :: proc() {
 	cp := font_codepoints()
-	NAMES := []cstring{ "Arial", "Arial Black", "Impact", "Times New Roman", "Georgia", "Verdana", "Comic Sans", "Consolas", "Trebuchet" }
-	PATHS := []cstring{
-		"C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/ariblk.ttf", "C:/Windows/Fonts/impact.ttf", "C:/Windows/Fonts/times.ttf",
-		"C:/Windows/Fonts/georgia.ttf", "C:/Windows/Fonts/verdana.ttf", "C:/Windows/Fonts/comic.ttf", "C:/Windows/Fonts/consola.ttf", "C:/Windows/Fonts/trebuc.ttf",
-	}
+	files := TEXT_FONT_FILES
 	n := 0
-	for p, i in PATHS {
+	for e in files {
 		dsz: i32
-		fd := rl.LoadFileData(p, &dsz)
+		file := string(e[1])
+		path := fmt.ctprintf("C:/Windows/Fonts/%s", file)
+		if strings.has_prefix(file, "fonts/") do path = fmt.ctprintf("%s/%s", EXE_DIR != "" ? EXE_DIR : ".", file)
+		fd := rl.LoadFileData(path, &dsz)
 		if fd == nil do continue
 		g := rl.LoadFontData(fd, dsz, SDF_SZ, raw_data(cp[:]), i32(len(cp)), .SDF)
 		if g == nil { rl.UnloadFileData(fd); continue }
 		recs: [^]rl.Rectangle
 		atlas := rl.GenImageFontAtlas(g, &recs, i32(len(cp)), SDF_SZ, 0, 1)
 		rl.UnloadFileData(fd)
-		tf_cpu[n].glyphs = g; tf_cpu[n].recs = recs; tf_cpu[n].atlas = atlas; tf_cpu[n].name = NAMES[i]
+		tf_cpu[n].glyphs = g; tf_cpu[n].recs = recs; tf_cpu[n].atlas = atlas; tf_cpu[n].name = e[0]
 		intrinsics.atomic_store(&tf_cpu[n].ready, true)
 		n += 1
 	}
