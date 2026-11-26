@@ -37,7 +37,7 @@ sil_thresh :: proc(pct: f32) -> f32 { return clamp(pct, 1, 90) / 100 }
 // (média dos buckets altos), não a 1.0. Sem isto, 25% = RMS 0.25 e ou apagava
 // o clipe inteiro (fala quieta) ou não achava nada (fala alta).
 sil_rel_thresh :: proc(c: ^Clip, src0, src1, pct: f32) -> f32 {
-	if c == nil || len(c.wave_rms) == 0 do return sil_thresh(pct)
+	if c == nil || !intrinsics.atomic_load(&c.wave_complete) || len(c.wave_rms) == 0 do return sil_thresh(pct)
 	n := len(c.wave_rms)
 	i0 := clamp(int(src0 * WAVE_PPS), 0, n - 1)
 	i1 := clamp(int(src1 * WAVE_PPS), 0, n - 1)
@@ -81,7 +81,7 @@ sil_smooth_at :: proc(rms: []f32, i, i0, i1: int) -> f32 {
 // preenche `out` com intervalos de silêncio em [src0, src1] na fonte. Devolve a contagem.
 // thresh é RMS absoluto. Suaviza, usa histerese e cola vãos vizinhos antes do pad.
 detect_silences :: proc(c: ^Clip, src0, src1, thresh, min_dur, pad: f32, out: []Silence) -> int {
-	if c == nil || !intrinsics.atomic_load(&c.wave_ready) || len(c.wave_rms) == 0 do return 0
+	if c == nil || !intrinsics.atomic_load(&c.wave_complete) || len(c.wave_rms) == 0 do return 0
 	if src1 - src0 < min_dur || thresh <= 0 || len(out) == 0 do return 0
 	n := len(c.wave_rms)
 	i0 := clamp(int(src0 * WAVE_PPS), 0, n - 1)
@@ -144,7 +144,7 @@ detect_seg_silences :: proc(si: int, thresh, min_dur, pad: f32, out: []Silence) 
 	spd := seg_speed(si)
 	src0 := sg.in_off
 	src1 := sg.in_off + sg.dur * spd
-	n := detect_silences(c, src0, src1, thresh, min_dur, pad, out)
+	n := detect_silences(c, src0, src1, thresh, min_dur * spd, pad * spd, out)
 	for k in 0 ..< n {
 		out[k].t0 = sg.start + (out[k].t0 - sg.in_off) / spd
 		out[k].t1 = sg.start + (out[k].t1 - sg.in_off) / spd
@@ -211,7 +211,7 @@ open_silence_modal :: proc() {
 	if track_locked[segs[selected].track] { set_toast("Trilha bloqueada"); return }
 	c := seg_src(selected)
 	if c.is_text || (!c.src_audio && !c.has_audio) { set_toast("Este clipe não tem áudio"); return }
-	if !intrinsics.atomic_load(&c.wave_ready) { set_toast("Aguarde a forma de onda terminar"); return }
+	if !intrinsics.atomic_load(&c.wave_complete) { set_toast("Aguarde a forma de onda terminar"); return }
 	st.playing = false
 	sil_done = false; sil_dirty = false; sil_play = false; sil_play_t = 0
 	sil_n = 0; sil_nk = 0; sil_si = selected
@@ -527,7 +527,7 @@ draw_silence_modal :: proc(sw, sh: f32) {
 
 silence_apply_selection :: proc() {
 	if !sil_done { set_toast("Clique em Começar para ver o resultado"); return }
-	// índices estáveis: processa da DIREITA p/ a esquerda (o rebuild mexe nos que estão depois)
+	// Índices decrescentes: remove_seg compacta o array, independentemente do tempo.
 	idx: [MAX_SEGS]int
 	nn := 0
 	for i in 0 ..< nsegs {
@@ -537,10 +537,10 @@ silence_apply_selection :: proc() {
 		}
 	}
 	if nn == 0 { set_toast("Selecione um clipe com áudio"); return }
-	// insertion sort por start descendente
+	// insertion sort por índice descendente
 	for a in 1 ..< nn {
 		v, p := idx[a], a
-		for p > 0 && segs[idx[p - 1]].start < segs[v].start { idx[p] = idx[p - 1]; p -= 1 }
+		for p > 0 && idx[p - 1] < v { idx[p] = idx[p - 1]; p -= 1 }
 		idx[p] = v
 	}
 	cuts := 0

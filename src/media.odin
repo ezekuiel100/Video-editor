@@ -330,6 +330,7 @@ Clip :: struct {
 	wave:       []f32, // pico [0,1] por bucket, WAVE_PPS buckets/seg (heap, dono)
 	wave_rms:   []f32, // RMS [0,1] por bucket (mesmo tamanho/índice de wave)
 	wave_ready: bool,  // atômico: envelope pronto p/ desenhar
+	wave_complete: bool, // atomic: full waveform analysis succeeded
 	// --- tira de miniaturas (filmstrip) na trilha de vídeo ---
 	thumb_px:       []u8,           // pixels de nthumbs frames (heap; liberado após upload)
 	nthumbs:        int,            // nº de miniaturas geradas
@@ -1303,6 +1304,7 @@ import_worker :: proc(c: ^Clip) {
 // a direita, rápido, sem escrever/ler WAV grande. Sem cabeçalho (formato é o que
 // pedi no comando). Indexa por tempo absoluto; `wave_ready` já no 1º bloco.
 compute_waveform :: proc(c: ^Clip) {
+	intrinsics.atomic_store(&c.wave_complete, false)
 	if c.dur <= 0 do return
 	cmd := []string{
 		"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", c.path,
@@ -1361,7 +1363,10 @@ compute_waveform :: proc(c: ^Clip) {
 	if acc_b >= 0 && acc_b < n && acc_n > 0 do c.wave_rms[acc_b] = f32(math.sqrt(acc_sq / f64(acc_n))) // último bucket
 	os.close(r)
 	if intrinsics.atomic_load(&c.stop) do _ = os.process_kill(p) // fechando: não espera o ffmpeg terminar sozinho
-	_, _ = os.process_wait(p)
+	state, wait_err := os.process_wait(p)
+	if wait_err == nil && state.exit_code == 0 && frame_idx > 0 && !intrinsics.atomic_load(&c.stop) {
+		intrinsics.atomic_store(&c.wave_complete, true)
+	}
 }
 
 // pico [0,1] da fonte no intervalo de tempo [t0,t1] (segundos). -1 = ainda não pronto.

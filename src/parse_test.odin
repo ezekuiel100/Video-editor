@@ -241,6 +241,7 @@ waveform_pcm_de_verdade :: proc(t: ^testing.T) {
 	c.dur = 1
 	compute_waveform(c)
 	defer { delete(c.wave); c.wave = nil; delete(c.wave_rms); c.wave_rms = nil }
+	testing.expect(t, intrinsics.atomic_load(&c.wave_complete), "full analysis published after successful ffmpeg exit")
 	testing.expect(t, intrinsics.atomic_load(&c.wave_ready), "wave_ready publicada")
 	testing.expect(t, len(c.wave) == 100, "1s × WAVE_PPS buckets")
 	testing.expect(t, wave_peak(c, 0.1, 0.4) > 0.3, "trecho com tom tem pico alto")
