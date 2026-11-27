@@ -323,6 +323,7 @@ blade_mode: bool    // ferramenta lâmina: clicar num segmento corta ali (estilo
 magnetic:   bool    // timeline magnética: clipes da trilha colam uns nos outros (sem vãos)
 tl_scroll: f32      // deslocamento horizontal da timeline (px); 0 = início
 tl_hbar_drag: bool  // arrastando a barra de rolagem horizontal
+tl_hbar_grab: f32   // distância do clique à borda esquerda do thumb
 tl_vscroll: f32     // deslocamento VERTICAL das trilhas (px); 0 = topo. >0 quando não cabem
 tl_vbar_drag: bool  // arrastando a barra de rolagem vertical
 zoom_bar_drag: bool // arrastando o knob do slider de zoom

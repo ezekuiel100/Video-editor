@@ -106,6 +106,11 @@ tl_marquee_apply :: proc(mq, view: rl.Rectangle, add: bool) {
 	}
 }
 
+tl_scroll_from_grab :: proc(mouse_x, track_x, grab, travel, max_scroll: f32) -> f32 {
+	if travel <= 0 || max_scroll <= 0 do return 0
+	return clamp((mouse_x - track_x - grab) / travel, 0, 1) * max_scroll
+}
+
 draw_timeline :: proc(r: rl.Rectangle) {
 	pt := prof_beg(.Timeline); defer prof_end(.Timeline, pt)
 	toolbar_h: f32 = 34
@@ -781,7 +786,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	over_lanes := hovered(vlane) || hovered(ruler)
 	mp2 := rl.GetMousePosition()
 	on_handle :: proc(mp, pt: rl.Vector2) -> bool { return pt.x >= 0 && abs(mp.x-pt.x) < 8 && abs(mp.y-pt.y) < 8 }
-	over_audio := (g_sel_volbar.width > 0 && hovered(g_sel_volbar)) || on_handle(mp2, g_sel_fi) || on_handle(mp2, g_sel_fo)
+	over_audio := hovered(rows_clip) && ((g_sel_volbar.width > 0 && hovered(g_sel_volbar)) || on_handle(mp2, g_sel_fi) || on_handle(mp2, g_sel_fo))
 	dragging_audio := st.drag == .Vol || st.drag == .FadeIn || st.drag == .FadeOut
 	if blade_mode && over_lanes do rl.SetMouseCursor(.CROSSHAIR)
 	else if over_audio || dragging_audio do rl.SetMouseCursor(.POINTING_HAND)
@@ -870,6 +875,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 	}
 
 	// barra de rolagem horizontal (aparece só quando há conteúdo além da tela)
+	if !rl.IsMouseButtonDown(.LEFT) || max_scroll <= 0 do tl_hbar_drag = false
 	if max_scroll > 0 {
 		sb_h: f32 = 8
 		sb_y := r.y + r.height - sb_h - 3
@@ -877,12 +883,13 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		rl.DrawRectangleRounded(track, 1, 4, SUNK)
 		thumb_w := max(30, view_w * view_w / content_w)
 		thumb := rl.Rectangle{ track.x + (tl_scroll / max_scroll) * (view_w - thumb_w), sb_y, thumb_w, sb_h }
-		if clicked(thumb) do tl_hbar_drag = true
-		if rl.IsMouseButtonReleased(.LEFT) do tl_hbar_drag = false
+		if clicked(thumb) {
+			tl_hbar_drag = true
+			tl_hbar_grab = rl.GetMousePosition().x - thumb.x
+		}
 		if tl_hbar_drag {
 			mx := rl.GetMousePosition().x
-			rel := clamp((mx - track.x - thumb_w/2) / (view_w - thumb_w), 0, 1)
-			tl_scroll = rel * max_scroll
+			tl_scroll = tl_scroll_from_grab(mx, track.x, tl_hbar_grab, view_w - thumb_w, max_scroll)
 		}
 		rl.DrawRectangleRounded(thumb, 1, 4, (tl_hbar_drag || hovered(thumb)) ? ACCENT : GRIP)
 	}
@@ -914,7 +921,7 @@ draw_timeline :: proc(r: rl.Rectangle) {
 		mp := rl.GetMousePosition()
 		// alças de áudio do segmento SELECIONADO têm prioridade sobre mover/aparar
 		near :: proc(a, b: rl.Vector2) -> bool { return abs(a.x-b.x) < 8 && abs(a.y-b.y) < 8 }
-		if selected >= 0 && seg_ready(selected) && !track_locked[segs[selected].track] {
+		if hovered(rows_clip) && selected >= 0 && seg_ready(selected) && !track_locked[segs[selected].track] {
 			if g_sel_fi.x >= 0 && near(mp, g_sel_fi) {
 				st.drag = .FadeIn; drag_clip = selected; consumed = true
 			} else if g_sel_fo.x >= 0 && near(mp, g_sel_fo) {
