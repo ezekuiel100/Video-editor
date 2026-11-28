@@ -123,6 +123,8 @@ span_conserva_a_duracao :: proc(t: ^testing.T) {
 // 3 fontes de vídeo com áudio, 100s cada, saída 1920x1080
 t_export_reset :: proc() {
 	t_reset()
+	canvas_blur = false
+	canvas_blur_amount = 0.5
 	nclips = 3
 	for i in 0 ..< 3 {
 		clips[i] = Clip{}
@@ -1615,4 +1617,58 @@ export_desfoque_forte_acompanha_resolucao :: proc(t: ^testing.T) {
             strings.builder_destroy(&b)
         }
     }
+}
+
+@(test)
+canvas_blur_export :: proc(t: ^testing.T) {
+    t_export_reset()
+    defer canvas_blur = false
+    defer set_proj_res(1920, 1080)
+    canvas_blur = true
+    a := add_seg(0, 0, 0, 5)
+    set_proj_res(1080, 1920)
+    testing.expect(t, canvas_base_seg(a))
+    _, g := t_build(t)
+    testing.expect(t, strings.contains(g, "force_original_aspect_ratio=increase,crop=1080:1920"))
+    testing.expect(t, strings.contains(g, "gblur=sigma=59.400:steps=3"))
+    testing.expect(t, strings.contains(g, "[cbfg0]null[v0]"))
+    testing.expect(t, strings.contains(save_project_text(), "canvas_blur 1"))
+    b := add_seg(1, 0, 0, 5)
+    segs[b].track = segs[a].track + 1
+    testing.expect(t, !canvas_base_seg(b), "overlays must not cover the base with another background")
+    canvas_blur = false
+    _, plain := t_build(t)
+    testing.expect(t, !strings.contains(plain, "[cbblur"))
+}
+
+@(test)
+canvas_blur_strength_persists_and_scales :: proc(t: ^testing.T) {
+    t_export_reset()
+    defer canvas_blur = false
+    defer canvas_blur_amount = 0.5
+    defer set_proj_res(1920, 1080)
+    _ = add_seg(0, 0, 0, 2)
+    canvas_blur = true
+    set_proj_res(1080, 1920)
+    for amount in ([]f32{0, 0.25, 0.5, 1}) {
+        canvas_blur_amount = amount
+        _, graph := t_build(t)
+        expected := fmt.tprintf("gblur=sigma=%.3f:steps=3", 118.8*amount)
+        testing.expect(t, strings.contains(graph, expected), "export must use the selected strength")
+        saved := save_project_text()
+        for line in strings.split_lines(saved, context.temp_allocator) {
+            if !strings.has_prefix(line, "canvas_blur ") do continue
+            enabled, restored := canvas_blur_parse(strings.fields(line, context.temp_allocator))
+            testing.expect(t, enabled && abs(restored-amount) < 0.00001, "save/load round trip")
+        }
+    }
+    _, legacy := canvas_blur_parse([]string{"canvas_blur", "1"})
+    testing.expect(t, legacy == 0.5, "old projects keep their previous appearance")
+    for invalid in ([]string{"NaN", "-1", "2", "invalid"}) {
+        _, strength := canvas_blur_parse([]string{"canvas_blur", "1", invalid})
+        testing.expect(t, strength == 0.5, "invalid strength falls back safely")
+    }
+    set_proj_res(2160, 3840)
+    _, graph4k := t_build(t)
+    testing.expect(t, strings.contains(graph4k, "gblur=sigma=237.600:steps=3"), "4K keeps relative strength")
 }

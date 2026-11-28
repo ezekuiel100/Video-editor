@@ -134,6 +134,10 @@ g_pv_x:      f32 = -1     // guia VERTICAL de alinhamento no preview (x na tela;
 g_ph_y:      f32 = -1     // guia HORIZONTAL de alinhamento no preview (y na tela; -1 = nenhuma)
 proj_ar:     f32 = 16.0/9.0 // proporção (largura/altura) do PROJETO — canvas de saída (preview)
 proj_w:      int = 1920     // resolução de SAÍDA (export); proj_ar = proj_w/proj_h. Editável em Config. do Projeto
+canvas_blur: bool // Canvas: enlarged, blurred copy of the base video
+canvas_blur_amount: f32 = 0.5 // 0..1, independent of the on/off switch
+ps_blur_amount: f32
+ps_blur: bool
 proj_h:      int = 1080
 ar_auto:     bool = true    // proj_ar ainda segue o 1º vídeo da timeline (autodetecção); escolher preset e abrir projeto desligam
 ar_menu_open: bool          // dropdown rápido de presets de proporção aberto
@@ -464,6 +468,10 @@ main :: proc() {
 		rl.SetTextureFilter(ui_font.texture, .BILINEAR)
 	}
 	// shader do efeito de distorção (bulge/pinch) — usado no preview do vídeo
+	canvas_shader = rl.LoadShaderFromMemory(nil, CANVAS_BLUR_FS)
+	canvas_uv = rl.GetShaderLocation(canvas_shader, "region")
+	canvas_step = rl.GetShaderLocation(canvas_shader, "blurStep")
+	canvas_lod = rl.GetShaderLocation(canvas_shader, "blurLod")
 	bulge_shader = rl.LoadShaderFromMemory(nil, BULGE_FS)
 	bulge_ok = bulge_shader.id != 0
 	if bulge_ok {

@@ -27,6 +27,8 @@ clear_project :: proc() {
 	st.playhead = 0
 	st.active_tab = 0 // Novo/Abrir volta pra aba Mídia (o clique em Arquivo→Abrir não pode deixar Efeitos)
 	magnetic = false
+	canvas_blur = false
+	canvas_blur_amount = 0.5
 	set_proj_ar(16.0/9.0); ar_auto = true // formato volta ao padrão (1920x1080) e reativa a autodetecção
 	dirty = false
 	clear_proj_path() // Novo projeto não tem arquivo — o próximo Ctrl+S pergunta o nome de novo
@@ -80,7 +82,8 @@ save_project_text :: proc() -> string {
 		}
 	}
 	b := strings.builder_make(context.temp_allocator)
-	fmt.sbprintf(&b, "OVP1\nar %.6f\nres %d %d\ntracks %d %d\nmedia %d\n", proj_ar, proj_w, proj_h, g_nv, g_na, len(medias))
+	fmt.sbprintf(&b, "OVP1\nar %.6f\nres %d %d\ntracks %d %d\n", proj_ar, proj_w, proj_h, g_nv, g_na)
+	fmt.sbprintf(&b, "canvas_blur %d %.6f\nmedia %d\n", canvas_blur ? 1 : 0, canvas_blur_amount, len(medias))
 	for p in medias do fmt.sbprintf(&b, "%s\n", p)
 	// SÓ o índice decide: `idx` já exclui mídia falha e removida (tombstone) — que é tudo o
 	// que não deve ser salvo. Filtrar também por `seg_ready` descartava, EM SILÊNCIO, todo
@@ -282,6 +285,8 @@ load_project :: proc(path: string) {
 	lines := strings.split_lines(string(data), context.temp_allocator)
 	if len(lines) < 1 || strings.trim_space(lines[0]) != "OVP1" { set_toast("Arquivo de projeto inválido"); return }
 	ar: f32 = 16.0/9
+	loaded_blur := false
+	loaded_blur_amount := f32(0.5)
 	res_w, res_h := 0, 0 // resolução salva (0 = ausente em projetos antigos; deriva de `ar`)
 	lnv := -1; lna := -1 // contagem de trilhas do arquivo (-1 = não especificada; deriva do uso)
 	ltl := f32(-1); lmd := f32(-1) // divisórias salvas (-1 = ausente: mantém o padrão)
@@ -306,6 +311,8 @@ load_project :: proc(path: string) {
 		switch toks[0] {
 		case "ar":
 			if len(toks) >= 2 do if v, o := strconv.parse_f64(toks[1]); o do ar = f32(v)
+		case "canvas_blur":
+			loaded_blur, loaded_blur_amount = canvas_blur_parse(toks)
 		case "res":
 			if len(toks) >= 3 { res_w = strconv.parse_int(toks[1]) or_else 0; res_h = strconv.parse_int(toks[2]) or_else 0 }
 		case "tracks":
@@ -393,6 +400,8 @@ load_project :: proc(path: string) {
 	if malformed { set_toast("Arquivo de projeto truncado ou inválido"); return }
 	// aplica: limpa, reimporta (slots 0..N-1 na ordem), recria segmentos
 	clear_project()
+	canvas_blur = loaded_blur
+	canvas_blur_amount = loaded_blur_amount
 	for p in mpaths {
 		if strings.has_prefix(p, "#CAP\t") { // faixa de legendas (falas vêm em `cues`)
 			f := strings.split(p, "\t", context.temp_allocator)
@@ -545,4 +554,14 @@ open_shot_modal :: proc() {
 	modal = .Shot; set_name(fmt.tprintf("screenshot_%d", shot_n)); shot_ext = 0
 	if save_dir != "" do delete(save_dir)
 	save_dir = default_save_dir()
+}
+
+// Older projects stored only the switch; retain the previous blur strength.
+canvas_blur_parse :: proc(toks: []string) -> (enabled: bool, amount: f32) {
+    enabled = len(toks) >= 2 && toks[1] == "1"
+    amount = 0.5
+    if len(toks) >= 3 {
+        if v, ok := strconv.parse_f64(toks[2]); ok && v >= 0 && v <= 1 do amount = f32(v)
+    }
+    return
 }

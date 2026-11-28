@@ -1,6 +1,7 @@
 package main
 
 import rl "vendor:raylib"
+import rlgl "vendor:raylib/rlgl"
 import "base:intrinsics"
 import "core:fmt"
 import "core:math"
@@ -986,6 +987,32 @@ draw_seg_composited :: proc(i: int, vt, opac_mul, fx, fy, fw, fh: f32, sel_box: 
 		cr = { cr.x*k, cr.y*k, cr.width*k, cr.height*k }
 	}
 	src := rl.Rectangle{ cr.x + crx*cr.width, cr.y + cry*cr.height, crw*cr.width, crh*cr.height }
+	if canvas_blur && canvas_base_seg(i) && canvas_shader.id > 0 {
+		bg := src
+		cover := max(fw/bg.width, fh/bg.height)
+		bw := fw/cover; bh := fh/cover
+		bg.x += (bg.width-bw)/2; bg.y += (bg.height-bh)/2
+		bg.width = bw; bg.height = bh
+		// Prefilter before the wide kernel. Sampling sharp pixels over a wide
+		// disk produced visible diagonal copies of the source in the background.
+		sigma := canvas_blur_sigma() * min(fw, fh) / cover
+		lod := max(f32(0), math.ceil(math.log2(max(f32(1), sigma))))
+		lod = min(lod, max(f32(0), math.floor(math.log2(max(f32(1), min(src.width, src.height)/8)))))
+		inset := math.pow(f32(2), lod) * 0.5
+		uv := [4]f32{(src.x+inset)/tw_, (src.y+inset)/th_, (src.width-2*inset)/tw_, (src.height-2*inset)/th_}
+		step := [2]f32{sigma/tw_, sigma/th_}
+		rlgl.DrawRenderBatchActive()
+		rl.GenTextureMipmaps(&tex)
+		rl.SetTextureFilter(tex, .TRILINEAR)
+		rl.SetShaderValue(canvas_shader, canvas_uv, &uv, .VEC4)
+		rl.SetShaderValue(canvas_shader, canvas_step, &step, .VEC2)
+		rl.SetShaderValue(canvas_shader, canvas_lod, &lod, .FLOAT)
+		rl.BeginShaderMode(canvas_shader)
+		rl.DrawTexturePro(tex, bg, {fx, fy, fw, fh}, {}, 0, {255,255,255,u8(clamp(op,0,1)*255)})
+		rl.EndShaderMode()
+		rl.SetTextureFilter(tex, .BILINEAR)
+	}
+
 	cwpx := crw*cr.width; chpx := crh*cr.height
 	tf := min(fw/cwpx, fh/chpx) // ajusta a região recortada ao canvas preservando aspecto
 	sx := sx_mul <= 0.01 ? f32(1) : abs(sx_mul)
@@ -1643,3 +1670,44 @@ draw_crop_modal :: proc(sw, sh: f32) {
 	if ui_btn({ cx + cw - 224, cy + chh - 46, 100, 32 }, "Cancelar", false) { crop_modal_cancel(); return }
 	if ui_btn({ cx + cw - 114, cy + chh - 46, 92, 32 }, "OK", true) { crop_modal_ok(); return }
 }
+
+// Only the lowest occupied video track supplies the canvas background.
+canvas_base_seg :: proc(i: int) -> bool {
+    for j in 0 ..< nsegs {
+        if !seg_ready(j) || segs[j].aonly || clips[segs[j].src].is_audio || clips[segs[j].src].is_text || track_hidden[segs[j].track] do continue
+        if segs[j].track < segs[i].track do return false
+    }
+    return true
+}
+canvas_shader: rl.Shader
+canvas_blur_sigma :: proc() -> f32 {
+    return 0.11 * clamp(canvas_blur_amount, 0, 1)
+}
+canvas_uv, canvas_step, canvas_lod: i32
+CANVAS_BLUR_FS: cstring : `#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;
+uniform vec4 region;
+uniform vec2 blurStep;
+uniform float blurLod;
+out vec4 finalColor;
+void main() {
+    if (blurStep.x <= 0.0) {
+        finalColor = textureLod(texture0, fragTexCoord, 0.0) * fragColor;
+        return;
+    }
+    vec4 acc = vec4(0.0); float total = 0.0;
+    // A dense Gaussian over prefiltered mip levels removes both texture detail
+    // and the isolated sharp samples that looked like diagonal motion trails.
+    for (int y=-6; y<=6; y++) {
+        for (int x=-6; x<=6; x++) {
+            vec2 d = vec2(float(x), float(y))*0.5;
+            float w = exp(-0.5*dot(d,d));
+            vec2 uv = clamp(fragTexCoord + d*blurStep, region.xy, region.xy+region.zw);
+            acc += textureLod(texture0, uv, blurLod)*w;
+            total += w;
+        }
+    }
+    finalColor = acc/total * fragColor;
+}`

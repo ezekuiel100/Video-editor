@@ -322,13 +322,15 @@ open_projset_modal :: proc() {
 	tf_set(&tf_pw, fmt.tprintf("%d", proj_w))
 	tf_set(&tf_ph, fmt.tprintf("%d", proj_h))
 	ps_wf = false; ps_hf = false
+	ps_blur = canvas_blur
+	ps_blur_amount = canvas_blur_amount
 }
 
 // modal estilo NLE: chips de proporção (preenchem L×A) + campos de resolução + razão
 // irredutível ao lado. OK grava proj_w/proj_h (usados no export e derivam proj_ar do preview).
 draw_projset_modal :: proc(sw, sh: f32) {
 	rl.DrawRectangleRec({0,0,sw,sh}, SCRIM) // backdrop
-	cw: f32 = 560; ch: f32 = 316
+	cw: f32 = 560; ch: f32 = 400
 	cx := sw/2 - cw/2; cy := sh/2 - ch/2
 	card := rl.Rectangle{ cx, cy, cw, ch }
 	rl.DrawRectangleRounded(card, 0.04, 8, SURFACE)
@@ -383,13 +385,20 @@ draw_projset_modal :: proc(sw, sh: f32) {
 	txt("Taxa de Frames:", lx, ry + 50, FS_MD, TEXT)
 	txt("30 fps  (fixo)", lx + 158, ry + 50, FS_MD, MUTED)
 
+	txt("Tela:", lx, ry + 84, FS_MD, TEXT)
+	if ui_btn({lx + 158, ry + 78, 244, 28}, ps_blur ? "Desfoque de fundo: ligado" : "Desfoque de fundo: desligado", ps_blur) do ps_blur = !ps_blur
+
+	txt("Força:", lx + 158, ry + 120, FS_MD, MUTED)
+	ui_slider(17, {lx + 222, ry + 117, 180, 22}, &ps_blur_amount, 0, 1)
+	txt(rl.TextFormat("%d%%", i32(ps_blur_amount*100 + 0.5)), lx + 416, ry + 120, FS_MD, TEXT)
+
 	// OK / Cancelar
 	if ui_btn({ cx + cw - 234, cy + ch - 52, 100, 36 }, "Cancelar", false) do modal = .None
 	if ui_btn({ cx + cw - 124, cy + ch - 52, 100, 36 }, "OK", true) {
 		w := strconv.parse_int(string(tf_pw.buf[:tf_pw.len])) or_else 0
 		h := strconv.parse_int(string(tf_ph.buf[:tf_ph.len])) or_else 0
 		if w >= 2 && h >= 2 && w <= 8192 && h <= 8192 {
-			set_proj_res(w, h); ar_auto = false; dirty = true; modal = .None
+			set_proj_res(w, h); canvas_blur = ps_blur; canvas_blur_amount = ps_blur_amount; ar_auto = false; dirty = true; modal = .None
 			set_toast(rl.TextFormat("Projeto: %dx%d (%s)", i32(proj_w), i32(proj_h), ratio_label(proj_w, proj_h)))
 		} else do set_toast("Resolução inválida — use algo como 1080 x 1920")
 	}

@@ -28,6 +28,7 @@ shot_frame :: proc() {
 		}
 		// -shotvert: projeto 9:16 (ANTES do -shottall: a coluna abraça o canvas na proporção atual)
 		// -shottall: captura com o player em coluna (altura toda à direita)
+		for a in os.args do if a == "-shotblur" && shot_out != nil do canvas_blur = true
 		for a in os.args do if a == "-shotvert" && shot_out != nil { set_proj_ar(9.0/16); ar_auto = false }
 		for a in os.args do if a == "-shottall" && shot_out != nil && !pv_tall do toggle_pv_tall()
 	}

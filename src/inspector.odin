@@ -271,6 +271,18 @@ inspector_controls :: proc(body: rl.Rectangle) -> f32 {
 				y += ROW_STEP
 			}
 		}
+		y += 12
+		txt("Tela (projeto)", x, y, FS_MD, TEXT)
+		y += 26
+		if ui_btn({x, y, w, 30}, canvas_blur ? "Desfoque de fundo: ligado" : "Desfoque de fundo: desligado", canvas_blur) {
+			canvas_blur = !canvas_blur
+			dirty = true
+		}
+		y += 38
+		if canvas_blur {
+			if inspector_row(16, "Força", x, y, w, &canvas_blur_amount, 0, 1, 100, 0, "%") do dirty = true
+			y += ROW_STEP
+		}
 	} else if insp_tab == 2 {
 		if c.is_img {
 			txt("Imagem não possui velocidade.", x, y + 8, FS_MD, MUTED)

@@ -105,6 +105,8 @@ dump_export_cli :: proc() -> bool {
 		toks := strings.fields(ln, context.temp_allocator)
 		if len(toks) == 0 do continue
 		switch toks[0] {
+		case "canvas_blur":
+			canvas_blur, canvas_blur_amount = canvas_blur_parse(toks)
 		case "res":
 			if len(toks) >= 3 {
 				res_w = strconv.parse_int(toks[1]) or_else res_w
@@ -1039,6 +1041,7 @@ export_concat_fit :: proc(fb: ^strings.Builder, segW, segH, W, H: int) {
 
 // clipe que PRECISA do canvas+overlay (PiP, fade, transição, texto, efeitos…).
 export_seg_needs_compose :: proc(i: int) -> bool {
+	if canvas_blur do return true
 	sg := segs[i]
 	c := &clips[sg.src]
 	if c.is_text do return true
@@ -1748,6 +1751,12 @@ export_build_args :: proc(out: string, gpu: bool, dry := false) -> (args: [dynam
 			export_emit_glitch(&fb, glitch_t0[i], glitch_d[i])
 			export_emit_edit_scale(&fb, edit_in_mode[i], edit_in_t0[i], edit_in_d[i], true, true)
 			export_emit_edit_scale(&fb, edit_out_mode[i], edit_out_t0[i], edit_out_d[i], false, true)
+			if canvas_blur && canvas_base_seg(i) {
+				// Branch the timed clip: cover the canvas, blur, then keep the original above.
+				fmt.sbprintf(&fb, ",split[cbfg%d][cbsrc%d];[cbsrc%d]scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,gblur=sigma=%.3f:steps=3[cbblur%d];", vc, vc, vc, W, H, W, H, canvas_blur_sigma()*f32(min(W,H)), vc)
+				fmt.sbprintf(&fb, "[%s][cbblur%d]overlay=0:0:enable='gte(t\\,%.3f)*lt(t\\,%.3f)':eof_action=pass[cbbase%d];[cbfg%d]null", vlabel, vc, start2, tend, vc, vc)
+				vlabel = fmt.tprintf("cbbase%d", vc)
+			}
 			fmt.sbprintf(&fb, "[v%d];", vc)
 			nb := fmt.tprintf("c%d", vc)
 			ox, oy := export_overlay_xy(sg.px, sg.py, slide_in_dx[i], slide_in_dy[i], slide_in_t0[i], slide_in_d[i], slide_out_dx[i], slide_out_dy[i], slide_out_t0[i], slide_out_d[i])
